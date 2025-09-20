@@ -1,7 +1,7 @@
 import asyncio
 from typing import Literal
 
-import d_back
+from d_back.server import WebSocketServer
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
@@ -21,12 +21,20 @@ class dworld(commands.Cog):
             identifier=257263088,
             force_registration=True,
         )
+        self.server = WebSocketServer(port=3000, host="localhost")
 
     @commands.command()
     async def startdzone(self, ctx):
-        """some very useful help text"""
+        """starts d-back server"""
         await ctx.send("starting d-back server...")
-        asyncio.create_task(d_back.start_server())
+
+        asyncio.create_task(self.server.start())
+
+    @commands.command()
+    async def stopdzone(self, ctx):
+        """stops d-back server"""
+        await ctx.send("stopping d-back server...")
+        await self.server.stop()
 
     async def cog_load(self) -> None:
         await super().cog_load()
@@ -35,10 +43,9 @@ class dworld(commands.Cog):
         # asyncio.create_task(d_back.start_server())
 
     async def cog_unload(self) -> None:
-        print("Stopping websockets server...")
-        # TODO: endpoint is not implemented
-        # await asyncio.to_thread(d_back.stop_server)
         await super().cog_unload()
+        print("Stopping websockets server...")
+        await self.server.stop()
 
     async def red_delete_data_for_user(
         self, *, requester: RequestType, user_id: int
