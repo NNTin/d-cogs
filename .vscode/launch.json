@@ -1,0 +1,29 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Activate Red Env",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "& (Get-Command \"$env:USERPROFILE/redenv/Scripts/Activate.ps1\")",
+            "cwd": "${cwd}"
+        },
+        {
+            "name": "Add Cog",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/InteractRed.ps1 -AddCog",
+            "cwd": "${cwd}"
+        },
+        {
+            "name": "Start Discord Bot",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/InteractRed.ps1 -Start",
+            "cwd": "${cwd}"
+        }
+    ]
+}

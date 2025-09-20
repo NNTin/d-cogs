@@ -1,0 +1,7 @@
+{
+    "AUTHOR" : "b6d",
+    "INSTALL_MSG" : "**Thank you for using my cogs.** Be aware you are installing a security nightmare. It opens a websocket server broadcasting all messages (will be fixed in future). Anyone can create their own implementation of the websocket client",
+    "NAME" : "d-cogs",
+    "SHORT" : "Cogs implementing d-back for d-zone",
+    "DESCRIPTION" : "The backend implementation of the websocket server for d-zone"
+}
