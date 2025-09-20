@@ -4,7 +4,7 @@
     easily incorporate it into your workflow (e.g. VSC launch.json).
 
   .PARAMETER redinstance
-    optional redinstance name, default = athenadev
+    optional redinstance name, default = dissentindev
     this assumes you have already run redbot-setup
 
   .PARAMETER AddCog
@@ -17,17 +17,17 @@
     <None>
 
   .NOTES
-    Version:        1.0
+    Version:        1.1
     Author:         Nguyen Tin
-    Creation Date:  2025-06-15
-    Purpose/Change: Interface to Red-DiscordBot
+    Creation Date:  2025-09-20
+    Purpose/Change: dev script is used for a new bot
     
   .EXAMPLE
     .\StartBot.ps1
 #>
 
 param (
-    [string]$redinstance = "athenadev",
+    [string]$redinstance = "dissentindev",
     [switch]$AddCog,
     [switch]$Start
 )
@@ -35,7 +35,7 @@ param (
 #------------------------------------------------------ Preparation -----------------------------------------------#
 
 # python path to red environment
-$python = "$env:USERPROFILE\redenv\Scripts\python.exe"
+$python = "$env:USERPROFILE\dissentinenv\Scripts\python.exe"
 
 #-------------------------------------------------------- Functions -----------------------------------------------#
 

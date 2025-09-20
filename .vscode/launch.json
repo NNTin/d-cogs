@@ -8,7 +8,7 @@
             "name": "Activate Red Env",
             "type": "PowerShell",
             "request": "launch",
-            "script": "& (Get-Command \"$env:USERPROFILE/redenv/Scripts/Activate.ps1\")",
+            "script": "& (Get-Command \"$env:USERPROFILE/dissentinenv/Scripts/Activate.ps1\")",
             "cwd": "${cwd}"
         },
         {
