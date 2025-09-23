@@ -1,6 +1,7 @@
 import asyncio
 from typing import Literal
 
+import aiohttp
 from d_back.server import WebSocketServer
 from redbot.core import commands
 from redbot.core.bot import Red
@@ -25,10 +26,14 @@ class dworld(commands.Cog):
         # Set up default config structure
         default_guild = {
             "passworded": False,
+            "client_id": None,
+            "client_secret": None,
         }
         self.config.register_guild(**default_guild)
 
         # Cache for password protection states
+        # this dict is needed because _get_server_data is a sync method
+        # method is a sync method because it is required by d-back
         self._password_cache = {}
 
         self.server = WebSocketServer(port=3000, host="localhost")
@@ -38,11 +43,47 @@ class dworld(commands.Cog):
         self.server.on_get_user_data(self._get_user_data)
         self.server.on_validate_discord_user(self._validate_discord_user)
 
-    @commands.command()
+    @commands.group(name="dworldconfig", invoke_without_command=True)
+    async def dworldconfig(self, ctx):
+        """Configuration commands for d-world"""
+        await ctx.send_help(ctx.command)
+
+    @dworldconfig.command(name="setclientid")
+    async def setclientid(self, ctx, client_id: str):
+        """Set the OAuth2 client ID for this server"""
+        if not ctx.guild:
+            await ctx.send("This command can only be used in a server.")
+            return
+
+        await self.config.guild(ctx.guild).client_id.set(client_id)
+        await ctx.send("OAuth2 client ID has been set for this server.")
+
+    @dworldconfig.command(name="setclientsecret")
+    async def setclientsecret(self, ctx, client_secret: str):
+        """Set the OAuth2 client secret for this server"""
+        if not ctx.guild:
+            await ctx.send("This command can only be used in a server.")
+            return
+
+        await self.config.guild(ctx.guild).client_secret.set(client_secret)
+        await ctx.send("OAuth2 client secret has been set for this server.")
+
+    @dworldconfig.command(name="toggleprotection")
     async def toggleprotection(self, ctx):
         """toggle the password protection for the d-back server"""
         if not ctx.guild:
             await ctx.send("This command can only be used in a server.")
+            return
+
+        # Check if OAuth2 credentials are set
+        client_id = await self.config.guild(ctx.guild).client_id()
+        client_secret = await self.config.guild(ctx.guild).client_secret()
+
+        if not client_id or not client_secret:
+            await ctx.send(
+                "❌ OAuth2 client ID and client secret must be set before enabling password protection.\n"
+                "Use `dworldconfig setclientid <id>` and `dworldconfig setclientsecret <secret>` first."
+            )
             return
 
         # Get current password protection state
@@ -232,9 +273,8 @@ class dworld(commands.Cog):
         """Validate Discord OAuth2 user and check if they have access to the server."""
         try:
             if not user_info or not user_info.get("id"):
+                print("[AUTH] No user info provided")
                 return False
-
-            user_id = int(user_info["id"])
 
             # Get the guild
             guild = self.bot.get_guild(int(discord_server_id))
@@ -242,19 +282,62 @@ class dworld(commands.Cog):
                 print(f"[AUTH] Guild {discord_server_id} not found")
                 return False
 
-            # Check if the user is a member of the guild
+            # Get OAuth2 credentials from config
+            client_id = await self.config.guild(guild).client_id()
+            client_secret = await self.config.guild(guild).client_secret()
+
+            if not client_id or not client_secret:
+                print(
+                    f"[AUTH] OAuth2 credentials not configured for guild {guild.name}"
+                )
+                return False
+
+            # Validate the token with Discord API
+            async with aiohttp.ClientSession() as session:
+                # First, validate the token by getting user info
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                }
+
+                # Get user info from Discord API
+                async with session.get(
+                    "https://discord.com/api/users/@me", headers=headers
+                ) as resp:
+                    if resp.status != 200:
+                        print(
+                            f"[AUTH] Token validation failed with status {resp.status}"
+                        )
+                        return False
+
+                    api_user_info = await resp.json()
+
+                    # Verify the user ID matches
+                    if api_user_info.get("id") != user_info.get("id"):
+                        print(
+                            "[AUTH] User ID mismatch between token and provided user info"
+                        )
+                        return False
+
+            # Check membership using bot's perspective
+            # -> no need to check the users guilds, because the bot shares servers with the user
+            # -> scope "guilds" is not needed
+            user_id = int(user_info["id"])
             member = guild.get_member(user_id)
             if not member:
                 print(
-                    f"[AUTH] User {user_info.get('username')} ({user_id}) is not a member of guild {guild.name}"
+                    f"[AUTH] User {user_info.get('username')} ({user_id}) not found in guild {guild.name}"
                 )
                 return False
 
             print(
-                f"[AUTH] User {member.display_name} ({user_id}) validated for guild {guild.name}"
+                f"[AUTH] User {member.display_name} ({user_id}) successfully validated for guild {guild.name}"
             )
             return True
 
+        except aiohttp.ClientError as e:
+            print(f"[ERROR] HTTP error during Discord API validation: {e}")
+            return False
         except Exception as e:
             print(f"[ERROR] Discord user validation failed: {e}")
             return False
