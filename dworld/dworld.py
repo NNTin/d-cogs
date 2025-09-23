@@ -26,10 +26,13 @@ class dworld(commands.Cog):
         # Set up default config structure
         default_guild = {
             "passworded": False,
+        }
+        default_global = {
             "client_id": None,
             "client_secret": None,
         }
         self.config.register_guild(**default_guild)
+        self.config.register_global(**default_global)
 
         # Cache for password protection states
         # this dict is needed because _get_server_data is a sync method
@@ -42,6 +45,7 @@ class dworld(commands.Cog):
         self.server.on_get_server_data(self._get_server_data)
         self.server.on_get_user_data(self._get_user_data)
         self.server.on_validate_discord_user(self._validate_discord_user)
+        self.server.on_get_client_id(self._get_client_id)
 
     @commands.group(name="dworldconfig", invoke_without_command=True)
     async def dworldconfig(self, ctx):
@@ -50,23 +54,76 @@ class dworld(commands.Cog):
 
     @dworldconfig.command(name="setclientid")
     async def setclientid(self, ctx, client_id: str):
-        """Set the OAuth2 client ID for this server"""
-        if not ctx.guild:
-            await ctx.send("This command can only be used in a server.")
-            return
+        """Set the global OAuth2 client ID"""
+        # Get the old client ID for comparison
+        old_client_id = await self.config.client_id()
 
-        await self.config.guild(ctx.guild).client_id.set(client_id)
-        await ctx.send("OAuth2 client ID has been set for this server.")
+        await self.config.client_id.set(client_id)
+        await ctx.send("Global OAuth2 client ID has been set.")
+
+        # If the client ID changed and there are connected clients, broadcast the update to all servers
+        if old_client_id != client_id:
+            # Broadcast to all connected servers
+            for guild in self.bot.guilds:
+                await self.server.broadcast_client_id_update(str(guild.id), client_id)
+            await ctx.send(
+                "✅ Client ID update has been sent to all connected clients across all servers."
+            )
+
+    @dworldconfig.command(name="updateclientid")
+    async def updateclientid(self, ctx, client_id: str):
+        """Update the global OAuth2 client ID and notify all connected clients"""
+        # Set the new client ID
+        await self.config.client_id.set(client_id)
+
+        # Broadcast the update to all connected clients across all servers
+        for guild in self.bot.guilds:
+            await self.server.broadcast_client_id_update(str(guild.id), client_id)
+
+        await ctx.send(
+            f"✅ Global OAuth2 client ID has been updated to `{client_id}` and sent to all connected clients."
+        )
 
     @dworldconfig.command(name="setclientsecret")
     async def setclientsecret(self, ctx, client_secret: str):
-        """Set the OAuth2 client secret for this server"""
-        if not ctx.guild:
-            await ctx.send("This command can only be used in a server.")
-            return
+        """Set the global OAuth2 client secret"""
+        await self.config.client_secret.set(client_secret)
+        await ctx.send("Global OAuth2 client secret has been set.")
 
-        await self.config.guild(ctx.guild).client_secret.set(client_secret)
-        await ctx.send("OAuth2 client secret has been set for this server.")
+    @dworldconfig.command(name="status")
+    async def status(self, ctx):
+        """Show the current global OAuth2 configuration and server status"""
+        client_id = await self.config.client_id()
+        client_secret = await self.config.client_secret()
+
+        # Check if credentials are set
+        client_id_status = "✅ Set" if client_id else "❌ Not set"
+        client_secret_status = "✅ Set" if client_secret else "❌ Not set"
+
+        # Count passworded servers
+        passworded_servers = []
+        for guild in self.bot.guilds:
+            if self._password_cache.get(guild.id, False):
+                passworded_servers.append(guild.name)
+
+        status_msg = f"""**D-World Configuration Status**
+
+**Global OAuth2 Settings:**
+• Client ID: {client_id_status}
+• Client Secret: {client_secret_status}
+
+**Server Protection:**
+• Protected servers: {len(passworded_servers)}
+• Server list: {", ".join(passworded_servers) if passworded_servers else "None"}
+
+**WebSocket Server:**
+• Status: Running on port 3000
+• Connected clients: {len(self.server.connections)}"""
+
+        if client_id:
+            status_msg += f"\n• Current Client ID: `{client_id}`"
+
+        await ctx.send(status_msg)
 
     @dworldconfig.command(name="toggleprotection")
     async def toggleprotection(self, ctx):
@@ -75,13 +132,13 @@ class dworld(commands.Cog):
             await ctx.send("This command can only be used in a server.")
             return
 
-        # Check if OAuth2 credentials are set
-        client_id = await self.config.guild(ctx.guild).client_id()
-        client_secret = await self.config.guild(ctx.guild).client_secret()
+        # Check if OAuth2 credentials are set (global config)
+        client_id = await self.config.client_id()
+        client_secret = await self.config.client_secret()
 
         if not client_id or not client_secret:
             await ctx.send(
-                "❌ OAuth2 client ID and client secret must be set before enabling password protection.\n"
+                "❌ Global OAuth2 client ID and client secret must be set before enabling password protection.\n"
                 "Use `dworldconfig setclientid <id>` and `dworldconfig setclientsecret <secret>` first."
             )
             return
@@ -103,12 +160,17 @@ class dworld(commands.Cog):
     async def cog_load(self) -> None:
         await super().cog_load()
 
+        # TODO: The fucking fuck, my default configuration is not loaded.
+
         # Load password protection states into cache
+        print(f"Loading password cache for {len(self.bot.guilds)} guilds...")
         for guild in self.bot.guilds:
-            passworded = await self.config.guild(guild).passworded()
-            self._password_cache[guild.id] = passworded
+            passworded_state = await self.config.guild(guild).passworded()
+            self._password_cache[guild.id] = passworded_state
+            print(f"Guild {guild.name} ({guild.id}): passworded = {passworded_state}")
 
         print("Starting websockets server...")
+
         asyncio.create_task(self.server.start())
 
     async def cog_unload(self) -> None:
@@ -186,6 +248,13 @@ class dworld(commands.Cog):
             }
 
         return user_data
+
+    async def _get_client_id(self, discord_server_id: str = None):
+        """Get the global OAuth2 client ID."""
+        # Since client_id is now global, we don't need the discord_server_id parameter
+        # but we keep it for compatibility with the callback interface
+        client_id = await self.config.client_id()
+        return client_id
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):
@@ -282,14 +351,12 @@ class dworld(commands.Cog):
                 print(f"[AUTH] Guild {discord_server_id} not found")
                 return False
 
-            # Get OAuth2 credentials from config
-            client_id = await self.config.guild(guild).client_id()
-            client_secret = await self.config.guild(guild).client_secret()
+            # Get OAuth2 credentials from config (now global)
+            client_id = await self.config.client_id()
+            client_secret = await self.config.client_secret()
 
             if not client_id or not client_secret:
-                print(
-                    f"[AUTH] OAuth2 credentials not configured for guild {guild.name}"
-                )
+                print("[AUTH] Global OAuth2 credentials not configured")
                 return False
 
             # Validate the token with Discord API
