@@ -21,20 +21,52 @@ class dworld(commands.Cog):
             identifier=257263088,
             force_registration=True,
         )
+
+        # Set up default config structure
+        default_guild = {
+            "passworded": False,
+        }
+        self.config.register_guild(**default_guild)
+
+        # Cache for password protection states
+        self._password_cache = {}
+
         self.server = WebSocketServer(port=3000, host="localhost")
 
         # Register callbacks for server and user data
         self.server.on_get_server_data(self._get_server_data)
         self.server.on_get_user_data(self._get_user_data)
+        self.server.on_validate_discord_user(self._validate_discord_user)
 
     @commands.command()
-    async def stopdzone(self, ctx):
-        """stops d-back server"""
-        await ctx.send("stopping d-back server...")
-        await self.server.stop()
+    async def toggleprotection(self, ctx):
+        """toggle the password protection for the d-back server"""
+        if not ctx.guild:
+            await ctx.send("This command can only be used in a server.")
+            return
+
+        # Get current password protection state
+        current_state = await self.config.guild(ctx.guild).passworded()
+
+        # Toggle the state
+        new_state = not current_state
+        await self.config.guild(ctx.guild).passworded.set(new_state)
+
+        # Update the cache
+        self._password_cache[ctx.guild.id] = new_state
+
+        # Send confirmation message
+        status = "enabled" if new_state else "disabled"
+        await ctx.send(f"Password protection has been **{status}** for this server.")
 
     async def cog_load(self) -> None:
         await super().cog_load()
+
+        # Load password protection states into cache
+        for guild in self.bot.guilds:
+            passworded = await self.config.guild(guild).passworded()
+            self._password_cache[guild.id] = passworded
+
         print("Starting websockets server...")
         asyncio.create_task(self.server.start())
 
@@ -54,11 +86,14 @@ class dworld(commands.Cog):
 
         # Iterate through all guilds the bot is connected to
         for guild in self.bot.guilds:
+            # Get the password protection state from cache (defaults to False if not set)
+            passworded = self._password_cache.get(guild.id, False)
+
             server_data[str(guild.id)] = {
                 "id": guild.name[:1].upper(),  # Use first letter of guild name as ID
                 "name": guild.name,
                 "default": False,  # Could be made configurable
-                "passworded": False,  # Could be made configurable
+                "passworded": passworded,
             }
 
         # If we have guilds, make the first one default
@@ -190,3 +225,36 @@ class dworld(commands.Cog):
             message=message.content,
             channel=str(message.channel.id),
         )
+
+    async def _validate_discord_user(
+        self, token: str, user_info: dict, discord_server_id: str
+    ) -> bool:
+        """Validate Discord OAuth2 user and check if they have access to the server."""
+        try:
+            if not user_info or not user_info.get("id"):
+                return False
+
+            user_id = int(user_info["id"])
+
+            # Get the guild
+            guild = self.bot.get_guild(int(discord_server_id))
+            if not guild:
+                print(f"[AUTH] Guild {discord_server_id} not found")
+                return False
+
+            # Check if the user is a member of the guild
+            member = guild.get_member(user_id)
+            if not member:
+                print(
+                    f"[AUTH] User {user_info.get('username')} ({user_id}) is not a member of guild {guild.name}"
+                )
+                return False
+
+            print(
+                f"[AUTH] User {member.display_name} ({user_id}) validated for guild {guild.name}"
+            )
+            return True
+
+        except Exception as e:
+            print(f"[ERROR] Discord user validation failed: {e}")
+            return False
