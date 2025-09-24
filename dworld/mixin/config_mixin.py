@@ -8,6 +8,7 @@ class ConfigMixin:
         # Set up default config structure
         default_guild = {
             "passworded": False,
+            "ignoreOfflineMembers": False,
         }
         default_global = {
             "client_id": None,
@@ -75,9 +76,12 @@ class ConfigMixin:
 
         # Count passworded servers
         passworded_servers = []
+        ignore_offline_servers = []
         for guild in self.bot.guilds:
             if await self.config.guild(guild).passworded():
                 passworded_servers.append(guild.name)
+            if await self.config.guild(guild).ignoreOfflineMembers():
+                ignore_offline_servers.append(guild.name)
 
         status_msg = f"""**D-World Configuration Status**
 
@@ -88,6 +92,10 @@ class ConfigMixin:
 **Server Protection:**
 • Protected servers: {len(passworded_servers)}
 • Server list: {", ".join(passworded_servers) if passworded_servers else "None"}
+
+**Offline Member Filtering:**
+• Servers ignoring offline members: {len(ignore_offline_servers)}
+• Server list: {", ".join(ignore_offline_servers) if ignore_offline_servers else "None"}
 
 **WebSocket Server:**
 • Status: Running on port 3000
@@ -127,3 +135,24 @@ class ConfigMixin:
         # Send confirmation message
         status = "enabled" if new_state else "disabled"
         await ctx.send(f"Password protection has been **{status}** for this server.")
+
+    @commands.mod()
+    @dworldconfig.command(name="toggleignoreoffline")
+    async def toggleignoreoffline(self, ctx):
+        """Toggle whether to ignore offline members in user data for this server"""
+        if not ctx.guild:
+            await ctx.send("This command can only be used in a server.")
+            return
+
+        # Get current state
+        current_state = await self.config.guild(ctx.guild).ignoreOfflineMembers()
+
+        # Toggle the state
+        new_state = not current_state
+        await self.config.guild(ctx.guild).ignoreOfflineMembers.set(new_state)
+
+        # Send confirmation message
+        status = "enabled" if new_state else "disabled"
+        await ctx.send(
+            f"Ignoring offline members has been **{status}** for this server."
+        )

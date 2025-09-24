@@ -120,6 +120,9 @@ class WebsocketServerMixin:
         if not guild:
             return {}
 
+        # Check if we should ignore offline members for this guild
+        ignore_offline = await self.config.guild(guild).ignoreOfflineMembers()
+
         user_data = {}
 
         # Iterate through all members in the guild
@@ -127,11 +130,6 @@ class WebsocketServerMixin:
             # Skip bots if desired (uncomment next line to skip bots)
             # if member.bot:
             #     continue
-
-            # Get the member's top role color
-            role_color = "#ffffff"  # default white
-            if member.top_role and member.top_role.color.value != 0:
-                role_color = f"#{member.top_role.color.value:06x}"
 
             # Map Discord status to the expected format
             status_mapping = {
@@ -143,6 +141,15 @@ class WebsocketServerMixin:
             }
 
             status = status_mapping.get(str(member.status), "offline")
+
+            # Skip offline members if ignoreOfflineMembers is enabled
+            if ignore_offline and status == "offline":
+                continue
+
+            # Get the member's top role color
+            role_color = "#ffffff"  # default white
+            if member.top_role and member.top_role.color.value != 0:
+                role_color = f"#{member.top_role.color.value:06x}"
 
             user_data[str(member.id)] = {
                 "uid": str(member.id),

@@ -4,7 +4,7 @@
     "short": "d-world implements d-back",
     "description": "d-world drives the d-zone simulation on https://nntin.xyz/d-zone",
     "end_user_data_statement": "This cog does not persistently store any data or metadata about users.",
-    "install_msg": "this cog is really early in its development. It will broadcast all messages. Anyone can write their own websocket client implementation and log all the events. So this is a security risk nightmare. When Discord's OAuth2 is implemented it will be safe to use. Use it only experimentally.",
+    "install_msg": "This cog is really early in its development. There is no backwards compatibility. OAuth2 is supported if you want to secure your discord server against outsiders.",
     "author": [
         "Tin Nguyen"
     ],
