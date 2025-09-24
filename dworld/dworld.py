@@ -31,9 +31,6 @@ class dworld(ConfigMixin, WebsocketServerMixin, ListenerMixin, commands.Cog):
     async def cog_load(self) -> None:
         await super().cog_load()
 
-        # spawning task for loading cache to not block cog_load
-        asyncio.create_task(self.load_cache())
-
         print("Starting websockets server...")
         asyncio.create_task(self.server.start())
 

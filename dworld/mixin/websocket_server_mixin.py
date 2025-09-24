@@ -8,12 +8,9 @@ class WebsocketServerMixin:
     def __init__(self):
         self.server = WebSocketServer(port=3000, host="localhost")
 
-        # Register callbacks for server and user data
-        # sync methods -> turn them into async in d_back python module
+        # Register callbacks for d-back server
         self.server.on_get_server_data(self._get_server_data)
         self.server.on_get_user_data(self._get_user_data)
-
-        # async methods
         self.server.on_validate_discord_user(self._validate_discord_user)
         self.server.on_get_client_id(self._get_client_id)
 
@@ -90,14 +87,14 @@ class WebsocketServerMixin:
             print(f"[ERROR] Discord user validation failed: {e}")
             return False
 
-    def _get_server_data(self):
+    async def _get_server_data(self):
         """Get server data in the format expected by the WebSocket server."""
         server_data = {}
 
         # Iterate through all guilds the bot is connected to
         for guild in self.bot.guilds:
-            # Get the password protection state from cache (defaults to False if not set)
-            passworded = self._password_cache.get(guild.id, False)
+            # Get the password protection state (defaults to False if not set)
+            passworded = await self.config.guild(guild).passworded()
 
             server_data[str(guild.id)] = {
                 "id": guild.name[:1].upper(),  # Use first letter of guild name as ID
@@ -113,7 +110,7 @@ class WebsocketServerMixin:
 
         return server_data
 
-    def _get_user_data(self, discord_server_id: str = None):
+    async def _get_user_data(self, discord_server_id: str = None):
         """Get user data for a specific guild in the format expected by the WebSocket server."""
         if not discord_server_id:
             return {}

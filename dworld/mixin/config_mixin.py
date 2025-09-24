@@ -16,11 +16,6 @@ class ConfigMixin:
         self.config.register_guild(**default_guild)
         self.config.register_global(**default_global)
 
-        # Cache for password protection states
-        # this dict is needed because _get_server_data is a sync method
-        # method is a sync method because it is required by d-back
-        self._password_cache = {}
-
     @commands.group(name="dworldconfig", invoke_without_command=True)
     async def dworldconfig(self, ctx):
         """Configuration commands for d-world"""
@@ -81,7 +76,7 @@ class ConfigMixin:
         # Count passworded servers
         passworded_servers = []
         for guild in self.bot.guilds:
-            if self._password_cache.get(guild.id, False):
+            if await self.config.guild(guild).passworded():
                 passworded_servers.append(guild.name)
 
         status_msg = f"""**D-World Configuration Status**
@@ -129,20 +124,6 @@ class ConfigMixin:
         new_state = not current_state
         await self.config.guild(ctx.guild).passworded.set(new_state)
 
-        # Update the cache
-        self._password_cache[ctx.guild.id] = new_state
-
         # Send confirmation message
         status = "enabled" if new_state else "disabled"
         await ctx.send(f"Password protection has been **{status}** for this server.")
-
-    async def load_cache(self):
-        # guilds is available when red is ready
-        await self.bot.wait_until_red_ready()
-
-        # Load password protection states into cache
-        print(f"Loading password cache for {len(self.bot.guilds)} guilds...")
-        for guild in self.bot.guilds:
-            passworded_state = await self.config.guild(guild).passworded()
-            self._password_cache[guild.id] = passworded_state
-            print(f"Guild {guild.name} ({guild.id}): passworded = {passworded_state}")
