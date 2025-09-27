@@ -9,7 +9,7 @@
         "Tin Nguyen"
     ],
     "required_cogs": {},
-    "requirements": ["d-back==0.0.11"],
+    "requirements": ["d-back==0.0.12"],
     "tags": [
         "d-zone",
         "websockets",
