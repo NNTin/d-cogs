@@ -1,6 +1,7 @@
-import aiohttp
-import os
 import mimetypes
+import os
+
+import aiohttp
 from d_back.server import WebSocketServer
 
 
@@ -172,10 +173,10 @@ class WebsocketServerMixin:
 
     async def _handle_static_request(self, path: str):
         """Handle static file requests with optional custom d-zone version serving.
-        
+
         Args:
             path: The requested static file path
-            
+
         Returns:
             None: Let default handler process the request
             (content_type, content): Return custom content
@@ -183,36 +184,32 @@ class WebsocketServerMixin:
         try:
             # Get the configured static file path
             static_file_path = await self.config.static_file_path()
-            
+
             # If no static path is configured, let default handler take over
             if not static_file_path:
                 return None
-            
+
             # Normalize the path and ensure it's safe
-            path = path.lstrip('/')
-            if '..' in path or path.startswith('/'):
+            path = path.lstrip("/")
+            if ".." in path or path.startswith("/"):
                 # Security: reject paths with .. or absolute paths
                 return None
-            
+
+            # Default file serving
+            if path == "/" or path == "":
+                path = "index.html"
+
             # Construct the full file path
             full_path = os.path.join(static_file_path, path)
-            
-            # Check if file exists and is readable
-            if not os.path.isfile(full_path):
-                return None
-            
+
             # Get the MIME type
             content_type, _ = mimetypes.guess_type(full_path)
             if content_type is None:
-                content_type = 'application/octet-stream'
-            
-            # Read and return the file content
-            with open(full_path, 'rb') as f:
-                content = f.read()
-            
+                content_type = "application/octet-stream"
+
             print(f"[STATIC] Serving custom file: {path} -> {full_path}")
-            return (content_type, content)
-            
+            return (content_type, full_path)
+
         except Exception as e:
             print(f"[ERROR] Static file serving error for {path}: {e}")
             return None
