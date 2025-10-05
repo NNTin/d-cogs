@@ -1,4 +1,6 @@
 import aiohttp
+import os
+import mimetypes
 from d_back.server import WebSocketServer
 
 
@@ -13,6 +15,7 @@ class WebsocketServerMixin:
         self.server.on_get_user_data(self._get_user_data)
         self.server.on_validate_discord_user(self._validate_discord_user)
         self.server.on_get_client_id(self._get_client_id)
+        self.server.on_static_request(self._handle_static_request)
 
     async def _validate_discord_user(
         self, token: str, user_info: dict, discord_server_id: str
@@ -166,3 +169,50 @@ class WebsocketServerMixin:
         # but we keep it for compatibility with the callback interface
         client_id = await self.config.client_id()
         return client_id
+
+    async def _handle_static_request(self, path: str):
+        """Handle static file requests with optional custom d-zone version serving.
+        
+        Args:
+            path: The requested static file path
+            
+        Returns:
+            None: Let default handler process the request
+            (content_type, content): Return custom content
+        """
+        try:
+            # Get the configured static file path
+            static_file_path = await self.config.static_file_path()
+            
+            # If no static path is configured, let default handler take over
+            if not static_file_path:
+                return None
+            
+            # Normalize the path and ensure it's safe
+            path = path.lstrip('/')
+            if '..' in path or path.startswith('/'):
+                # Security: reject paths with .. or absolute paths
+                return None
+            
+            # Construct the full file path
+            full_path = os.path.join(static_file_path, path)
+            
+            # Check if file exists and is readable
+            if not os.path.isfile(full_path):
+                return None
+            
+            # Get the MIME type
+            content_type, _ = mimetypes.guess_type(full_path)
+            if content_type is None:
+                content_type = 'application/octet-stream'
+            
+            # Read and return the file content
+            with open(full_path, 'rb') as f:
+                content = f.read()
+            
+            print(f"[STATIC] Serving custom file: {path} -> {full_path}")
+            return (content_type, content)
+            
+        except Exception as e:
+            print(f"[ERROR] Static file serving error for {path}: {e}")
+            return None
