@@ -6,11 +6,12 @@ from redbot.core.bot import Red
 from redbot.core.config import Config
 
 from .mixin import ConfigMixin, ListenerMixin, WebsocketServerMixin
+from .dashboard_integration import DWorldDashboardIntegration
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
 
-class dworld(ConfigMixin, WebsocketServerMixin, ListenerMixin, commands.Cog):
+class dworld(ConfigMixin, WebsocketServerMixin, ListenerMixin, DWorldDashboardIntegration, commands.Cog):
     """
     d-world implements d-back
     """

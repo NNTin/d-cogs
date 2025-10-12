@@ -20,7 +20,7 @@ import typing
 import discord
 import wtforms
 from redbot.core import commands
-from ..dashboard_utils import dashboard_page, DashboardIntegration
+from ..dashboard_utils import dashboard_page, DashboardIntegration, get_form_helpers
 
 
 class DWorldDashboardIntegration(DashboardIntegration):
@@ -65,7 +65,7 @@ class DWorldDashboardIntegration(DashboardIntegration):
             return {
                 "status": 0,
                 "error_code": 403,
-                "error_message": "You must be a moderator or bot owner to access this page.",
+                "message": "You must be a moderator or bot owner to access this page.",
             }
         
         # Load current configuration
@@ -83,11 +83,19 @@ class DWorldDashboardIntegration(DashboardIntegration):
             return {
                 "status": 0,
                 "error_code": 500,
-                "error_message": f"Failed to load configuration: {str(e)}",
+                "message": f"Failed to load configuration: {str(e)}",
             }
         
         # Extract form utilities from kwargs
-        Form = kwargs.get("Form")
+        Form, _, _ = get_form_helpers(kwargs)
+        
+        # Defensive check: ensure Form utilities are available
+        if not Form:
+            return {
+                "status": 0,
+                "error_code": 500,
+                "message": "Form utilities are unavailable. Ensure the dashboard is properly configured.",
+            }
         
         # Define GuildSettingsForm class
         class GuildSettingsForm(Form):
@@ -116,20 +124,29 @@ class DWorldDashboardIntegration(DashboardIntegration):
         # Handle guild form submission
         if guild_form.validate_on_submit():
             try:
-                # Update guild config
-                await config.passworded.set(guild_form.passworded.data)
-                await config.ignoreOfflineMembers.set(guild_form.ignoreOfflineMembers.data)
-                
-                # Update local variables to reflect new values
-                passworded = guild_form.passworded.data
-                ignoreOfflineMembers = guild_form.ignoreOfflineMembers.data
-                
-                # Set success message
-                result_html = """
-                <div style="background-color: #2d7d46; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
-                    <strong>✓ Success!</strong> Guild settings have been updated.
-                </div>
-                """
+                # Check if enabling password protection without OAuth2 credentials
+                if guild_form.passworded.data and (not client_id or not client_secret):
+                    result_html = """
+                    <div style="background-color: #a02d2d; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
+                        <strong>✗ Error!</strong> Cannot enable password protection without global OAuth2 credentials. 
+                        Please configure Client ID and Client Secret first (Owner only).
+                    </div>
+                    """
+                else:
+                    # Update guild config
+                    await config.passworded.set(guild_form.passworded.data)
+                    await config.ignoreOfflineMembers.set(guild_form.ignoreOfflineMembers.data)
+                    
+                    # Update local variables to reflect new values
+                    passworded = guild_form.passworded.data
+                    ignoreOfflineMembers = guild_form.ignoreOfflineMembers.data
+                    
+                    # Set success message
+                    result_html = """
+                    <div style="background-color: #2d7d46; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
+                        <strong>✓ Success!</strong> Guild settings have been updated.
+                    </div>
+                    """
             except Exception as e:
                 # Set error message
                 result_html = f"""
