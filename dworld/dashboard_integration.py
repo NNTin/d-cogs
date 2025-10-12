@@ -102,7 +102,7 @@ class DWorldDashboardIntegration(DashboardIntegration):
         is_mod = False
 
         if member:
-            is_mod = await self.bot.is_mod(member)
+            is_mod = member.guild_permissions.manage_guild
 
         # User must be either owner or mod to access this page
         if not is_owner and not is_mod:
@@ -546,20 +546,17 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 <div class="config-item">
                     <span class="config-label">Static File Path:</span>
                     <span class="config-value {{ 'set' if static_file_path else 'not-set' }}">
-                        {{ static_file_path if static_file_path else 'Not set' }}
+                        {{ '••••••••' if static_file_path else 'Not set' }}
                     </span>
                 </div>
             </div>
             
-            <h3>Update Global Settings (Owner Only)</h3>
-            <div class="form-section">
-                {% if not is_owner %}
-                <div class="owner-only-notice">
-                    ⚠️ Only bot owners can modify global settings.
+            {% if is_owner %}
+                <h3>Update Global Settings (Owner Only)</h3>
+                <div class="form-section">
+                    {{ global_form|safe }}
                 </div>
-                {% endif %}
-                {{ global_form|safe }}
-            </div>
+            {% endif %}
         </div>
         """
 
