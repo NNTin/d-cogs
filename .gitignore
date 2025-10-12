@@ -89,6 +89,3 @@ ENV/
 .ropeproject
 *.xml
 .idea/nntin-cogs.iml
-
-# Red-DiscordBot
-/.data/

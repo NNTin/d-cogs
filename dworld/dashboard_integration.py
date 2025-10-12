@@ -17,41 +17,43 @@ Requirements:
 """
 
 import typing
+
 import discord
 import wtforms
 from redbot.core import commands
-from ..dashboard_utils import dashboard_page, DashboardIntegration, get_form_helpers
+
+from .utils import DashboardIntegration, dashboard_page, get_form_helpers
 
 
 class DWorldDashboardIntegration(DashboardIntegration):
     """
     Dashboard integration for the dworld cog.
-    
+
     This class provides web-based configuration management for the dworld cog,
     exposing both guild-level and global settings through a unified dashboard page.
     """
-    
+
     # Type hint for the bot attribute (for type checking purposes)
     bot: commands.Bot
-    
+
     async def _get_accessible_guilds(
         self, user: discord.User
     ) -> typing.List[typing.Tuple[str, str]]:
         """
         Get a list of guilds accessible to the user based on their permissions.
-        
+
         Bot owners can access all guilds. Other users can only access guilds
         where they have moderator permissions or higher.
-        
+
         Args:
             user: The Discord user to check permissions for
-            
+
         Returns:
             List of tuples containing (guild_id, guild_name) sorted by guild name
         """
         accessible_guilds = []
         is_owner = user.id in self.bot.owner_ids
-        
+
         for guild in self.bot.guilds:
             # Bot owners can access all guilds
             if is_owner:
@@ -62,34 +64,35 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 if member:
                     # Check owner, admin, manage_guild, or mod permissions
                     # Check less expensive conditions first to avoid unnecessary async calls
-                    if (member == guild.owner or 
-                        member.guild_permissions.manage_guild):
+                    if member == guild.owner or member.guild_permissions.manage_guild:
                         accessible_guilds.append((str(guild.id), guild.name))
                     elif await self.bot.is_admin(member):
                         accessible_guilds.append((str(guild.id), guild.name))
                     elif await self.bot.is_mod(member):
                         accessible_guilds.append((str(guild.id), guild.name))
-        
+
         # Sort by guild name (second element of tuple)
         accessible_guilds.sort(key=lambda x: x[1])
-        
+
         return accessible_guilds
-    
-    @dashboard_page(name="guild", description="D-World Configuration", methods=("GET", "POST"))
+
+    @dashboard_page(
+        name="guild", description="D-World Configuration", methods=("GET", "POST")
+    )
     async def dashboard_guild_settings(
         self, user: discord.User, guild: discord.Guild, **kwargs
     ) -> typing.Dict[str, typing.Any]:
         """
         Dashboard page for D-World configuration.
-        
+
         Handles both guild-level settings (password protection, offline member filtering)
         and global settings (OAuth2 credentials, static file path).
-        
+
         Args:
             user: The Discord user accessing the dashboard
             guild: The Discord guild being configured
             **kwargs: Additional arguments provided by the dashboard (includes Form, etc.)
-            
+
         Returns:
             Dictionary with status and web_content for rendering
         """
@@ -97,10 +100,10 @@ class DWorldDashboardIntegration(DashboardIntegration):
         is_owner = user.id in self.bot.owner_ids
         member = guild.get_member(user.id)
         is_mod = False
-        
+
         if member:
             is_mod = await self.bot.is_mod(member)
-        
+
         # User must be either owner or mod to access this page
         if not is_owner and not is_mod:
             return {
@@ -108,14 +111,14 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 "error_code": 403,
                 "message": "You must be a moderator or bot owner to access this page.",
             }
-        
+
         # Load current configuration
         try:
             # Guild configuration
             config = self.config.guild(guild)
             passworded = await config.passworded()
             ignoreOfflineMembers = await config.ignoreOfflineMembers()
-            
+
             # Global configuration
             client_id = await self.config.client_id()
             client_secret = await self.config.client_secret()
@@ -126,10 +129,10 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 "error_code": 500,
                 "message": f"Failed to load configuration: {str(e)}",
             }
-        
+
         # Extract form utilities from kwargs
         Form, _, _ = get_form_helpers(kwargs)
-        
+
         # Defensive check: ensure Form utilities are available
         if not Form:
             return {
@@ -137,65 +140,71 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 "error_code": 500,
                 "message": "Form utilities are unavailable. Ensure the dashboard is properly configured.",
             }
-        
+
         # Define GuildSelectorForm class
         class GuildSelectorForm(Form):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, prefix="guild_selector_", **kwargs)
-            
+
             guild_selector = wtforms.SelectField(
                 "Select Guild",
                 choices=[],
-                render_kw={"class": "form-select", "onchange": "this.form.submit()"}
+                render_kw={"class": "form-select", "onchange": "this.form.submit()"},
             )
             submit_selector = wtforms.SubmitField("Switch Guild")
-        
+
         # Define GuildSettingsForm class
         class GuildSettingsForm(Form):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, prefix="guild_settings_", **kwargs)
-            
+
             passworded = wtforms.BooleanField("Password Protection")
             ignoreOfflineMembers = wtforms.BooleanField("Ignore Offline Members")
             submit = wtforms.SubmitField("Save Guild Settings")
-        
+
         # Define GlobalSettingsForm class
         class GlobalSettingsForm(Form):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, prefix="global_settings_", **kwargs)
-            
-            client_id = wtforms.StringField("OAuth2 Client ID", validators=[wtforms.validators.Optional()])
-            client_secret = wtforms.StringField("OAuth2 Client Secret", validators=[wtforms.validators.Optional()])
-            static_file_path = wtforms.StringField("Static File Path", validators=[wtforms.validators.Optional()])
+
+            client_id = wtforms.StringField(
+                "OAuth2 Client ID", validators=[wtforms.validators.Optional()]
+            )
+            client_secret = wtforms.StringField(
+                "OAuth2 Client Secret", validators=[wtforms.validators.Optional()]
+            )
+            static_file_path = wtforms.StringField(
+                "Static File Path", validators=[wtforms.validators.Optional()]
+            )
             submit = wtforms.SubmitField("Save Global Settings")
-        
+
         # Instantiate forms
         guild_form = GuildSettingsForm()
         global_form = GlobalSettingsForm()
         result_html = ""
-        
+
         # Get accessible guilds and instantiate guild selector form
         accessible_guilds = await self._get_accessible_guilds(user)
-        
+
         # Ensure current guild is always present in the list (defensive check)
         accessible_guilds_dict = {gid: gname for gid, gname in accessible_guilds}
         accessible_guilds_dict[str(guild.id)] = guild.name
-        
+
         # Convert back to list and sort by guild name
         accessible_guilds = list(accessible_guilds_dict.items())
         accessible_guilds.sort(key=lambda x: x[1])
-        
+
         guild_selector_form = GuildSelectorForm()
         guild_selector_form.guild_selector.choices = accessible_guilds
         guild_selector_form.guild_selector.data = str(guild.id)
         accessible_guilds_count = len(accessible_guilds)
-        
+
         # Handle guild selector form submission
         if guild_selector_form.validate_on_submit():
             try:
                 selected_guild_id = int(guild_selector_form.guild_selector.data)
                 selected_guild = self.bot.get_guild(selected_guild_id)
-                
+
                 if not selected_guild:
                     result_html = """
                     <div style="background-color: #a02d2d; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
@@ -216,7 +225,7 @@ class DWorldDashboardIntegration(DashboardIntegration):
                                 <p>If you are not redirected, <a href="/dashboard/third_parties/dworld/guild/{selected_guild_id}" style="color: #5865f2;">click here</a>.</p>
                             </div>
                             """
-                        }
+                        },
                     }
             except (ValueError, TypeError) as e:
                 result_html = f"""
@@ -224,7 +233,7 @@ class DWorldDashboardIntegration(DashboardIntegration):
                     <strong>✗ Error!</strong> Invalid guild selection: {str(e)}
                 </div>
                 """
-        
+
         # Handle guild form submission
         if guild_form.validate_on_submit():
             try:
@@ -239,12 +248,14 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 else:
                     # Update guild config
                     await config.passworded.set(guild_form.passworded.data)
-                    await config.ignoreOfflineMembers.set(guild_form.ignoreOfflineMembers.data)
-                    
+                    await config.ignoreOfflineMembers.set(
+                        guild_form.ignoreOfflineMembers.data
+                    )
+
                     # Update local variables to reflect new values
                     passworded = guild_form.passworded.data
                     ignoreOfflineMembers = guild_form.ignoreOfflineMembers.data
-                    
+
                     # Set success message
                     result_html = """
                     <div style="background-color: #2d7d46; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
@@ -258,7 +269,7 @@ class DWorldDashboardIntegration(DashboardIntegration):
                     <strong>✗ Error!</strong> Failed to update guild settings: {str(e)}
                 </div>
                 """
-        
+
         # Handle global form submission
         if global_form.validate_on_submit():
             # Check if user is owner
@@ -272,14 +283,18 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 try:
                     # Update global config
                     await self.config.client_id.set(global_form.client_id.data or None)
-                    await self.config.client_secret.set(global_form.client_secret.data or None)
-                    await self.config.static_file_path.set(global_form.static_file_path.data or None)
-                    
+                    await self.config.client_secret.set(
+                        global_form.client_secret.data or None
+                    )
+                    await self.config.static_file_path.set(
+                        global_form.static_file_path.data or None
+                    )
+
                     # Update local variables to reflect new values
                     client_id = global_form.client_id.data or None
                     client_secret = global_form.client_secret.data or None
                     static_file_path = global_form.static_file_path.data or None
-                    
+
                     # Set success message
                     result_html = """
                     <div style="background-color: #2d7d46; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
@@ -293,15 +308,15 @@ class DWorldDashboardIntegration(DashboardIntegration):
                         <strong>✗ Error!</strong> Failed to update global settings: {str(e)}
                     </div>
                     """
-        
+
         # Populate forms with current values
         guild_form.passworded.data = passworded
         guild_form.ignoreOfflineMembers.data = ignoreOfflineMembers
-        
+
         global_form.client_id.data = client_id or ""
         global_form.client_secret.data = client_secret or ""
         global_form.static_file_path.data = static_file_path or ""
-        
+
         # Build HTML response
         html_content = """
         <style>
@@ -547,7 +562,7 @@ class DWorldDashboardIntegration(DashboardIntegration):
             </div>
         </div>
         """
-        
+
         # Return response dictionary
         return {
             "status": 0,

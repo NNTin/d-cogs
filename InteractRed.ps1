@@ -10,8 +10,11 @@
   .PARAMETER AddCog
     Flag: if enabled adds a new cog via Cog-Cookiecutter
 
-  .PARAMETER Start
+  .PARAMETER StartBot
     Flag: if enabled starts a Red-DiscordBot instance
+
+  .PARAMETER StartDashboard
+    Flag: if enabled starts a Red-Web-Dashboard instance
 
   .OUTPUTS
     <None>
@@ -29,13 +32,15 @@
 param (
     [string]$redinstance = "dissentindev",
     [switch]$AddCog,
-    [switch]$Start
+    [switch]$StartBot,
+    [switch]$StartDashboard
 )
 
 #------------------------------------------------------ Preparation -----------------------------------------------#
 
 # python path to red environment
 $python = "$env:USERPROFILE\dissentinenv\Scripts\python.exe"
+$pythonDashboard = "$env:USERPROFILE\reddashboardenv\Scripts\python.exe"
 
 #-------------------------------------------------------- Functions -----------------------------------------------#
 
@@ -58,6 +63,10 @@ if ($AddCog) {
     Assert-Errors $python -m cookiecutter https://github.com/Cog-Creators/cog-cookiecutter
 }
 
-if ($Start) {
-    Assert-Errors $python -m redbot $redinstance --dev
+if ($StartBot) {
+    Assert-Errors $python -m redbot $redinstance --dev --rpc
+}
+
+if ($StartDashboard) {
+    Assert-Errors $pythonDashboard -m reddash
 }

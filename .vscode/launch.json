@@ -12,6 +12,13 @@
             "cwd": "${cwd}"
         },
         {
+            "name": "Activate Red Dashboard Env",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "& (Get-Command \"$env:USERPROFILE/reddashboardenv/Scripts/Activate.ps1\")",
+            "cwd": "${cwd}"
+        },
+        {
             "name": "Add Cog",
             "type": "PowerShell",
             "request": "launch",
@@ -22,7 +29,14 @@
             "name": "Start Discord Bot",
             "type": "PowerShell",
             "request": "launch",
-            "script": "${workspaceFolder}/InteractRed.ps1 -Start",
+            "script": "${workspaceFolder}/InteractRed.ps1 -StartBot",
+            "cwd": "${cwd}"
+        },
+        {
+            "name": "Start Dashboard",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/InteractRed.ps1 -StartDashboard",
             "cwd": "${cwd}"
         }
     ]
