@@ -9,6 +9,7 @@ class ConfigMixin:
         default_guild = {
             "passworded": False,
             "ignoreOfflineMembers": False,
+            "members": {"user_id": {"role_color": "#ffffff", "custom_message": "foo"}},
         }
         default_global = {
             "client_id": None,
@@ -75,7 +76,9 @@ class ConfigMixin:
         # Check if credentials are set
         client_id_status = "✅ Set" if client_id else "❌ Not set"
         client_secret_status = "✅ Set" if client_secret else "❌ Not set"
-        static_path_status = f"✅ Set to `{static_file_path}`" if static_file_path else "❌ Not set"
+        static_path_status = (
+            f"✅ Set to `{static_file_path}`" if static_file_path else "❌ Not set"
+        )
 
         # Count passworded servers
         passworded_servers = []
@@ -167,23 +170,23 @@ class ConfigMixin:
     @dworldconfig.command(name="setstaticpath")
     async def setstaticpath(self, ctx, path: str = None):
         """Set the static file path for custom d-zone version serving
-        
+
         Args:
             path: Path to static files directory (None to disable)
         """
         await self.config.static_file_path.set(path)
-        
+
         if path:
             await ctx.send(f"Static file path has been set to: `{path}`")
         else:
             await ctx.send("Static file serving has been disabled.")
-    
+
     @commands.is_owner()
     @dworldconfig.command(name="getstaticpath")
     async def getstaticpath(self, ctx):
         """Get the current static file path configuration"""
         path = await self.config.static_file_path()
-        
+
         if path:
             await ctx.send(f"Current static file path: `{path}`")
         else:

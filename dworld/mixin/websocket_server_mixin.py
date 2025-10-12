@@ -150,10 +150,8 @@ class WebsocketServerMixin:
             if ignore_offline and status == "offline":
                 continue
 
-            # Get the member's top role color
-            role_color = "#ffffff"  # default white
-            if member.top_role and member.top_role.color.value != 0:
-                role_color = f"#{member.top_role.color.value:06x}"
+            # Get the member's role color (checks config first, then Discord role)
+            role_color = await self._get_member_role_color(member)
 
             user_data[str(member.id)] = {
                 "uid": str(member.id),
@@ -170,6 +168,33 @@ class WebsocketServerMixin:
         # but we keep it for compatibility with the callback interface
         client_id = await self.config.client_id()
         return client_id
+
+    async def _get_member_role_color(self, member):
+        """Get the role color for a member, checking custom config first.
+
+        Args:
+            member: Discord member object
+
+        Returns:
+            str: Hex color string (e.g., "#ffffff")
+        """
+        # Check guild config for custom role color
+        members_config = await self.config.guild(member.guild).members()
+        member_id_str = str(member.id)
+
+        # If member has a custom role_color in config, use it
+        if (
+            member_id_str in members_config
+            and "role_color" in members_config[member_id_str]
+        ):
+            return members_config[member_id_str]["role_color"]
+
+        # Fall back to Discord's role color
+        if member.top_role and member.top_role.color.value != 0:
+            return f"#{member.top_role.color.value:06x}"
+
+        # Default to white
+        return "#ffffff"
 
     async def _handle_static_request(self, path: str):
         """Handle static file requests with optional custom d-zone version serving.
