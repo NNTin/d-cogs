@@ -632,7 +632,7 @@ class DWorldDashboardIntegration(DashboardIntegration):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, prefix="regular_user_", **kwargs)
 
-            role_color = wtforms.StringField(
+            role_color = wtforms.fields.ColorField(
                 "Your Role Color",
                 validators=[
                     wtforms.validators.Regexp(
@@ -642,7 +642,11 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 ],
             )
             custom_message = wtforms.StringField(
-                "Your Custom Message", validators=[wtforms.validators.Optional()]
+                "Your Custom Message",
+                validators=[
+                    wtforms.validators.Optional(),
+                    wtforms.validators.Length(max=512),
+                ],
             )
             submit = wtforms.SubmitField("Save My Settings")
 
@@ -654,7 +658,7 @@ class DWorldDashboardIntegration(DashboardIntegration):
             member_selector = wtforms.SelectField(
                 "Select Member", choices=[], render_kw={"class": "form-select"}
             )
-            role_color = wtforms.StringField(
+            role_color = wtforms.fields.ColorField(
                 "Role Color",
                 validators=[
                     wtforms.validators.Regexp(
@@ -664,7 +668,11 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 ],
             )
             custom_message = wtforms.StringField(
-                "Custom Message", validators=[wtforms.validators.Optional()]
+                "Custom Message",
+                validators=[
+                    wtforms.validators.Optional(),
+                    wtforms.validators.Length(max=512),
+                ],
             )
             submit = wtforms.SubmitField("Save Member Settings")
 
@@ -701,9 +709,10 @@ class DWorldDashboardIntegration(DashboardIntegration):
                         """
                     else:
                         # Update member config
+                        custom_msg = privileged_form.custom_message.data or ""
                         members_config[selected_member_id] = {
                             "role_color": privileged_form.role_color.data,
-                            "custom_message": privileged_form.custom_message.data or "",
+                            "custom_message": custom_msg.strip(),
                         }
                         await self.config.guild(guild).members.set(members_config)
 
@@ -892,15 +901,16 @@ class DWorldDashboardIntegration(DashboardIntegration):
             if regular_form.validate_on_submit():
                 try:
                     # Update user's config
+                    custom_msg = regular_form.custom_message.data or ""
                     members_config[str(user.id)] = {
                         "role_color": regular_form.role_color.data,
-                        "custom_message": regular_form.custom_message.data or "",
+                        "custom_message": custom_msg.strip(),
                     }
                     await self.config.guild(guild).members.set(members_config)
 
                     # Update display values
                     current_role_color = regular_form.role_color.data
-                    current_custom_message = regular_form.custom_message.data or ""
+                    current_custom_message = custom_msg.strip()
 
                     result_html = """
                     <div style="background-color: #2d7d46; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
