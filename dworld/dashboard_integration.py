@@ -77,7 +77,9 @@ class DWorldDashboardIntegration(DashboardIntegration):
         return accessible_guilds
 
     @dashboard_page(
-        name="guild", description="D-World Configuration", methods=("GET", "POST")
+        name="configuration",
+        description="D-World Configuration (manage server)",
+        methods=("GET", "POST"),
     )
     async def dashboard_guild_settings(
         self, user: discord.User, guild: discord.Guild, **kwargs
@@ -581,7 +583,9 @@ class DWorldDashboardIntegration(DashboardIntegration):
         }
 
     @dashboard_page(
-        name="members", description="Member Customization", methods=("GET", "POST")
+        name="customization",
+        description="Member Customization (any guild member)",
+        methods=("GET", "POST"),
     )
     async def dashboard_member_customization(
         self, user: discord.User, guild: discord.Guild, **kwargs
@@ -645,7 +649,7 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 "Your Custom Message",
                 validators=[
                     wtforms.validators.Optional(),
-                    wtforms.validators.Length(max=512),
+                    wtforms.validators.Length(max=20),
                 ],
             )
             submit = wtforms.SubmitField("Save My Settings")
@@ -671,7 +675,7 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 "Custom Message",
                 validators=[
                     wtforms.validators.Optional(),
-                    wtforms.validators.Length(max=512),
+                    wtforms.validators.Length(max=20),
                 ],
             )
             submit = wtforms.SubmitField("Save Member Settings")
@@ -715,6 +719,22 @@ class DWorldDashboardIntegration(DashboardIntegration):
                             "custom_message": custom_msg.strip(),
                         }
                         await self.config.guild(guild).members.set(members_config)
+
+                        # send updates to all connected d-zone clients
+                        # this broadcast is only done for the privileged form (owner/mod)
+                        await self.server.broadcast_presence(
+                            server=str(guild.id),
+                            uid=str(selected_member.id),
+                            status=selected_member.status,
+                            username=selected_member.display_name,
+                            role_color=privileged_form.role_color.data,
+                        )
+                        await self.server.broadcast_message(
+                            server=str(guild.id),
+                            uid=str(selected_member.id),
+                            message=custom_msg.strip(),
+                            channel="123",
+                        )
 
                         result_html = f"""
                         <div style="background-color: #2d7d46; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
@@ -858,19 +878,6 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 
                 {{ result_html|safe }}
                 
-                <h2>Your Current Settings</h2>
-                <div class="config-section">
-                    <div class="config-item">
-                        <span class="config-label">Your Role Color:</span>
-                        <span class="config-value">{{ current_role_color }}</span>
-                        <span class="color-preview" style="background-color: {{ current_role_color }};"></span>
-                    </div>
-                    <div class="config-item">
-                        <span class="config-label">Your Custom Message:</span>
-                        <span class="config-value">{{ current_custom_message if current_custom_message else 'Not set' }}</span>
-                    </div>
-                </div>
-                
                 <h2>Edit Member Settings</h2>
                 <div class="form-section">
                     <p class="explanation-text">As a moderator/owner, you can customize any member's settings</p>
@@ -888,8 +895,6 @@ class DWorldDashboardIntegration(DashboardIntegration):
                     "guild_name": guild.name,
                     "user_name": user.name,
                     "has_privilege": has_privilege,
-                    "current_role_color": current_role_color,
-                    "current_custom_message": current_custom_message,
                 },
             }
 
@@ -1033,19 +1038,6 @@ class DWorldDashboardIntegration(DashboardIntegration):
                 
                 {{ result_html|safe }}
                 
-                <h2>Your Current Settings</h2>
-                <div class="config-section">
-                    <div class="config-item">
-                        <span class="config-label">Your Role Color:</span>
-                        <span class="config-value">{{ current_role_color }}</span>
-                        <span class="color-preview" style="background-color: {{ current_role_color }};"></span>
-                    </div>
-                    <div class="config-item">
-                        <span class="config-label">Your Custom Message:</span>
-                        <span class="config-value">{{ current_custom_message if current_custom_message else 'Not set' }}</span>
-                    </div>
-                </div>
-                
                 <h2>Edit Your Settings</h2>
                 <div class="form-section">
                     <p class="explanation-text">You can customize your own role color and custom message</p>
@@ -1063,7 +1055,5 @@ class DWorldDashboardIntegration(DashboardIntegration):
                     "guild_name": guild.name,
                     "user_name": user.name,
                     "has_privilege": has_privilege,
-                    "current_role_color": current_role_color,
-                    "current_custom_message": current_custom_message,
                 },
             }
