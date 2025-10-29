@@ -7,6 +7,7 @@ import wtforms
 from redbot.core import commands
 
 from ...utils import DashboardIntegration, get_form_helpers
+from ..common_styles import get_common_styles
 
 
 class CustomizationPage(DashboardIntegration):
@@ -51,7 +52,7 @@ class CustomizationPage(DashboardIntegration):
             }
 
         # Extract form utilities from kwargs
-        Form, _, _ = get_form_helpers(kwargs)
+        Form, _, Pagination = get_form_helpers(kwargs)
 
         # Defensive check: ensure Form utilities are available
         if not Form:
@@ -60,6 +61,11 @@ class CustomizationPage(DashboardIntegration):
                 "error_code": 500,
                 "message": "Form utilities are unavailable. Ensure the dashboard is properly configured.",
             }
+
+        # Get search query and page number for member filtering
+        search_query = kwargs.get("search", "").lower()
+        page = int(kwargs.get("page", 1))
+        per_page = 50  # Show 50 members per page
 
         # Define RegularUserForm class
         class RegularUserForm(Form):
@@ -118,12 +124,35 @@ class CustomizationPage(DashboardIntegration):
         current_custom_message = user_settings.get("custom_message", "")
 
         if has_privilege:
-            # Populate member dropdown
+            # Populate member dropdown with search and pagination
             filtered_members = [m for m in guild.members if not m.bot]
+
+            # Apply search filter if query provided
+            if search_query:
+                filtered_members = [
+                    m
+                    for m in filtered_members
+                    if search_query in m.display_name.lower()
+                    or search_query in m.name.lower()
+                    or search_query in str(m.id)
+                ]
+
+            # Sort members by display name
+            filtered_members.sort(key=lambda m: m.display_name.lower())
+
+            # Apply pagination
+            total_members = len(filtered_members)
+            total_pages = (total_members + per_page - 1) // per_page
+            page = max(1, min(page, total_pages))  # Clamp page to valid range
+
+            start_idx = (page - 1) * per_page
+            end_idx = start_idx + per_page
+            paginated_members = filtered_members[start_idx:end_idx]
+
+            # Create choices for the current page
             member_choices = [
-                (str(m.id), f"{m.display_name} ({m.name})") for m in filtered_members
+                (str(m.id), f"{m.display_name} ({m.name})") for m in paginated_members
             ]
-            member_choices.sort(key=lambda x: x[1])
 
             # Instantiate privileged form
             privileged_form = PrivilegedUserForm()
@@ -150,12 +179,24 @@ class CustomizationPage(DashboardIntegration):
                         }
                         await self.config.guild(guild).members.set(members_config)
 
+                        # Map Discord status to string for WebSocket broadcast
+                        status_mapping = {
+                            "online": "online",
+                            "idle": "idle",
+                            "dnd": "dnd",
+                            "offline": "offline",
+                            "invisible": "offline",
+                        }
+                        status_str = status_mapping.get(
+                            str(selected_member.status), "offline"
+                        )
+
                         # send updates to all connected d-zone clients
                         # this broadcast is only done for the privileged form (owner/mod)
                         await self.server.broadcast_presence(
                             server=str(guild.id),
                             uid=str(selected_member.id),
-                            status=selected_member.status,
+                            status=status_str,
                             username=selected_member.display_name,
                             role_color=privileged_form.role_color.data,
                         )
@@ -189,129 +230,78 @@ class CustomizationPage(DashboardIntegration):
                 "custom_message", ""
             )
 
+            # Build pagination controls
+            # TODO: pagination is bugged and has no effect but due to time constraints and me
+            # not testing it in a big server yet I will revisit this later
+            pagination_html = ""
+            if total_pages > 1:
+                pagination_html = '<div class="pagination">'
+
+                # Previous button
+                if page > 1:
+                    prev_url = f"?page={page - 1}"
+                    if search_query:
+                        prev_url += f"&search={search_query}"
+                    pagination_html += f'<a href="{prev_url}">← Previous</a>'
+
+                # Page numbers
+                pagination_html += (
+                    f'<span class="current">Page {page} of {total_pages}</span>'
+                )
+
+                # Next button
+                if page < total_pages:
+                    next_url = f"?page={page + 1}"
+                    if search_query:
+                        next_url += f"&search={search_query}"
+                    pagination_html += f'<a href="{next_url}">Next →</a>'
+
+                pagination_html += "</div>"
+
             # Build HTML for privileged users
-            html_content = """
+            html_content = f"""
             <style>
-                .dworld-config {
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    background-color: #1e1f22;
-                    color: #e6e6e6;
-                    padding: 20px;
-                    border-radius: 8px;
-                }
-                .dworld-config h1 {
-                    color: #ffffff;
-                    border-bottom: 2px solid #5865f2;
-                    padding-bottom: 10px;
-                    margin-bottom: 20px;
-                }
-                .dworld-config h2 {
-                    color: #ffffff;
-                    margin-top: 30px;
-                    margin-bottom: 15px;
-                    font-size: 1.3em;
-                }
-                .config-section {
-                    background-color: #2b2e34;
-                    padding: 20px;
-                    border-radius: 5px;
-                    margin-bottom: 20px;
-                }
-                .config-item {
-                    margin-bottom: 12px;
-                    padding: 8px;
-                    background-color: #1e1f22;
-                    border-radius: 3px;
-                }
-                .config-label {
-                    font-weight: bold;
-                    color: #b9bbbe;
-                    display: inline-block;
-                    width: 180px;
-                }
-                .config-value {
-                    color: #ffffff;
-                    font-family: 'Courier New', monospace;
-                }
-                .color-preview {
-                    display: inline-block;
-                    width: 30px;
-                    height: 30px;
-                    border-radius: 3px;
-                    vertical-align: middle;
-                    margin-left: 10px;
-                    border: 2px solid #4f545c;
-                }
-                .form-section {
-                    background-color: #2b2e34;
-                    padding: 20px;
-                    border-radius: 5px;
-                    margin-bottom: 20px;
-                }
-                .form-section input[type="text"] {
-                    background-color: #1e1f22;
-                    color: #ffffff;
-                    border: 1px solid #4f545c;
-                    padding: 8px;
-                    border-radius: 3px;
-                    width: 100%;
-                    max-width: 400px;
-                }
-                .form-section label {
-                    color: #b9bbbe;
-                    display: block;
-                    margin-top: 12px;
-                    margin-bottom: 5px;
-                    font-weight: 500;
-                }
-                .form-section input[type="submit"] {
-                    background-color: #5865f2;
-                    color: #ffffff;
-                    border: none;
-                    padding: 10px 20px;
-                    border-radius: 3px;
-                    cursor: pointer;
-                    font-size: 14px;
-                    font-weight: 600;
-                    margin-top: 15px;
-                    transition: background-color 0.2s;
-                }
-                .form-section input[type="submit"]:hover {
-                    background-color: #4752c4;
-                }
-                .form-select {
-                    background-color: #1e1f22;
-                    color: #ffffff;
-                    border: 1px solid #4f545c;
-                    padding: 8px;
-                    border-radius: 3px;
-                    width: 100%;
-                    max-width: 400px;
-                    cursor: pointer;
-                    font-size: 14px;
-                }
-                .form-select:hover {
-                    border-color: #5865f2;
-                }
-                .explanation-text {
-                    color: #b9bbbe;
-                    font-style: italic;
-                    margin-bottom: 15px;
-                }
+                {get_common_styles()}
             </style>
             
             <div class="dworld-config">
-                <h1>Member Customization for {{ guild_name }}</h1>
+                <h1>Member Customization for {{{{ guild_name }}}}</h1>
                 <p style="color: #b9bbbe; margin-bottom: 30px;">
                     Configure member role colors and custom messages
                 </p>
                 
-                {{ result_html|safe }}
+                {{{{ result_html|safe }}}}
                 
                 <h2>Edit Member Settings</h2>
                 <div class="form-section">
                     <p class="explanation-text">As a moderator/owner, you can customize any member's settings</p>
-                    {{ privileged_form|safe }}
+                    
+                    <div class="search-box">
+                        <label>Search Members:</label>
+                        <input type="text" id="member-search" placeholder="Search by name or ID..." value="{search_query or ""}" />
+                        <script>
+                            document.getElementById('member-search').addEventListener('keypress', function(e) {{
+                                if (e.key === 'Enter') {{
+                                    var query = e.target.value;
+                                    if (query) {{
+                                        window.location.href = '?search=' + encodeURIComponent(query);
+                                    }} else {{
+                                        window.location.href = '?';
+                                    }}
+                                }}
+                            }});
+                        </script>
+                    </div>
+                    
+                    {pagination_html}
+                    
+                    <p style="color: #b9bbbe; font-size: 0.9em;">
+                        Showing {{{{ {start_idx + 1} }}}} - {{{{ {min(end_idx, total_members)} }}}} of {{{{ {total_members} }}}} members
+                    </p>
+                    
+                    {{{{ privileged_form|safe }}}}
+                    
+                    {pagination_html}
                 </div>
             </div>
             """
@@ -364,114 +354,23 @@ class CustomizationPage(DashboardIntegration):
             regular_form.custom_message.data = current_custom_message
 
             # Build HTML for regular users
-            html_content = """
+            html_content = f"""
             <style>
-                .dworld-config {
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    background-color: #1e1f22;
-                    color: #e6e6e6;
-                    padding: 20px;
-                    border-radius: 8px;
-                }
-                .dworld-config h1 {
-                    color: #ffffff;
-                    border-bottom: 2px solid #5865f2;
-                    padding-bottom: 10px;
-                    margin-bottom: 20px;
-                }
-                .dworld-config h2 {
-                    color: #ffffff;
-                    margin-top: 30px;
-                    margin-bottom: 15px;
-                    font-size: 1.3em;
-                }
-                .config-section {
-                    background-color: #2b2e34;
-                    padding: 20px;
-                    border-radius: 5px;
-                    margin-bottom: 20px;
-                }
-                .config-item {
-                    margin-bottom: 12px;
-                    padding: 8px;
-                    background-color: #1e1f22;
-                    border-radius: 3px;
-                }
-                .config-label {
-                    font-weight: bold;
-                    color: #b9bbbe;
-                    display: inline-block;
-                    width: 180px;
-                }
-                .config-value {
-                    color: #ffffff;
-                    font-family: 'Courier New', monospace;
-                }
-                .color-preview {
-                    display: inline-block;
-                    width: 30px;
-                    height: 30px;
-                    border-radius: 3px;
-                    vertical-align: middle;
-                    margin-left: 10px;
-                    border: 2px solid #4f545c;
-                }
-                .form-section {
-                    background-color: #2b2e34;
-                    padding: 20px;
-                    border-radius: 5px;
-                    margin-bottom: 20px;
-                }
-                .form-section input[type="text"] {
-                    background-color: #1e1f22;
-                    color: #ffffff;
-                    border: 1px solid #4f545c;
-                    padding: 8px;
-                    border-radius: 3px;
-                    width: 100%;
-                    max-width: 400px;
-                }
-                .form-section label {
-                    color: #b9bbbe;
-                    display: block;
-                    margin-top: 12px;
-                    margin-bottom: 5px;
-                    font-weight: 500;
-                }
-                .form-section input[type="submit"] {
-                    background-color: #5865f2;
-                    color: #ffffff;
-                    border: none;
-                    padding: 10px 20px;
-                    border-radius: 3px;
-                    cursor: pointer;
-                    font-size: 14px;
-                    font-weight: 600;
-                    margin-top: 15px;
-                    transition: background-color 0.2s;
-                }
-                .form-section input[type="submit"]:hover {
-                    background-color: #4752c4;
-                }
-                .explanation-text {
-                    color: #b9bbbe;
-                    font-style: italic;
-                    margin-bottom: 15px;
-                }
+                {get_common_styles()}
             </style>
             
             <div class="dworld-config">
-                <h1>Member Customization for {{ guild_name }}</h1>
+                <h1>Member Customization for {{{{ guild_name }}}}</h1>
                 <p style="color: #b9bbbe; margin-bottom: 30px;">
                     Configure your role color and custom message
                 </p>
                 
-                {{ result_html|safe }}
+                {{{{ result_html|safe }}}}
                 
                 <h2>Edit Your Settings</h2>
                 <div class="form-section">
                     <p class="explanation-text">You can customize your own role color and custom message</p>
-                    {{ regular_form|safe }}
+                    {{{{ regular_form|safe }}}}
                 </div>
             </div>
             """

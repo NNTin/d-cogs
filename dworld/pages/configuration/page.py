@@ -7,6 +7,7 @@ import wtforms
 from redbot.core import commands
 
 from ...utils import DashboardIntegration, get_form_helpers
+from ..common_styles import get_common_styles
 
 
 class ConfigurationPage(DashboardIntegration):
@@ -295,245 +296,132 @@ class ConfigurationPage(DashboardIntegration):
         global_form.static_file_path.data = static_file_path or ""
 
         # Build HTML response
-        html_content = """
+        html_content = f"""
         <style>
-            .dworld-config {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                background-color: #1e1f22;
-                color: #e6e6e6;
-                padding: 20px;
-                border-radius: 8px;
-            }
-            .guild-selector-section {
+            {get_common_styles()}
+            .guild-selector-section {{{{
                 background-color: #2b2e34;
                 padding: 15px;
                 border-radius: 5px;
                 margin-bottom: 20px;
                 border: 2px solid #5865f2;
-            }
-            .guild-selector-section h3 {
+            }}}}
+            .guild-selector-section h3 {{{{
                 color: #ffffff;
                 margin-top: 0;
                 margin-bottom: 10px;
                 font-size: 1.2em;
-            }
-            .guild-selector-section p {
+            }}}}
+            .guild-selector-section p {{{{
                 color: #b9bbbe;
                 margin: 5px 0;
                 font-size: 0.9em;
-            }
-            .form-select {
-                background-color: #1e1f22;
-                color: #ffffff;
-                border: 1px solid #4f545c;
-                padding: 8px;
-                border-radius: 3px;
-                width: 100%;
-                max-width: 400px;
-                cursor: pointer;
-                font-size: 14px;
-                margin: 10px 0;
-            }
-            .form-select:hover {
-                border-color: #5865f2;
-            }
-            .form-select:focus {
+            }}}}
+            .form-select:focus {{{{
                 outline: none;
                 border-color: #5865f2;
                 box-shadow: 0 0 0 2px rgba(88, 101, 242, 0.2);
-            }
-            .guild-info-text {
+            }}}}
+            .guild-info-text {{{{
                 color: #72767d;
                 font-size: 0.85em;
                 font-style: italic;
                 margin-top: 5px;
-            }
-            .single-guild-notice {
+            }}}}
+            .single-guild-notice {{{{
                 background-color: #2d7d46;
                 color: #ffffff;
                 padding: 10px;
                 border-radius: 3px;
                 margin-top: 10px;
-            }
-            .dworld-config h1 {
-                color: #ffffff;
-                border-bottom: 2px solid #5865f2;
-                padding-bottom: 10px;
-                margin-bottom: 20px;
-            }
-            .dworld-config h2 {
-                color: #ffffff;
-                margin-top: 30px;
-                margin-bottom: 15px;
-                font-size: 1.3em;
-            }
-            .dworld-config h3 {
+            }}}}
+            .dworld-config h3 {{{{
                 color: #b9bbbe;
                 margin-top: 25px;
                 margin-bottom: 10px;
                 font-size: 1.1em;
-            }
-            .config-section {
-                background-color: #2b2e34;
-                padding: 20px;
-                border-radius: 5px;
-                margin-bottom: 20px;
-            }
-            .config-item {
-                margin-bottom: 12px;
-                padding: 8px;
-                background-color: #1e1f22;
-                border-radius: 3px;
-            }
-            .config-label {
-                font-weight: bold;
-                color: #b9bbbe;
-                display: inline-block;
-                width: 180px;
-            }
-            .config-value {
-                color: #ffffff;
-                font-family: 'Courier New', monospace;
-            }
-            .config-value.enabled {
-                color: #3ba55d;
-            }
-            .config-value.disabled {
-                color: #ed4245;
-            }
-            .config-value.set {
-                color: #3ba55d;
-            }
-            .config-value.not-set {
-                color: #ed4245;
-            }
-            .form-section {
-                background-color: #2b2e34;
-                padding: 20px;
-                border-radius: 5px;
-                margin-bottom: 20px;
-            }
-            .form-section input[type="text"],
-            .form-section input[type="checkbox"] {
-                margin: 8px 0;
-            }
-            .form-section input[type="text"] {
-                background-color: #1e1f22;
-                color: #ffffff;
-                border: 1px solid #4f545c;
-                padding: 8px;
-                border-radius: 3px;
-                width: 100%;
-                max-width: 400px;
-            }
-            .form-section input[type="checkbox"] {
-                width: 20px;
-                height: 20px;
-                cursor: pointer;
-            }
-            .form-section label {
-                color: #b9bbbe;
-                display: block;
-                margin-top: 12px;
-                margin-bottom: 5px;
-                font-weight: 500;
-            }
-            .form-section input[type="submit"] {
-                background-color: #5865f2;
-                color: #ffffff;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 3px;
-                cursor: pointer;
-                font-size: 14px;
-                font-weight: 600;
-                margin-top: 15px;
-                transition: background-color 0.2s;
-            }
-            .form-section input[type="submit"]:hover {
-                background-color: #4752c4;
-            }
-            .owner-only-notice {
+            }}}}
+            .owner-only-notice {{{{
                 background-color: #faa61a;
                 color: #000000;
                 padding: 10px;
                 border-radius: 3px;
                 margin-bottom: 15px;
                 font-weight: 500;
-            }
+            }}}}
         </style>
         
         <div class="dworld-config">
             <!-- Guild Selector Section -->
             <div class="guild-selector-section">
-                <h3>🌍 Current Guild: {{ guild_name }}</h3>
-                <p>You have access to {{ accessible_guilds_count }} guild(s)</p>
-                {% if accessible_guilds_count > 1 %}
+                <h3>🌍 Current Guild: {{{{ guild_name }}}}</h3>
+                <p>You have access to {{{{ accessible_guilds_count }}}} guild(s)</p>
+                {{% if accessible_guilds_count > 1 %}}
                     <p class="guild-info-text">Select a different guild to view and edit its settings</p>
-                    {{ guild_selector_form|safe }}
-                {% else %}
+                    {{{{ guild_selector_form|safe }}}}
+                {{% else %}}
                     <div class="single-guild-notice">
                         ℹ️ You have access to only this guild
                     </div>
-                {% endif %}
+                {{% endif %}}
             </div>
             
             <h1>D-World Configuration</h1>
             <p style="color: #b9bbbe; margin-bottom: 30px;">
-                Configure D-World settings for <strong style="color: #ffffff;">{{ guild_name }}</strong>
+                Configure D-World settings for <strong style="color: #ffffff;">{{{{ guild_name }}}}</strong>
             </p>
             
-            {{ result_html|safe }}
+            {{{{ result_html|safe }}}}
             
             <h2>Current Guild Settings</h2>
             <div class="config-section">
                 <div class="config-item">
                     <span class="config-label">Password Protection:</span>
-                    <span class="config-value {{ 'enabled' if passworded else 'disabled' }}">
-                        {{ '✓ Enabled' if passworded else '✗ Disabled' }}
+                    <span class="config-value {{{{ 'enabled' if passworded else 'disabled' }}}}">
+                        {{{{ '✓ Enabled' if passworded else '✗ Disabled' }}}}
                     </span>
                 </div>
                 <div class="config-item">
                     <span class="config-label">Ignore Offline Members:</span>
-                    <span class="config-value {{ 'enabled' if ignoreOfflineMembers else 'disabled' }}">
-                        {{ '✓ Enabled' if ignoreOfflineMembers else '✗ Disabled' }}
+                    <span class="config-value {{{{ 'enabled' if ignoreOfflineMembers else 'disabled' }}}}">
+                        {{{{ '✓ Enabled' if ignoreOfflineMembers else '✗ Disabled' }}}}
                     </span>
                 </div>
             </div>
             
             <h3>Update Guild Settings</h3>
             <div class="form-section">
-                {{ guild_form|safe }}
+                {{{{ guild_form|safe }}}}
             </div>
             
             <h2>Current Global Settings</h2>
             <div class="config-section">
                 <div class="config-item">
                     <span class="config-label">OAuth2 Client ID:</span>
-                    <span class="config-value {{ 'set' if client_id else 'not-set' }}">
-                        {{ client_id if client_id else 'Not set' }}
+                    <span class="config-value {{{{ 'set' if client_id else 'not-set' }}}}">
+                        {{{{ client_id if client_id else 'Not set' }}}}
                     </span>
                 </div>
                 <div class="config-item">
                     <span class="config-label">OAuth2 Client Secret:</span>
-                    <span class="config-value {{ 'set' if client_secret else 'not-set' }}">
-                        {{ '••••••••' if client_secret else 'Not set' }}
+                    <span class="config-value {{{{ 'set' if client_secret else 'not-set' }}}}">
+                        {{{{ '••••••••' if client_secret else 'Not set' }}}}
                     </span>
                 </div>
                 <div class="config-item">
                     <span class="config-label">Static File Path:</span>
-                    <span class="config-value {{ 'set' if static_file_path else 'not-set' }}">
-                        {{ '••••••••' if static_file_path else 'Not set' }}
+                    <span class="config-value {{{{ 'set' if static_file_path else 'not-set' }}}}">
+                        {{{{ '••••••••' if static_file_path else 'Not set' }}}}
                     </span>
                 </div>
             </div>
             
-            {% if is_owner %}
+            {{% if is_owner %}}
                 <h3>Update Global Settings (Owner Only)</h3>
                 <div class="form-section">
-                    {{ global_form|safe }}
+                    {{{{ global_form|safe }}}}
                 </div>
-            {% endif %}
+            {{% endif %}}
         </div>
         """
 
