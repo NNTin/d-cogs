@@ -1,0 +1,388 @@
+"""Customization dashboard page for D-World."""
+
+import typing
+
+import discord
+import wtforms
+from redbot.core import commands
+
+from ...utils import DashboardIntegration, get_form_helpers
+from ..common_styles import get_common_styles
+
+
+class CustomizationPage(DashboardIntegration):
+    """Dashboard page for member customization settings."""
+
+    # Type hints for attributes provided by parent cog
+    bot: commands.Bot
+    config: typing.Any
+    server: typing.Any
+
+    async def dashboard_member_customization(
+        self, user: discord.User, guild: discord.Guild, **kwargs
+    ) -> typing.Dict[str, typing.Any]:
+        """
+        Dashboard page for member customization (role colors and custom messages).
+
+        Regular users can edit their own settings. Privileged users (owner or manage_guild)
+        can select and edit any member's settings.
+
+        Args:
+            user: The Discord user accessing the dashboard
+            guild: The Discord guild being configured
+            **kwargs: Additional arguments provided by the dashboard (includes Form, etc.)
+
+        Returns:
+            Dictionary with status and web_content for rendering
+        """
+        # Permission checks
+        is_owner = user.id in self.bot.owner_ids
+        member = guild.get_member(user.id)
+        is_privileged = member.guild_permissions.manage_guild if member else False
+        has_privilege = is_owner or is_privileged
+
+        # Load current members configuration
+        try:
+            members_config = await self.config.guild(guild).members()
+        except Exception as e:
+            return {
+                "status": 0,
+                "error_code": 500,
+                "message": f"Failed to load member configuration: {str(e)}",
+            }
+
+        # Extract form utilities from kwargs
+        Form, _, Pagination = get_form_helpers(kwargs)
+
+        # Defensive check: ensure Form utilities are available
+        if not Form:
+            return {
+                "status": 0,
+                "error_code": 500,
+                "message": "Form utilities are unavailable. Ensure the dashboard is properly configured.",
+            }
+
+        # Get search query and page number for member filtering
+        search_query = kwargs.get("search", "").lower()
+        page = int(kwargs.get("page", 1))
+        per_page = 50  # Show 50 members per page
+
+        # Define RegularUserForm class
+        class RegularUserForm(Form):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, prefix="regular_user_", **kwargs)
+
+            role_color = wtforms.fields.ColorField(
+                "Your Role Color",
+                validators=[
+                    wtforms.validators.Regexp(
+                        r"^#[0-9A-Fa-f]{6}$",
+                        message="Color must be a valid hex color (e.g., #ffffff)",
+                    )
+                ],
+            )
+            custom_message = wtforms.StringField(
+                "Your Custom Message",
+                validators=[
+                    wtforms.validators.Optional(),
+                    wtforms.validators.Length(max=20),
+                ],
+            )
+            submit = wtforms.SubmitField("Save My Settings")
+
+        # Define PrivilegedUserForm class
+        class PrivilegedUserForm(Form):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, prefix="privileged_user_", **kwargs)
+
+            member_selector = wtforms.SelectField(
+                "Select Member", choices=[], render_kw={"class": "form-select"}
+            )
+            role_color = wtforms.fields.ColorField(
+                "Role Color",
+                validators=[
+                    wtforms.validators.Regexp(
+                        r"^#[0-9A-Fa-f]{6}$",
+                        message="Color must be a valid hex color (e.g., #ffffff)",
+                    )
+                ],
+            )
+            custom_message = wtforms.StringField(
+                "Custom Message",
+                validators=[
+                    wtforms.validators.Optional(),
+                    wtforms.validators.Length(max=20),
+                ],
+            )
+            submit = wtforms.SubmitField("Save Member Settings")
+
+        result_html = ""
+
+        # Get current user's settings for display
+        user_settings = members_config.get(str(user.id), {})
+        current_role_color = user_settings.get("role_color", "#ffffff")
+        current_custom_message = user_settings.get("custom_message", "")
+
+        if has_privilege:
+            # Populate member dropdown with search and pagination
+            filtered_members = [m for m in guild.members if not m.bot]
+
+            # Apply search filter if query provided
+            if search_query:
+                filtered_members = [
+                    m
+                    for m in filtered_members
+                    if search_query in m.display_name.lower()
+                    or search_query in m.name.lower()
+                    or search_query in str(m.id)
+                ]
+
+            # Sort members by display name
+            filtered_members.sort(key=lambda m: m.display_name.lower())
+
+            # Apply pagination
+            total_members = len(filtered_members)
+            total_pages = (total_members + per_page - 1) // per_page
+            page = max(1, min(page, total_pages))  # Clamp page to valid range
+
+            start_idx = (page - 1) * per_page
+            end_idx = start_idx + per_page
+            paginated_members = filtered_members[start_idx:end_idx]
+
+            # Create choices for the current page
+            member_choices = [
+                (str(m.id), f"{m.display_name} ({m.name})") for m in paginated_members
+            ]
+
+            # Instantiate privileged form
+            privileged_form = PrivilegedUserForm()
+            privileged_form.member_selector.choices = member_choices
+
+            # Handle form submission
+            if privileged_form.validate_on_submit():
+                try:
+                    selected_member_id = privileged_form.member_selector.data
+                    selected_member = guild.get_member(int(selected_member_id))
+
+                    if not selected_member:
+                        result_html = """
+                        <div style="background-color: #a02d2d; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
+                            <strong>✗ Error!</strong> Selected member not found in guild.
+                        </div>
+                        """
+                    else:
+                        # Update member config
+                        custom_msg = privileged_form.custom_message.data or ""
+                        members_config[selected_member_id] = {
+                            "role_color": privileged_form.role_color.data,
+                            "custom_message": custom_msg.strip(),
+                        }
+                        await self.config.guild(guild).members.set(members_config)
+
+                        # Map Discord status to string for WebSocket broadcast
+                        status_mapping = {
+                            "online": "online",
+                            "idle": "idle",
+                            "dnd": "dnd",
+                            "offline": "offline",
+                            "invisible": "offline",
+                        }
+                        status_str = status_mapping.get(
+                            str(selected_member.status), "offline"
+                        )
+
+                        # send updates to all connected d-zone clients
+                        # this broadcast is only done for the privileged form (owner/mod)
+                        await self.server.broadcast_presence(
+                            server=str(guild.id),
+                            uid=str(selected_member.id),
+                            status=status_str,
+                            username=selected_member.display_name,
+                            role_color=privileged_form.role_color.data,
+                        )
+                        await self.server.broadcast_message(
+                            server=str(guild.id),
+                            uid=str(selected_member.id),
+                            message=custom_msg.strip(),
+                            channel="123",
+                        )
+
+                        result_html = f"""
+                        <div style="background-color: #2d7d46; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
+                            <strong>✓ Success!</strong> Settings for {selected_member.display_name} have been updated.
+                        </div>
+                        """
+                except Exception as e:
+                    result_html = f"""
+                    <div style="background-color: #a02d2d; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
+                        <strong>✗ Error!</strong> Failed to update member settings: {str(e)}
+                    </div>
+                    """
+
+            # Populate form with selected member's current settings (or user's settings as default)
+            selected_member_id = privileged_form.member_selector.data or str(user.id)
+            selected_settings = members_config.get(selected_member_id, {})
+            privileged_form.member_selector.data = selected_member_id
+            privileged_form.role_color.data = selected_settings.get(
+                "role_color", "#ffffff"
+            )
+            privileged_form.custom_message.data = selected_settings.get(
+                "custom_message", ""
+            )
+
+            # Build pagination controls
+            # TODO: pagination is bugged and has no effect but due to time constraints and me
+            # not testing it in a big server yet I will revisit this later
+            pagination_html = ""
+            if total_pages > 1:
+                pagination_html = '<div class="pagination">'
+
+                # Previous button
+                if page > 1:
+                    prev_url = f"?page={page - 1}"
+                    if search_query:
+                        prev_url += f"&search={search_query}"
+                    pagination_html += f'<a href="{prev_url}">← Previous</a>'
+
+                # Page numbers
+                pagination_html += (
+                    f'<span class="current">Page {page} of {total_pages}</span>'
+                )
+
+                # Next button
+                if page < total_pages:
+                    next_url = f"?page={page + 1}"
+                    if search_query:
+                        next_url += f"&search={search_query}"
+                    pagination_html += f'<a href="{next_url}">Next →</a>'
+
+                pagination_html += "</div>"
+
+            # Build HTML for privileged users
+            html_content = f"""
+            <style>
+                {get_common_styles()}
+            </style>
+            
+            <div class="dworld-config">
+                <h1>Member Customization for {{{{ guild_name }}}}</h1>
+                <p style="color: #b9bbbe; margin-bottom: 30px;">
+                    Configure member role colors and custom messages
+                </p>
+                
+                {{{{ result_html|safe }}}}
+                
+                <h2>Edit Member Settings</h2>
+                <div class="form-section">
+                    <p class="explanation-text">As a moderator/owner, you can customize any member's settings</p>
+                    
+                    <div class="search-box">
+                        <label>Search Members:</label>
+                        <input type="text" id="member-search" placeholder="Search by name or ID..." value="{search_query or ""}" />
+                        <script>
+                            document.getElementById('member-search').addEventListener('keypress', function(e) {{
+                                if (e.key === 'Enter') {{
+                                    var query = e.target.value;
+                                    if (query) {{
+                                        window.location.href = '?search=' + encodeURIComponent(query);
+                                    }} else {{
+                                        window.location.href = '?';
+                                    }}
+                                }}
+                            }});
+                        </script>
+                    </div>
+                    
+                    {pagination_html}
+                    
+                    <p style="color: #b9bbbe; font-size: 0.9em;">
+                        Showing {{{{ {start_idx + 1} }}}} - {{{{ {min(end_idx, total_members)} }}}} of {{{{ {total_members} }}}} members
+                    </p>
+                    
+                    {{{{ privileged_form|safe }}}}
+                    
+                    {pagination_html}
+                </div>
+            </div>
+            """
+
+            return {
+                "status": 0,
+                "web_content": {
+                    "source": html_content,
+                    "privileged_form": privileged_form,
+                    "result_html": result_html,
+                    "guild_name": guild.name,
+                    "user_name": user.name,
+                    "has_privilege": has_privilege,
+                },
+            }
+
+        else:
+            # Regular user form
+            regular_form = RegularUserForm()
+
+            # Handle form submission
+            if regular_form.validate_on_submit():
+                try:
+                    # Update user's config
+                    custom_msg = regular_form.custom_message.data or ""
+                    members_config[str(user.id)] = {
+                        "role_color": regular_form.role_color.data,
+                        "custom_message": custom_msg.strip(),
+                    }
+                    await self.config.guild(guild).members.set(members_config)
+
+                    # Update display values
+                    current_role_color = regular_form.role_color.data
+                    current_custom_message = custom_msg.strip()
+
+                    result_html = """
+                    <div style="background-color: #2d7d46; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
+                        <strong>✓ Success!</strong> Your settings have been updated.
+                    </div>
+                    """
+                except Exception as e:
+                    result_html = f"""
+                    <div style="background-color: #a02d2d; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
+                        <strong>✗ Error!</strong> Failed to update your settings: {str(e)}
+                    </div>
+                    """
+
+            # Populate form with user's current settings
+            regular_form.role_color.data = current_role_color
+            regular_form.custom_message.data = current_custom_message
+
+            # Build HTML for regular users
+            html_content = f"""
+            <style>
+                {get_common_styles()}
+            </style>
+            
+            <div class="dworld-config">
+                <h1>Member Customization for {{{{ guild_name }}}}</h1>
+                <p style="color: #b9bbbe; margin-bottom: 30px;">
+                    Configure your role color and custom message
+                </p>
+                
+                {{{{ result_html|safe }}}}
+                
+                <h2>Edit Your Settings</h2>
+                <div class="form-section">
+                    <p class="explanation-text">You can customize your own role color and custom message</p>
+                    {{{{ regular_form|safe }}}}
+                </div>
+            </div>
+            """
+
+            return {
+                "status": 0,
+                "web_content": {
+                    "source": html_content,
+                    "regular_form": regular_form,
+                    "result_html": result_html,
+                    "guild_name": guild.name,
+                    "user_name": user.name,
+                    "has_privilege": has_privilege,
+                },
+            }
