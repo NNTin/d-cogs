@@ -299,56 +299,56 @@ class ConfigurationPage(DashboardIntegration):
         html_content = f"""
         <style>
             {get_common_styles()}
-            .guild-selector-section {{{{
+            .guild-selector-section {{
                 background-color: #2b2e34;
                 padding: 15px;
                 border-radius: 5px;
                 margin-bottom: 20px;
                 border: 2px solid #5865f2;
-            }}}}
-            .guild-selector-section h3 {{{{
+            }}
+            .guild-selector-section h3 {{
                 color: #ffffff;
                 margin-top: 0;
                 margin-bottom: 10px;
                 font-size: 1.2em;
-            }}}}
-            .guild-selector-section p {{{{
+            }}
+            .guild-selector-section p {{
                 color: #b9bbbe;
                 margin: 5px 0;
                 font-size: 0.9em;
-            }}}}
-            .form-select:focus {{{{
+            }}
+            .form-select:focus {{
                 outline: none;
                 border-color: #5865f2;
                 box-shadow: 0 0 0 2px rgba(88, 101, 242, 0.2);
-            }}}}
-            .guild-info-text {{{{
+            }}
+            .guild-info-text {{
                 color: #72767d;
                 font-size: 0.85em;
                 font-style: italic;
                 margin-top: 5px;
-            }}}}
-            .single-guild-notice {{{{
+            }}
+            .single-guild-notice {{
                 background-color: #2d7d46;
                 color: #ffffff;
                 padding: 10px;
                 border-radius: 3px;
                 margin-top: 10px;
-            }}}}
-            .dworld-config h3 {{{{
+            }}
+            .dworld-config h3 {{
                 color: #b9bbbe;
                 margin-top: 25px;
                 margin-bottom: 10px;
                 font-size: 1.1em;
-            }}}}
-            .owner-only-notice {{{{
+            }}
+            .owner-only-notice {{
                 background-color: #faa61a;
                 color: #000000;
                 padding: 10px;
                 border-radius: 3px;
                 margin-bottom: 15px;
                 font-weight: 500;
-            }}}}
+            }}
         </style>
         
         <div class="dworld-config">
