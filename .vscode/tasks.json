@@ -1,0 +1,62 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Activate Red Env",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-Command",
+                "& (Get-Command \"$env:USERPROFILE/dissentinenv/Scripts/Activate.ps1\")"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Activate Red Dashboard Env",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-Command",
+                "& (Get-Command \"$env:USERPROFILE/reddashboardenv/Scripts/Activate.ps1\")"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Add Cog",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-File",
+                "${workspaceFolder}/InteractRed.ps1",
+                "-AddCog"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Start Discord Bot",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-File",
+                "${workspaceFolder}/InteractRed.ps1",
+                "-StartBot"
+            ],
+            "problemMatcher": [],
+            "isBackground": true
+        },
+        {
+            "label": "Start Dashboard",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-File",
+                "${workspaceFolder}/InteractRed.ps1",
+                "-StartDashboard"
+            ],
+            "problemMatcher": [],
+            "isBackground": true
+        }
+    ]
+}

@@ -12,9 +12,7 @@ class ListenerMixin:
         """Handle member status/presence updates."""
         if before.status != after.status:
             # Status changed, broadcast the update
-            role_color = "#ffffff"
-            if after.top_role and after.top_role.color.value != 0:
-                role_color = f"#{after.top_role.color.value:06x}"
+            role_color = await self._get_member_role_color(after)
 
             status_mapping = {
                 "online": "online",
@@ -37,9 +35,7 @@ class ListenerMixin:
     @commands.Cog.listener()
     async def on_member_join(self, member):
         """Handle member joining a guild."""
-        role_color = "#ffffff"
-        if member.top_role and member.top_role.color.value != 0:
-            role_color = f"#{member.top_role.color.value:06x}"
+        role_color = await self._get_member_role_color(member)
 
         status_mapping = {
             "online": "online",

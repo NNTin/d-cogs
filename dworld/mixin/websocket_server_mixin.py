@@ -127,6 +127,9 @@ class WebsocketServerMixin:
         # Check if we should ignore offline members for this guild
         ignore_offline = await self.config.guild(guild).ignoreOfflineMembers()
 
+        # Fetch members config once for performance
+        members_config = await self.config.guild(guild).members()
+
         user_data = {}
 
         # Iterate through all members in the guild
@@ -150,10 +153,8 @@ class WebsocketServerMixin:
             if ignore_offline and status == "offline":
                 continue
 
-            # Get the member's top role color
-            role_color = "#ffffff"  # default white
-            if member.top_role and member.top_role.color.value != 0:
-                role_color = f"#{member.top_role.color.value:06x}"
+            # Get the member's role color (checks config first, then Discord role)
+            role_color = await self._get_member_role_color(member, members_config)
 
             user_data[str(member.id)] = {
                 "uid": str(member.id),
@@ -170,6 +171,45 @@ class WebsocketServerMixin:
         # but we keep it for compatibility with the callback interface
         client_id = await self.config.client_id()
         return client_id
+
+    async def _get_member_role_color(self, member, members_config=None):
+        """Get the role color for a member, checking custom config first.
+
+        Args:
+            member: Discord member object
+            members_config: Optional pre-fetched members config dict for performance
+
+        Returns:
+            str: Hex color string (e.g., "#ffffff")
+        """
+        # Fetch members config if not provided
+        if members_config is None:
+            members_config = await self.config.guild(member.guild).members()
+
+        member_id_str = str(member.id)
+
+        # If member has a custom role_color in config, validate and use it
+        if (
+            member_id_str in members_config
+            and "role_color" in members_config[member_id_str]
+        ):
+            custom_color = members_config[member_id_str]["role_color"]
+
+            # Validate: must be # followed by exactly 6 hex digits
+            if (
+                isinstance(custom_color, str)
+                and len(custom_color) == 7
+                and custom_color[0] == "#"
+                and all(c in "0123456789abcdefABCDEF" for c in custom_color[1:])
+            ):
+                return custom_color
+
+        # Fall back to Discord's role color
+        if member.top_role and member.top_role.color.value != 0:
+            return f"#{member.top_role.color.value:06x}"
+
+        # Default to white
+        return "#ffffff"
 
     async def _handle_static_request(self, path: str):
         """Handle static file requests with optional custom d-zone version serving.
