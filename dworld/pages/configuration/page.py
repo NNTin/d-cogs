@@ -6,7 +6,7 @@ import discord
 import wtforms
 from redbot.core import commands
 
-from dworld.utils import DashboardIntegration, dashboard_page, get_form_helpers
+from ...utils import DashboardIntegration, get_form_helpers
 
 
 class ConfigurationPage(DashboardIntegration):
@@ -56,11 +56,6 @@ class ConfigurationPage(DashboardIntegration):
 
         return accessible_guilds
 
-    @dashboard_page(
-        name="configuration",
-        description="D-World Configuration (manage server)",
-        methods=("GET", "POST"),
-    )
     async def dashboard_guild_settings(
         self, user: discord.User, guild: discord.Guild, **kwargs
     ) -> typing.Dict[str, typing.Any]:
