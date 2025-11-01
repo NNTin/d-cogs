@@ -23,6 +23,7 @@ from redbot.core import commands
 
 from .pages.configuration import ConfigurationPage
 from .pages.customization import CustomizationPage
+from .pages.simulation import SimulationPage
 from .utils import DashboardIntegration, dashboard_page
 
 
@@ -106,3 +107,28 @@ class DWorldDashboardIntegration(DashboardIntegration):
         return await self.customization_page.dashboard_member_customization(
             user, guild, **kwargs
         )
+
+    @dashboard_page(
+        name="simulation",
+        description="d-zone: ambient life simulation",
+        methods=("GET",),
+    )
+    async def dashboard_simulation(
+        self, user: discord.User, guild: discord.Guild, **kwargs
+    ) -> typing.Dict[str, typing.Any]:
+        """
+        Dashboard page wrapper for the lightweight simulation page.
+
+        Any guild member may access this page. Delegates to the SimulationPage
+        instance and ensures it has access to `bot` and `config` attributes.
+        """
+        # Lazy initialization: create simulation page if it doesn't exist
+        if not hasattr(self, "simulation_page"):
+            self.simulation_page = SimulationPage()
+
+        # Ensure the simulation page has access to current bot and config
+        self.simulation_page.bot = self.bot
+        self.simulation_page.config = self.config
+
+        # Delegate to the simulation page
+        return await self.simulation_page.dashboard_simulation(user, guild, **kwargs)
