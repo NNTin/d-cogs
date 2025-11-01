@@ -39,8 +39,8 @@ param (
 #------------------------------------------------------ Preparation -----------------------------------------------#
 
 # python path to red environment
-$python = "$env:USERPROFILE\dissentinenv\Scripts\python.exe"
-$pythonDashboard = "$env:USERPROFILE\reddashboardenv\Scripts\python.exe"
+$python = "$env:USERPROFILE\.venvs\redbot\Scripts\python.exe"
+$pythonDashboard = "$env:USERPROFILE\.venvs\reddashboard\Scripts\python.exe"
 
 #-------------------------------------------------------- Functions -----------------------------------------------#
 
