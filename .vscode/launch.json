@@ -8,14 +8,14 @@
             "name": "Activate Red Env",
             "type": "PowerShell",
             "request": "launch",
-            "script": "& (Get-Command \"$env:USERPROFILE/dissentinenv/Scripts/Activate.ps1\")",
+            "script": "& (Get-Command \"$env:USERPROFILE/.venvs/redbot/Scripts/Activate.ps1\")",
             "cwd": "${cwd}"
         },
         {
             "name": "Activate Red Dashboard Env",
             "type": "PowerShell",
             "request": "launch",
-            "script": "& (Get-Command \"$env:USERPROFILE/reddashboardenv/Scripts/Activate.ps1\")",
+            "script": "& (Get-Command \"$env:USERPROFILE/.venvs/reddashboard/Scripts/Activate.ps1\")",
             "cwd": "${cwd}"
         },
         {
