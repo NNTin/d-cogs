@@ -38,7 +38,7 @@ class DebugSimulationPage(DashboardIntegration):
             return {
                 "status": 0,
                 "error_code": 403,
-                "error_message": "You need Manage Server permission to access this page.",
+                "message": "You need Manage Server permission to access this page.",
             }
 
         # Fetch available versions from GitHub Pages
@@ -51,7 +51,13 @@ class DebugSimulationPage(DashboardIntegration):
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as response:
                     if response.status == 200:
-                        versions = await response.json()
+                        data = await response.json()
+                        # Validate that the result is a list of strings
+                        if isinstance(data, list) and all(isinstance(v, str) for v in data):
+                            versions = data
+                        else:
+                            fetch_error = "Invalid versions.json format: expected a list of strings"
+                            versions = []
                     else:
                         fetch_error = f"Failed to fetch versions (HTTP {response.status})"
         except aiohttp.ClientError as e:
@@ -69,7 +75,7 @@ class DebugSimulationPage(DashboardIntegration):
             return {
                 "status": 0,
                 "error_code": 500,
-                "error_message": "Form utilities not available",
+                "message": "Form utilities not available",
             }
 
         # Define the form
@@ -92,11 +98,17 @@ class DebugSimulationPage(DashboardIntegration):
         choices.extend([(version, version) for version in versions])
         version_form.version_selector.choices = choices
 
+        # Compute valid option values for validation
+        valid_choices = {choice[0] for choice in choices}
+
         # Handle form submission
         result_html = ""
         if version_form.validate_on_submit():
             try:
                 selected = version_form.version_selector.data
+                # Ensure selected value is in valid choices, otherwise use default
+                if selected not in valid_choices:
+                    selected = "default"
                 selected_value = None if selected == "default" else selected
                 await self.config.guild(guild).selectedVersion.set(selected_value)
                 result_html = f"""
@@ -116,7 +128,11 @@ class DebugSimulationPage(DashboardIntegration):
 
         # Load current configuration
         current_version = await self.config.guild(guild).selectedVersion()
-        version_form.version_selector.data = current_version or "default"
+        # Ensure the current version is in valid choices before setting form data
+        if current_version and current_version in valid_choices:
+            version_form.version_selector.data = current_version
+        else:
+            version_form.version_selector.data = "default"
 
         # Build HTML response
         common_styles = get_common_styles()
@@ -137,7 +153,7 @@ class DebugSimulationPage(DashboardIntegration):
             {common_styles}
         </style>
 
-        <div class="container">
+        <div class="dworld-config">
             <h1>Debug Simulation Version Selection for {{{{ guild_name }}}}</h1>
             
             <p class="description">
@@ -150,7 +166,7 @@ class DebugSimulationPage(DashboardIntegration):
             <div class="config-section">
                 <h2>Current Configuration</h2>
                 <div class="config-item">
-                    <span class="config-key">Selected Version:</span>
+                    <span class="config-label">Selected Version:</span>
                     <span class="config-value">
                         {{{{ current_version if current_version else "Default (Latest)" }}}}
                     </span>
