@@ -23,6 +23,7 @@ from redbot.core import commands
 
 from .pages.configuration import ConfigurationPage
 from .pages.customization import CustomizationPage
+from .pages.debugsimulation import DebugSimulationPage
 from .pages.simulation import SimulationPage
 from .utils import DashboardIntegration, dashboard_page
 
@@ -132,3 +133,37 @@ class DWorldDashboardIntegration(DashboardIntegration):
 
         # Delegate to the simulation page
         return await self.simulation_page.dashboard_simulation(user, guild, **kwargs)
+
+    @dashboard_page(
+        name="debugsimulation",
+        description="For people with manage servers permission: choose which version you want to show to your server members",
+        methods=("GET", "POST"),
+    )
+    async def dashboard_debugsimulation(
+        self, user: discord.User, guild: discord.Guild, **kwargs
+    ) -> typing.Dict[str, typing.Any]:
+        """
+        Dashboard page wrapper for debug simulation version selection.
+
+        Delegates to the DebugSimulationPage instance.
+
+        Args:
+            user: The Discord user accessing the dashboard
+            guild: The Discord guild being configured
+            **kwargs: Additional arguments provided by the dashboard (includes Form, etc.)
+
+        Returns:
+            Dictionary with status and web_content for rendering
+        """
+        # Lazy initialization: create debugsimulation page if it doesn't exist
+        if not hasattr(self, "debugsimulation_page"):
+            self.debugsimulation_page = DebugSimulationPage()
+
+        # Ensure the debugsimulation page has access to current bot and config
+        self.debugsimulation_page.bot = self.bot
+        self.debugsimulation_page.config = self.config
+
+        # Delegate to the debugsimulation page
+        return await self.debugsimulation_page.dashboard_debugsimulation(
+            user, guild, **kwargs
+        )

@@ -10,6 +10,7 @@ class ConfigMixin:
             "passworded": False,
             "ignoreOfflineMembers": False,
             "members": {"user_id": {"role_color": "#ffffff", "custom_message": "foo"}},
+            "selectedVersion": None,
         }
         default_global = {
             "client_id": None,
