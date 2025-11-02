@@ -1,4 +1,4 @@
-"""Debug Simulation page for D-World dashboard integration."""
+"""Version Selection page for D-World dashboard integration."""
 
 import typing
 import aiohttp
@@ -10,16 +10,16 @@ from ...utils import DashboardIntegration, get_form_helpers
 from ..common_styles import get_common_styles
 
 
-class DebugSimulationPage(DashboardIntegration):
-    """Debug Simulation page for version selection."""
+class VersionSelectionPage(DashboardIntegration):
+    """Version Selection page for D-World dashboard integration."""
 
     bot: commands.Bot
     config: typing.Any
 
-    async def dashboard_debugsimulation(
+    async def dashboard_versionselection(
         self, user: discord.User, guild: discord.Guild, **kwargs
     ) -> typing.Dict[str, typing.Any]:
-        """Handle the debug simulation page for version selection.
+        """Handle the version selection page for version selection.
 
         Args:
             user: The Discord user accessing the page
@@ -32,13 +32,12 @@ class DebugSimulationPage(DashboardIntegration):
         # Check permissions
         is_owner = user.id in self.bot.owner_ids
         member = guild.get_member(user.id)
-        has_manage_guild = member.guild_permissions.manage_guild if member else False
 
-        if not (is_owner or has_manage_guild):
+        if not (is_owner):
             return {
                 "status": 0,
                 "error_code": 403,
-                "message": "You need Manage Server permission to access this page.",
+                "message": "You have to be owner to access this page.",
             }
 
         # Fetch available versions from GitHub Pages
@@ -154,11 +153,10 @@ class DebugSimulationPage(DashboardIntegration):
         </style>
 
         <div class="dworld-config">
-            <h1>Debug Simulation Version Selection for {{{{ guild_name }}}}</h1>
+            <h1>Version Selection for {{{{ guild_name }}}}</h1>
             
             <p class="description">
-                For people with manage servers permission: choose which version you want 
-                to show to your server members in the simulation page.
+                Choose which version you want to show to your server members in the simulation page.
             </p>
 
             {fetch_error_html}
