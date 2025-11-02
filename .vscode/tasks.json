@@ -4,22 +4,13 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Activate Red Env",
+            "label": "Install virtual environments and dependencies",
             "type": "shell",
             "command": "powershell.exe",
             "args": [
-                "-Command",
-                "& (Get-Command \"$env:USERPROFILE/dissentinenv/Scripts/Activate.ps1\")"
-            ],
-            "problemMatcher": []
-        },
-        {
-            "label": "Activate Red Dashboard Env",
-            "type": "shell",
-            "command": "powershell.exe",
-            "args": [
-                "-Command",
-                "& (Get-Command \"$env:USERPROFILE/reddashboardenv/Scripts/Activate.ps1\")"
+                "-File",
+                "${workspaceFolder}/InteractRed.ps1",
+                "-InstallRequirements"
             ],
             "problemMatcher": []
         },

@@ -10,11 +10,13 @@ class ConfigMixin:
             "passworded": False,
             "ignoreOfflineMembers": False,
             "members": {"user_id": {"role_color": "#ffffff", "custom_message": "foo"}},
+            "selectedVersion": None,
         }
         default_global = {
             "client_id": None,
             "client_secret": None,
             "static_file_path": None,
+            "socketURL": None,
         }
         self.config.register_guild(**default_guild)
         self.config.register_global(**default_global)
@@ -72,12 +74,16 @@ class ConfigMixin:
         client_id = await self.config.client_id()
         client_secret = await self.config.client_secret()
         static_file_path = await self.config.static_file_path()
+        socketURL = await self.config.socketURL()
 
         # Check if credentials are set
         client_id_status = "✅ Set" if client_id else "❌ Not set"
         client_secret_status = "✅ Set" if client_secret else "❌ Not set"
         static_path_status = (
             f"✅ Set to `{static_file_path}`" if static_file_path else "❌ Not set"
+        )
+        socket_url_status = (
+            f"✅ Set to `{socketURL}`" if socketURL else "❌ Not set"
         )
 
         # Count passworded servers
@@ -97,6 +103,9 @@ class ConfigMixin:
 
 **Static File Serving:**
 • Static Path: {static_path_status}
+
+**WebSocket Configuration:**
+• Socket URL: {socket_url_status}
 
 **Server Protection:**
 • Protected servers: {len(passworded_servers)}
@@ -191,3 +200,29 @@ class ConfigMixin:
             await ctx.send(f"Current static file path: `{path}`")
         else:
             await ctx.send("Static file serving is currently disabled.")
+
+    @commands.is_owner()
+    @dworldconfig.command(name="setsocketurl")
+    async def setsocketurl(self, ctx, url: str = None):
+        """Set the socket URL for WebSocket connections
+
+        Args:
+            url: WebSocket server URL (None to clear)
+        """
+        await self.config.socketURL.set(url)
+
+        if url:
+            await ctx.send(f"Socket URL has been set to: `{url}`")
+        else:
+            await ctx.send("Socket URL has been cleared.")
+
+    @commands.is_owner()
+    @dworldconfig.command(name="getsocketurl")
+    async def getsocketurl(self, ctx):
+        """Get the current socket URL configuration"""
+        url = await self.config.socketURL()
+
+        if url:
+            await ctx.send(f"Current socket URL: `{url}`")
+        else:
+            await ctx.send("Socket URL is not currently set.")
