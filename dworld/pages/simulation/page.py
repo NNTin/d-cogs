@@ -26,10 +26,12 @@ class SimulationPage(DashboardIntegration):
         the ambient simulation and appends a timestamp query param to the URL
         on DOMContentLoaded.
         """
+        # Get guild config once for reuse
+        guild_config = self.config.guild(guild)
+        
         # Load socketURL from guild config, fallback to global config, then to default
         try:
-            config = self.config.guild(guild)
-            socket_url = await config.socketURL()
+            socket_url = await guild_config.socketURL()
             if not socket_url:
                 # Try global config
                 socket_url = await self.config.socketURL()
@@ -39,6 +41,24 @@ class SimulationPage(DashboardIntegration):
         except Exception:
             # If config access fails, use default
             socket_url = "wss://localhost:3000"
+
+        # Load selectedVersion from guild config for hash-based routing
+        try:
+            selected_version = await guild_config.selectedVersion()
+        except Exception:
+            # If config access fails, use None (no version hash)
+            selected_version = None
+
+        # Sanitize selected_version to avoid double-hash and whitespace issues
+        if selected_version:
+            # Convert to string, strip whitespace, and remove any leading #
+            selected_version = str(selected_version).strip().lstrip('#')
+        
+        # Construct the version hash fragment
+        if selected_version:
+            version_hash = f"#{selected_version}"
+        else:
+            version_hash = ""
 
         html_content = f"""
         <style>
@@ -63,7 +83,8 @@ class SimulationPage(DashboardIntegration):
                     var iframe = document.getElementById('main-iframe');
                     if (!iframe) return;
                     var t = new Date().getTime();
-                    var src = 'https://nntin.xyz/d-zone?s=repos&socketURL={socket_url}&t=' + t;
+                    var socketURL = encodeURIComponent('{socket_url}');
+                    var src = 'https://nntin.github.io/d-zone?socketURL=' + socketURL + '&t=' + t + '{version_hash}';
                     iframe.src = src;
                 }})();
             </script>
