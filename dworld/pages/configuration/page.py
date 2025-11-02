@@ -17,46 +17,6 @@ class ConfigurationPage(DashboardIntegration):
     bot: commands.Bot
     config: typing.Any
 
-    async def _get_accessible_guilds(
-        self, user: discord.User
-    ) -> typing.List[typing.Tuple[str, str]]:
-        """
-        Get a list of guilds accessible to the user based on their permissions.
-
-        Bot owners can access all guilds. Other users can only access guilds
-        where they have moderator permissions or higher.
-
-        Args:
-            user: The Discord user to check permissions for
-
-        Returns:
-            List of tuples containing (guild_id, guild_name) sorted by guild name
-        """
-        accessible_guilds = []
-        is_owner = user.id in self.bot.owner_ids
-
-        for guild in self.bot.guilds:
-            # Bot owners can access all guilds
-            if is_owner:
-                accessible_guilds.append((str(guild.id), guild.name))
-            else:
-                # Check if user is a member and has appropriate permissions
-                member = guild.get_member(user.id)
-                if member:
-                    # Check owner, admin, manage_guild, or mod permissions
-                    # Check less expensive conditions first to avoid unnecessary async calls
-                    if member == guild.owner or member.guild_permissions.manage_guild:
-                        accessible_guilds.append((str(guild.id), guild.name))
-                    elif await self.bot.is_admin(member):
-                        accessible_guilds.append((str(guild.id), guild.name))
-                    elif await self.bot.is_mod(member):
-                        accessible_guilds.append((str(guild.id), guild.name))
-
-        # Sort by guild name (second element of tuple)
-        accessible_guilds.sort(key=lambda x: x[1])
-
-        return accessible_guilds
-
     async def dashboard_guild_settings(
         self, user: discord.User, guild: discord.Guild, **kwargs
     ) -> typing.Dict[str, typing.Any]:
@@ -101,6 +61,7 @@ class ConfigurationPage(DashboardIntegration):
             client_id = await self.config.client_id()
             client_secret = await self.config.client_secret()
             static_file_path = await self.config.static_file_path()
+            socketURL = await self.config.socketURL()
         except Exception as e:
             return {
                 "status": 0,
@@ -118,18 +79,6 @@ class ConfigurationPage(DashboardIntegration):
                 "error_code": 500,
                 "message": "Form utilities are unavailable. Ensure the dashboard is properly configured.",
             }
-
-        # Define GuildSelectorForm class
-        class GuildSelectorForm(Form):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, prefix="guild_selector_", **kwargs)
-
-            guild_selector = wtforms.SelectField(
-                "Select Guild",
-                choices=[],
-                render_kw={"class": "form-select", "onchange": "this.form.submit()"},
-            )
-            submit_selector = wtforms.SubmitField("Switch Guild")
 
         # Define GuildSettingsForm class
         class GuildSettingsForm(Form):
@@ -154,6 +103,9 @@ class ConfigurationPage(DashboardIntegration):
             static_file_path = wtforms.StringField(
                 "Static File Path", validators=[wtforms.validators.Optional()]
             )
+            socketURL = wtforms.StringField(
+                "Socket URL", validators=[wtforms.validators.Optional()]
+            )
             submit = wtforms.SubmitField("Save Global Settings")
 
         # Instantiate forms
@@ -161,59 +113,8 @@ class ConfigurationPage(DashboardIntegration):
         global_form = GlobalSettingsForm()
         result_html = ""
 
-        # Get accessible guilds and instantiate guild selector form
-        accessible_guilds = await self._get_accessible_guilds(user)
-
-        # Ensure current guild is always present in the list (defensive check)
-        accessible_guilds_dict = {gid: gname for gid, gname in accessible_guilds}
-        accessible_guilds_dict[str(guild.id)] = guild.name
-
-        # Convert back to list and sort by guild name
-        accessible_guilds = list(accessible_guilds_dict.items())
-        accessible_guilds.sort(key=lambda x: x[1])
-
-        guild_selector_form = GuildSelectorForm()
-        guild_selector_form.guild_selector.choices = accessible_guilds
-        guild_selector_form.guild_selector.data = str(guild.id)
-        accessible_guilds_count = len(accessible_guilds)
-
-        # Handle guild selector form submission
-        if guild_selector_form.validate_on_submit():
-            try:
-                selected_guild_id = int(guild_selector_form.guild_selector.data)
-                selected_guild = self.bot.get_guild(selected_guild_id)
-
-                if not selected_guild:
-                    result_html = """
-                    <div style="background-color: #a02d2d; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
-                        <strong>✗ Error!</strong> Selected guild not found.
-                    </div>
-                    """
-                elif selected_guild.id != guild.id:
-                    # Guild changed - use JavaScript redirect in the response
-                    return {
-                        "status": 0,
-                        "web_content": {
-                            "source": f"""
-                            <script>
-                                window.location.href = '/dashboard/third_parties/dworld/configuration/{selected_guild_id}';
-                            </script>
-                            <div style="background-color: #2b2e34; color: #ffffff; padding: 20px; text-align: center;">
-                                <p>Switching to {selected_guild.name}...</p>
-                                <p>If you are not redirected, <a href="/dashboard/third_parties/dworld/configuration/{selected_guild_id}" style="color: #5865f2;">click here</a>.</p>
-                            </div>
-                            """
-                        },
-                    }
-            except (ValueError, TypeError) as e:
-                result_html = f"""
-                <div style="background-color: #a02d2d; color: #ffffff; padding: 15px; border-radius: 5px; margin: 15px 0;">
-                    <strong>✗ Error!</strong> Invalid guild selection: {str(e)}
-                </div>
-                """
-
-        # Handle guild form submission
-        if guild_form.validate_on_submit():
+        # Handle guild form submission - only process if guild form's submit button was clicked
+        if guild_form.submit.data and guild_form.validate():
             try:
                 # Check if enabling password protection without OAuth2 credentials
                 if guild_form.passworded.data and (not client_id or not client_secret):
@@ -248,8 +149,8 @@ class ConfigurationPage(DashboardIntegration):
                 </div>
                 """
 
-        # Handle global form submission
-        if global_form.validate_on_submit():
+        # Handle global form submission - only process if global form's submit button was clicked
+        elif global_form.submit.data and global_form.validate():
             # Check if user is owner
             if user.id not in self.bot.owner_ids:
                 result_html = """
@@ -259,19 +160,23 @@ class ConfigurationPage(DashboardIntegration):
                 """
             else:
                 try:
-                    # Update global config
-                    await self.config.client_id.set(global_form.client_id.data or None)
-                    await self.config.client_secret.set(
-                        global_form.client_secret.data or None
-                    )
-                    await self.config.static_file_path.set(
-                        global_form.static_file_path.data or None
-                    )
+                    # Normalize inputs by stripping whitespace (empty becomes None)
+                    client_id_trimmed = (global_form.client_id.data or "").strip() or None
+                    client_secret_trimmed = (global_form.client_secret.data or "").strip() or None
+                    static_file_path_trimmed = (global_form.static_file_path.data or "").strip() or None
+                    socketURL_trimmed = (global_form.socketURL.data or "").strip() or None
+                    
+                    # Update global config with trimmed values
+                    await self.config.client_id.set(client_id_trimmed)
+                    await self.config.client_secret.set(client_secret_trimmed)
+                    await self.config.static_file_path.set(static_file_path_trimmed)
+                    await self.config.socketURL.set(socketURL_trimmed)
 
-                    # Update local variables to reflect new values
-                    client_id = global_form.client_id.data or None
-                    client_secret = global_form.client_secret.data or None
-                    static_file_path = global_form.static_file_path.data or None
+                    # Update local variables to reflect new trimmed values
+                    client_id = client_id_trimmed
+                    client_secret = client_secret_trimmed
+                    static_file_path = static_file_path_trimmed
+                    socketURL = socketURL_trimmed
 
                     # Set success message
                     result_html = """
@@ -294,47 +199,12 @@ class ConfigurationPage(DashboardIntegration):
         global_form.client_id.data = client_id or ""
         global_form.client_secret.data = client_secret or ""
         global_form.static_file_path.data = static_file_path or ""
+        global_form.socketURL.data = socketURL or ""
 
         # Build HTML response
         html_content = f"""
         <style>
             {get_common_styles()}
-            .guild-selector-section {{
-                background-color: #2b2e34;
-                padding: 15px;
-                border-radius: 5px;
-                margin-bottom: 20px;
-                border: 2px solid #5865f2;
-            }}
-            .guild-selector-section h3 {{
-                color: #ffffff;
-                margin-top: 0;
-                margin-bottom: 10px;
-                font-size: 1.2em;
-            }}
-            .guild-selector-section p {{
-                color: #b9bbbe;
-                margin: 5px 0;
-                font-size: 0.9em;
-            }}
-            .form-select:focus {{
-                outline: none;
-                border-color: #5865f2;
-                box-shadow: 0 0 0 2px rgba(88, 101, 242, 0.2);
-            }}
-            .guild-info-text {{
-                color: #72767d;
-                font-size: 0.85em;
-                font-style: italic;
-                margin-top: 5px;
-            }}
-            .single-guild-notice {{
-                background-color: #2d7d46;
-                color: #ffffff;
-                padding: 10px;
-                border-radius: 3px;
-                margin-top: 10px;
-            }}
             .dworld-config h3 {{
                 color: #b9bbbe;
                 margin-top: 25px;
@@ -352,20 +222,6 @@ class ConfigurationPage(DashboardIntegration):
         </style>
         
         <div class="dworld-config">
-            <!-- Guild Selector Section -->
-            <div class="guild-selector-section">
-                <h3>🌍 Current Guild: {{{{ guild_name }}}}</h3>
-                <p>You have access to {{{{ accessible_guilds_count }}}} guild(s)</p>
-                {{% if accessible_guilds_count > 1 %}}
-                    <p class="guild-info-text">Select a different guild to view and edit its settings</p>
-                    {{{{ guild_selector_form|safe }}}}
-                {{% else %}}
-                    <div class="single-guild-notice">
-                        ℹ️ You have access to only this guild
-                    </div>
-                {{% endif %}}
-            </div>
-            
             <h1>D-World Configuration</h1>
             <p style="color: #b9bbbe; margin-bottom: 30px;">
                 Configure D-World settings for <strong style="color: #ffffff;">{{{{ guild_name }}}}</strong>
@@ -414,6 +270,12 @@ class ConfigurationPage(DashboardIntegration):
                         {{{{ '••••••••' if static_file_path else 'Not set' }}}}
                     </span>
                 </div>
+                <div class="config-item">
+                    <span class="config-label">Socket URL:</span>
+                    <span class="config-value {{{{ 'set' if socketURL else 'not-set' }}}}">
+                        {{{{ socketURL if socketURL else 'Not set' }}}}
+                    </span>
+                </div>
             </div>
             
             {{% if is_owner %}}
@@ -430,17 +292,16 @@ class ConfigurationPage(DashboardIntegration):
             "status": 0,
             "web_content": {
                 "source": html_content,
-                "guild_selector_form": guild_selector_form,
                 "guild_form": guild_form,
                 "global_form": global_form,
                 "result_html": result_html,
                 "guild_name": guild.name,
-                "accessible_guilds_count": accessible_guilds_count,
                 "passworded": passworded,
                 "ignoreOfflineMembers": ignoreOfflineMembers,
                 "client_id": client_id,
                 "client_secret": client_secret,
                 "static_file_path": static_file_path,
+                "socketURL": socketURL,
                 "is_owner": is_owner,
             },
         }

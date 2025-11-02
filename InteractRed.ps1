@@ -202,15 +202,15 @@ Function Install-RedEnvironments {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Successfully installed pip and wheel" -ForegroundColor Green
     }
     
-    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing Red-DiscordBot... (this may take a few minutes)" -ForegroundColor Cyan
-    & $redbotPip install -U Red-DiscordBot
+    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing Red-DiscordBot and d-back... (this may take a few minutes)" -ForegroundColor Cyan
+    & $redbotPip install -U Red-DiscordBot d-back
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to install Red-DiscordBot. Manual installation may be required." -ForegroundColor Red
-        Write-Host "You can try manually by activating the venv and running: pip install -U Red-DiscordBot" -ForegroundColor Yellow
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to install Red-DiscordBot and d-back. Manual installation may be required." -ForegroundColor Red
+        Write-Host "You can try manually by activating the venv and running: pip install -U Red-DiscordBot d-back" -ForegroundColor Yellow
         $hadError = $true
-        $errorMessages += "Failed to install Red-DiscordBot"
+        $errorMessages += "Failed to install Red-DiscordBot and d-back"
     } else {
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Successfully installed Red-DiscordBot" -ForegroundColor Green
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Successfully installed Red-DiscordBot and d-back" -ForegroundColor Green
     }
     
     # Create reddashboard virtual environment
