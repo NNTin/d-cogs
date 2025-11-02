@@ -4,6 +4,17 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "Install virtual environments and dependencies",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-File",
+                "${workspaceFolder}/InteractRed.ps1",
+                "-InstallRequirements"
+            ],
+            "problemMatcher": []
+        },
+        {
             "label": "Add Cog",
             "type": "shell",
             "command": "powershell.exe",
