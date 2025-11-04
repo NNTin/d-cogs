@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  release-info:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.info.outputs.tag }}
+      commit: ${{ steps.info.outputs.commit }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract release information
+        id: info
+        run: |
+          echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          echo "commit=${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Display cog information
+        run: |
+          echo "Release Tag: ${{ github.ref_name }}"
+          echo "Commit SHA: ${{ github.sha }}"
+          if [ -f "info.json" ]; then
+            echo "Cog info.json contents:"
+            cat info.json
+          else
+            echo "No info.json found in repository root"
+          fi
+
+  build-discord-fields:
+    runs-on: ubuntu-latest
+    needs: release-info
+    if: always()
+    outputs:
+      discord_fields: ${{ steps.discord_fields.outputs.fields }}
+    
+    steps:
+      - name: Build Discord Fields
+        id: discord_fields
+        run: |
+          STATUS="${{ needs.release-info.result }}"
+          
+          # Build JSON fields with readable formatting
+          FIELDS=$(jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg tag "${{ needs.release-info.outputs.tag || 'unknown' }}" \
+            --arg status "$STATUS" \
+            --arg event "${{ github.event_name == 'workflow_dispatch' && 'Manual Release' || 'Tag Push' }}" \
+            --arg actor "${{ github.actor }}" \
+            --arg commit "${{ needs.release-info.outputs.commit || github.sha }}" \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '[
+              {"name": "Repository", "value": $repo, "inline": true},
+              {"name": "Tag", "value": $tag, "inline": true},
+              {"name": "Status", "value": $status, "inline": true},
+              {"name": "Event Type", "value": $event, "inline": true},
+              {"name": "Triggered By", "value": ("@" + $actor), "inline": true},
+              {"name": "Commit", "value": $commit, "inline": true},
+              {"name": "Workflow Run", "value": ("[View Details](" + $run_url + ")"), "inline": false}
+            ]')
+          
+          # Use delimiter to safely output the multiline JSON
+          delimiter="$(openssl rand -hex 8)"
+          echo "fields<<${delimiter}" >> $GITHUB_OUTPUT
+          echo "$FIELDS" >> $GITHUB_OUTPUT
+          echo "${delimiter}" >> $GITHUB_OUTPUT
+
+  notify-release:
+    uses: nntin/d-flows/.github/workflows/discord-notify.yml@v0
+    needs: [release-info, build-discord-fields]
+    if: always()
+    secrets:
+      webhook_url: ${{ secrets.DISCORD_WEBHOOK_URL }}
+    with:
+      message_type: "embed"
+      title: ${{ needs['release-info'].result == 'success' && '✅ d-cogs Release' || '❌ d-cogs Release Failed' }}
+      description: ${{ needs['release-info'].result == 'success' && 'd-cogs has been released successfully.' || 'The release workflow encountered errors. Please check the workflow run for details.' }}
+      color: ${{ needs['release-info'].result == 'success' && '3066993' || '15158332' }}
+      fields: ${{ needs.build-discord-fields.outputs.discord_fields }}
+
+  release-summary:
+    uses: nntin/d-flows/.github/workflows/step-summary.yml@v0
+    needs: [release-info, build-discord-fields, notify-release]
+    if: always()
+    with:
+      title: "Release Summary"
+      markdown: |
+        ## Release Results
+        
+        **Release Info Job:** ${{ needs['release-info'].result == 'success' && '✅ Passed' || '❌ Failed' }}
+        **Discord Notification Job:** ${{ needs['notify-release'].result == 'success' && '✅ Sent' || '❌ Failed' }}
+        
+        **Release Details:**
+        - **Repository:** ${{ github.repository }}
+        - **Tag:** ${{ needs.release-info.outputs.tag || github.ref_name }}
+        - **Commit:** ${{ needs.release-info.outputs.commit || github.sha }}
+        - **Event:** ${{ github.event_name }}
+        - **Triggered By:** @${{ github.actor }}
+        
+        **Links:**
+        - [View Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+        - [View Repository](${{ github.server_url }}/${{ github.repository }})
+      overwrite: true

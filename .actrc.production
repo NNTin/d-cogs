@@ -1,0 +1,20 @@
+# Optimized Act configuration for production use
+# Copy this to .actrc.production and rename to .actrc for faster execution
+
+# Use catthehacker images for best compatibility
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+-P ubuntu-22.04=catthehacker/ubuntu:act-22.04
+-P ubuntu-20.04=catthehacker/ubuntu:act-20.04
+
+# Container architecture
+--container-architecture=linux/amd64
+
+# Performance optimizations
+--action-offline-mode
+--pull=false
+
+# Artifacts support
+--artifact-server-path ./.artifacts
+
+# Use local environment for platform-agnostic jobs (optional)
+# -P self-hosted=-self-hosted

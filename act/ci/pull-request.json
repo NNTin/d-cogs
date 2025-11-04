@@ -1,0 +1,21 @@
+{
+  "action": "pull_request",
+  "number": 1,
+  "pull_request": {
+    "number": 1,
+    "title": "Test PR for CI",
+    "head": {
+      "ref": "feature/test-feature",
+      "sha": "abcdef1234567890"
+    },
+    "base": {
+      "ref": "main",
+      "sha": "1234567890abcdef"
+    }
+  },
+  "repository": {
+    "name": "d-cogs",
+    "full_name": "NNTin/d-cogs",
+    "default_branch": "main"
+  }
+}

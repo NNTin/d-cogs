@@ -1,0 +1,13 @@
+{
+  "action": "push",
+  "ref": "refs/heads/develop",
+  "repository": {
+    "name": "d-cogs",
+    "full_name": "NNTin/d-cogs",
+    "default_branch": "main"
+  },
+  "head_commit": {
+    "id": "1234567890abcdef",
+    "message": "Test commit for CI on develop"
+  }
+}

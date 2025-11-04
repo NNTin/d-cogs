@@ -1,0 +1,18 @@
+# Act configuration for d-flows repository
+# Use catthehacker images for better GitHub Actions compatibility
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# Enable container architecture specification for better compatibility
+--container-architecture=linux/amd64
+
+# Action offline mode for faster execution (uncomment if you want to use cached actions)
+# --action-offline-mode
+
+# Artifacts server for artifact upload/download testing
+--artifact-server-path ./.artifacts
+
+# Verbose output for debugging (comment out for cleaner output)
+# --verbose
+
+# Pull policy - set to false if you want to use local images
+--pull=true
