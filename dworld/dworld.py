@@ -24,6 +24,9 @@ class dworld(DWorldDashboardIntegration, commands.Cog):
             force_registration=True,
         )
 
+        # Initialize dashboard integration
+        super().__init__()
+
         # Initialize components in the correct order
         self.ws_manager = WebSocketServerManager(self.bot, self.config)
         self.config_manager = ConfigManager(self.bot, self.config, self.ws_manager.server)

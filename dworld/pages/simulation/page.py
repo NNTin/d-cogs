@@ -3,11 +3,10 @@ from typing import Any, Dict
 import discord
 from redbot.core import commands
 
-from ...utils.dashboard import DashboardIntegration
 from ..common_styles import get_common_styles
 
 
-class SimulationPage(DashboardIntegration):
+class SimulationPage:
     """Simple simulation page that embeds the external d-zone iframe.
 
     This page returns a small HTML payload with an iframe and JS that appends

@@ -6,11 +6,11 @@ import discord
 import wtforms
 from redbot.core import commands
 
-from ...utils import DashboardIntegration, get_form_helpers
+from ...utils import get_form_helpers
 from ..common_styles import get_common_styles
 
 
-class ConfigurationPage(DashboardIntegration):
+class ConfigurationPage:
     """Dashboard page for D-World configuration settings."""
 
     # Type hints for attributes provided by parent cog
