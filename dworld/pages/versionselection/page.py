@@ -31,7 +31,6 @@ class VersionSelectionPage:
         """
         # Check permissions
         is_owner = user.id in self.bot.owner_ids
-        member = guild.get_member(user.id)
 
         if not (is_owner):
             return {
@@ -52,13 +51,17 @@ class VersionSelectionPage:
                     if response.status == 200:
                         data = await response.json()
                         # Validate that the result is a list of strings
-                        if isinstance(data, list) and all(isinstance(v, str) for v in data):
+                        if isinstance(data, list) and all(
+                            isinstance(v, str) for v in data
+                        ):
                             versions = data
                         else:
                             fetch_error = "Invalid versions.json format: expected a list of strings"
                             versions = []
                     else:
-                        fetch_error = f"Failed to fetch versions (HTTP {response.status})"
+                        fetch_error = (
+                            f"Failed to fetch versions (HTTP {response.status})"
+                        )
         except aiohttp.ClientError as e:
             fetch_error = f"Network error: {str(e)}"
         except Exception as e:
@@ -114,7 +117,7 @@ class VersionSelectionPage:
                 <div style="background-color: #d4edda; color: #155724; padding: 15px; 
                      border: 1px solid #c3e6cb; border-radius: 5px; margin: 15px 0;">
                     <strong>Success!</strong> Version preference saved successfully.
-                    {f'Selected version: {selected_value}' if selected_value else 'Using default (latest) version'}
+                    {f"Selected version: {selected_value}" if selected_value else "Using default (latest) version"}
                 </div>
                 """
             except Exception as e:

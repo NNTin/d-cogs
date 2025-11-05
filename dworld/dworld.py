@@ -29,9 +29,13 @@ class dworld(DWorldDashboardIntegration, commands.Cog):
 
         # Initialize components in the correct order
         self.ws_manager = WebSocketServerManager(self.bot, self.config)
-        self.config_manager = ConfigManager(self.bot, self.config, self.ws_manager.server)
-        self.listener_manager = ListenerManager(self.ws_manager.server, self.ws_manager.get_member_role_color)
-        
+        self.config_manager = ConfigManager(
+            self.bot, self.config, self.ws_manager.server
+        )
+        self.listener_manager = ListenerManager(
+            self.ws_manager.server, self.ws_manager.get_member_role_color
+        )
+
         # Initialize configuration
         self.config_manager.initialize_config()
 
@@ -66,19 +70,25 @@ class dworld(DWorldDashboardIntegration, commands.Cog):
     @dworldconfig.command(name="setclientid")
     async def setclientid(self, ctx, client_id: str):
         """Set the global OAuth2 client ID"""
-        success, message, should_broadcast = await self.config_manager.set_client_id(client_id)
+        success, message, should_broadcast = await self.config_manager.set_client_id(
+            client_id
+        )
         await ctx.send(message)
-        
+
         if should_broadcast:
             # Broadcast to all connected servers
             failed_broadcasts = []
             for guild in self.bot.guilds:
                 try:
-                    await self.server.broadcast_client_id_update(str(guild.id), client_id)
+                    await self.server.broadcast_client_id_update(
+                        str(guild.id), client_id
+                    )
                 except Exception as e:
-                    print(f"[ERROR] Failed to broadcast client ID update to guild {guild.name} ({guild.id}): {e}")
+                    print(
+                        f"[ERROR] Failed to broadcast client ID update to guild {guild.name} ({guild.id}): {e}"
+                    )
                     failed_broadcasts.append(guild.name)
-            
+
             if failed_broadcasts:
                 await ctx.send(
                     f"✅ Client ID update has been sent to all connected clients across all servers, "

@@ -15,7 +15,7 @@ class ListenerManager:
 
     def __init__(self, server, get_member_role_color_func):
         """Initialize the listener manager.
-        
+
         Args:
             server: WebSocket server instance
             get_member_role_color_func: Function to get member role color
