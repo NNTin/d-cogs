@@ -6,7 +6,7 @@ class ConfigManager:
 
     def __init__(self, bot, config, server):
         """Initialize the config manager.
-        
+
         Args:
             bot: Discord bot instance
             config: Configuration object
@@ -36,29 +36,29 @@ class ConfigManager:
 
     async def set_client_id(self, client_id: str):
         """Set the global OAuth2 client ID.
-        
+
         Args:
             client_id: The OAuth2 client ID
-            
+
         Returns:
             tuple: (bool, str, bool) - (success, message, should_broadcast)
         """
         # Get the old client ID for comparison
         old_client_id = await self.config.client_id()
-        
+
         await self.config.client_id.set(client_id)
-        
+
         # Check if the client ID changed and we should broadcast
         should_broadcast = old_client_id != client_id
-        
+
         return True, "Global OAuth2 client ID has been set.", should_broadcast
 
     async def update_client_id(self, client_id: str):
         """Update the global OAuth2 client ID and notify all connected clients.
-        
+
         Args:
             client_id: The OAuth2 client ID
-            
+
         Returns:
             tuple: (bool, str) - (success, message)
         """
@@ -71,21 +71,28 @@ class ConfigManager:
             try:
                 await self.server.broadcast_client_id_update(str(guild.id), client_id)
             except Exception as e:
-                print(f"[ERROR] Failed to broadcast client ID update to guild {guild.name} ({guild.id}): {e}")
+                print(
+                    f"[ERROR] Failed to broadcast client ID update to guild {guild.name} ({guild.id}): {e}"
+                )
                 failed_broadcasts.append(guild.name)
 
         if failed_broadcasts:
-            return True, (f"✅ Global OAuth2 client ID has been updated to `{client_id}` and sent to all connected clients, "
-                         f"but failed for {len(failed_broadcasts)} guild(s): {', '.join(failed_broadcasts)}")
+            return True, (
+                f"✅ Global OAuth2 client ID has been updated to `{client_id}` and sent to all connected clients, "
+                f"but failed for {len(failed_broadcasts)} guild(s): {', '.join(failed_broadcasts)}"
+            )
         else:
-            return True, f"✅ Global OAuth2 client ID has been updated to `{client_id}` and sent to all connected clients."
+            return (
+                True,
+                f"✅ Global OAuth2 client ID has been updated to `{client_id}` and sent to all connected clients.",
+            )
 
     async def set_client_secret(self, client_secret: str):
         """Set the global OAuth2 client secret.
-        
+
         Args:
             client_secret: The OAuth2 client secret
-            
+
         Returns:
             tuple: (bool, str) - (success, message)
         """
@@ -94,7 +101,7 @@ class ConfigManager:
 
     async def get_status(self):
         """Get the current global configuration and server status.
-        
+
         Returns:
             str: Formatted status message
         """
@@ -109,9 +116,7 @@ class ConfigManager:
         static_path_status = (
             f"✅ Set to `{static_file_path}`" if static_file_path else "❌ Not set"
         )
-        socket_url_status = (
-            f"✅ Set to `{socketURL}`" if socketURL else "❌ Not set"
-        )
+        socket_url_status = f"✅ Set to `{socketURL}`" if socketURL else "❌ Not set"
 
         # Count passworded servers
         passworded_servers = []
@@ -153,10 +158,10 @@ class ConfigManager:
 
     async def toggle_protection(self, guild):
         """Toggle password protection for a guild.
-        
+
         Args:
             guild: Discord guild object
-            
+
         Returns:
             tuple: (bool, str) - (success, message)
         """
@@ -165,8 +170,10 @@ class ConfigManager:
         client_secret = await self.config.client_secret()
 
         if not client_id or not client_secret:
-            return False, ("❌ Global OAuth2 client ID and client secret must be set before enabling password protection.\n"
-                          "Use `dworldconfig setclientid <id>` and `dworldconfig setclientsecret <secret>` first.")
+            return False, (
+                "❌ Global OAuth2 client ID and client secret must be set before enabling password protection.\n"
+                "Use `dworldconfig setclientid <id>` and `dworldconfig setclientsecret <secret>` first."
+            )
 
         # Get current password protection state
         current_state = await self.config.guild(guild).passworded()
@@ -181,10 +188,10 @@ class ConfigManager:
 
     async def toggle_ignore_offline(self, guild):
         """Toggle whether to ignore offline members for a guild.
-        
+
         Args:
             guild: Discord guild object
-            
+
         Returns:
             tuple: (bool, str) - (new_state, message)
         """
@@ -197,14 +204,17 @@ class ConfigManager:
 
         # Return result
         status = "enabled" if new_state else "disabled"
-        return new_state, f"Ignoring offline members has been **{status}** for this server."
+        return (
+            new_state,
+            f"Ignoring offline members has been **{status}** for this server.",
+        )
 
     async def set_static_path(self, path: str = None):
         """Set the static file path for custom d-zone version serving.
-        
+
         Args:
             path: Path to static files directory (None to disable)
-            
+
         Returns:
             tuple: (bool, str) - (success, message)
         """
@@ -217,7 +227,7 @@ class ConfigManager:
 
     async def get_static_path(self):
         """Get the current static file path configuration.
-        
+
         Returns:
             str: Path if set, None otherwise
         """
@@ -225,10 +235,10 @@ class ConfigManager:
 
     async def set_socket_url(self, url: str = None):
         """Set the socket URL for WebSocket connections.
-        
+
         Args:
             url: WebSocket server URL (None to clear)
-            
+
         Returns:
             tuple: (bool, str) - (success, message)
         """
@@ -241,7 +251,7 @@ class ConfigManager:
 
     async def get_socket_url(self):
         """Get the current socket URL configuration.
-        
+
         Returns:
             str: URL if set, None otherwise
         """

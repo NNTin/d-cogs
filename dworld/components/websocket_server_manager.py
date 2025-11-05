@@ -12,7 +12,7 @@ class WebSocketServerManager:
 
     def __init__(self, bot, config):
         """Initialize the WebSocket server manager.
-        
+
         Args:
             bot: Discord bot instance
             config: Configuration object

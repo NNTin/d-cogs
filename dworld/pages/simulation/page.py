@@ -27,7 +27,7 @@ class SimulationPage:
         """
         # Get guild config once for reuse
         guild_config = self.config.guild(guild)
-        
+
         # Load socketURL from guild config, fallback to global config, then to default
         try:
             socket_url = await guild_config.socketURL()
@@ -51,8 +51,8 @@ class SimulationPage:
         # Sanitize selected_version to avoid double-hash and whitespace issues
         if selected_version:
             # Convert to string, strip whitespace, and remove any leading #
-            selected_version = str(selected_version).strip().lstrip('#')
-        
+            selected_version = str(selected_version).strip().lstrip("#")
+
         # Construct the version hash fragment
         if selected_version:
             version_hash = f"#{selected_version}"
