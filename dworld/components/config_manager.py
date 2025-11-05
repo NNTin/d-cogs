@@ -66,10 +66,19 @@ class ConfigManager:
         await self.config.client_id.set(client_id)
 
         # Broadcast the update to all connected clients across all servers
+        failed_broadcasts = []
         for guild in self.bot.guilds:
-            await self.server.broadcast_client_id_update(str(guild.id), client_id)
+            try:
+                await self.server.broadcast_client_id_update(str(guild.id), client_id)
+            except Exception as e:
+                print(f"[ERROR] Failed to broadcast client ID update to guild {guild.name} ({guild.id}): {e}")
+                failed_broadcasts.append(guild.name)
 
-        return True, f"✅ Global OAuth2 client ID has been updated to `{client_id}` and sent to all connected clients."
+        if failed_broadcasts:
+            return True, (f"✅ Global OAuth2 client ID has been updated to `{client_id}` and sent to all connected clients, "
+                         f"but failed for {len(failed_broadcasts)} guild(s): {', '.join(failed_broadcasts)}")
+        else:
+            return True, f"✅ Global OAuth2 client ID has been updated to `{client_id}` and sent to all connected clients."
 
     async def set_client_secret(self, client_secret: str):
         """Set the global OAuth2 client secret.
