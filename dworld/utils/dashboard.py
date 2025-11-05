@@ -53,7 +53,8 @@ Reference:
     Works with the AAA3A-cogs Dashboard cog for Red-DiscordBot.
 """
 
-from typing import Any, Callable, Tuple, Dict
+from typing import Any, Callable, Dict, Tuple
+
 from redbot.core import commands
 
 # Public API surface

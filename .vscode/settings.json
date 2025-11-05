@@ -8,5 +8,5 @@
     "editor.formatOnSave": true,
     "editor.formatOnType": true
   },
-  "ruff.path": ["ruff"]
+  "python.defaultInterpreterPath": "${env:USERPROFILE}/.venvs/redbot/Scripts/python.exe"
 }

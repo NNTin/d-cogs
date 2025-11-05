@@ -1,6 +1,7 @@
 """Version Selection page for D-World dashboard integration."""
 
 import typing
+
 import aiohttp
 import discord
 import wtforms
