@@ -3,14 +3,16 @@ Dashboard Integration Utilities for d-cogs
 
 This module provides reusable utilities for integrating cogs with the Red-DiscordBot
 dashboard (AAA3A-cogs Dashboard). It eliminates code duplication by providing a
-standard decorator and mixin pattern for dashboard integration.
+standard decorator pattern for dashboard integration.
 
 Usage:
     1. Import the utilities in your cog:
        from dashboard_utils import dashboard_page, DashboardIntegration
 
-    2. Make your cog inherit from DashboardIntegration:
-       class MyCog(DashboardIntegration, commands.Cog):
+    2. Use DashboardManager component for dashboard integration:
+       class MyCog(commands.Cog):
+           def __init__(self, bot):
+               self.dashboard_manager = DashboardManager(self)
            ...
 
     3. Use the @dashboard_page decorator on methods you want to expose:
@@ -32,10 +34,10 @@ Example:
     from redbot.core import commands
     from dashboard_utils import dashboard_page, DashboardIntegration, get_form_helpers
 
-    class MyCog(DashboardIntegration, commands.Cog):
+    class MyCog(commands.Cog):
         def __init__(self, bot):
             self.bot = bot
-            super().__init__()
+            self.dashboard_manager = DashboardManager(self)
 
         @dashboard_page(name="config", description="Configuration page")
         async def config_page(self, user, guild, **kwargs):
@@ -196,7 +198,7 @@ async def update_config_section(section: Any, updates: Dict[str, Any]) -> None:
 
 class DashboardIntegration:
     """
-    Mixin class for dashboard integration.
+    Base class for dashboard integration (composition pattern preferred).
     
     Cogs that inherit from this class will automatically register themselves
     with the AAA3A-cogs Dashboard when it loads. The registration happens
@@ -208,6 +210,9 @@ class DashboardIntegration:
             def __init__(self, bot):
                 self.bot = bot
                 super().__init__()
+    
+    Note: Using DashboardManager component directly is the recommended approach
+    for new implementations.
     
     The dashboard will scan the cog for methods decorated with @dashboard_page
     and automatically register them as available pages in the web interface.
