@@ -21,12 +21,12 @@ import typing
 import discord
 from redbot.core import commands
 
-from .pages.configuration import ConfigurationPage
-from .pages.customization import CustomizationPage
-from .pages.versionselection import VersionSelectionPage
-from .pages.simulation import SimulationPage
-from .utils import dashboard_page
-from .components import DashboardManager
+from ..pages.configuration import ConfigurationPage
+from ..pages.customization import CustomizationPage
+from ..pages.versionselection import VersionSelectionPage
+from ..pages.simulation import SimulationPage
+from ..utils import dashboard_page
+from ..components import DashboardManager
 
 
 class DWorldDashboardIntegration:

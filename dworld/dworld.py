@@ -6,7 +6,7 @@ from redbot.core.bot import Red
 from redbot.core.config import Config
 
 from .components import ConfigManager, WebSocketServerManager, ListenerManager
-from .dashboard_integration import DWorldDashboardIntegration
+from .utils import DWorldDashboardIntegration
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
