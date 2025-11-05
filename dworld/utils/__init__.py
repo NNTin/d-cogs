@@ -6,6 +6,7 @@ from .dashboard import (
     get_guild_config,
     update_config_section,
 )
+from .dashboard_integration import DWorldDashboardIntegration
 
 __all__ = [
     "dashboard_page",
@@ -14,4 +15,5 @@ __all__ = [
     "get_guild_config",
     "get_global_config",
     "update_config_section",
+    "DWorldDashboardIntegration",
 ]
