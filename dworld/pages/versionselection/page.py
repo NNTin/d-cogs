@@ -6,11 +6,11 @@ import discord
 import wtforms
 from redbot.core import commands
 
-from ...utils import DashboardIntegration, get_form_helpers
+from ...utils import get_form_helpers
 from ..common_styles import get_common_styles
 
 
-class VersionSelectionPage(DashboardIntegration):
+class VersionSelectionPage:
     """Version Selection page for D-World dashboard integration."""
 
     bot: commands.Bot
