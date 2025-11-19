@@ -5,20 +5,6 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Activate Red Env",
-            "type": "PowerShell",
-            "request": "launch",
-            "script": "& (Get-Command \"$env:USERPROFILE/.venvs/redbot/Scripts/Activate.ps1\")",
-            "cwd": "${cwd}"
-        },
-        {
-            "name": "Activate Red Dashboard Env",
-            "type": "PowerShell",
-            "request": "launch",
-            "script": "& (Get-Command \"$env:USERPROFILE/.venvs/reddashboard/Scripts/Activate.ps1\")",
-            "cwd": "${cwd}"
-        },
-        {
             "name": "Add Cog",
             "type": "PowerShell",
             "request": "launch",
