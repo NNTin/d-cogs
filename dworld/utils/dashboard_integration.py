@@ -21,14 +21,15 @@ import typing
 import discord
 from redbot.core import commands
 
-from .pages.configuration import ConfigurationPage
-from .pages.customization import CustomizationPage
-from .pages.versionselection import VersionSelectionPage
-from .pages.simulation import SimulationPage
-from .utils import DashboardIntegration, dashboard_page
+from ..components import DashboardManager
+from ..pages.configuration import ConfigurationPage
+from ..pages.customization import CustomizationPage
+from ..pages.simulation import SimulationPage
+from ..pages.versionselection import VersionSelectionPage
+from ..utils import dashboard_page
 
 
-class DWorldDashboardIntegration(DashboardIntegration):
+class DWorldDashboardIntegration:
     """
     Dashboard integration for the dworld cog.
 
@@ -39,6 +40,15 @@ class DWorldDashboardIntegration(DashboardIntegration):
 
     # Type hint for the bot attribute (for type checking purposes)
     bot: commands.Bot
+
+    def __init__(self):
+        """Initialize the dashboard integration with component manager."""
+        self.dashboard_manager = DashboardManager(self)
+
+    @commands.Cog.listener()
+    async def on_dashboard_cog_add(self, dashboard_cog):
+        """Register this cog with the dashboard when it loads."""
+        await self.dashboard_manager.register_with_dashboard(dashboard_cog)
 
     @dashboard_page(
         name="configuration",

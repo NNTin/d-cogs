@@ -6,11 +6,11 @@ import discord
 import wtforms
 from redbot.core import commands
 
-from ...utils import DashboardIntegration, get_form_helpers
+from ...utils import get_form_helpers
 from ..common_styles import get_common_styles
 
 
-class ConfigurationPage(DashboardIntegration):
+class ConfigurationPage:
     """Dashboard page for D-World configuration settings."""
 
     # Type hints for attributes provided by parent cog
@@ -161,11 +161,19 @@ class ConfigurationPage(DashboardIntegration):
             else:
                 try:
                     # Normalize inputs by stripping whitespace (empty becomes None)
-                    client_id_trimmed = (global_form.client_id.data or "").strip() or None
-                    client_secret_trimmed = (global_form.client_secret.data or "").strip() or None
-                    static_file_path_trimmed = (global_form.static_file_path.data or "").strip() or None
-                    socketURL_trimmed = (global_form.socketURL.data or "").strip() or None
-                    
+                    client_id_trimmed = (
+                        global_form.client_id.data or ""
+                    ).strip() or None
+                    client_secret_trimmed = (
+                        global_form.client_secret.data or ""
+                    ).strip() or None
+                    static_file_path_trimmed = (
+                        global_form.static_file_path.data or ""
+                    ).strip() or None
+                    socketURL_trimmed = (
+                        global_form.socketURL.data or ""
+                    ).strip() or None
+
                     # Update global config with trimmed values
                     await self.config.client_id.set(client_id_trimmed)
                     await self.config.client_secret.set(client_secret_trimmed)

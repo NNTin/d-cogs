@@ -1,3 +1,5 @@
+"""WebSocket server manager component for D-World cog."""
+
 import mimetypes
 import os
 
@@ -5,20 +7,28 @@ import aiohttp
 from d_back.server import WebSocketServer
 
 
-class WebsocketServerMixin:
-    """Mixin to provide a websocket server."""
+class WebSocketServerManager:
+    """Manages WebSocket server functionality for D-World."""
 
-    def __init__(self):
+    def __init__(self, bot, config):
+        """Initialize the WebSocket server manager.
+
+        Args:
+            bot: Discord bot instance
+            config: Configuration object
+        """
+        self.bot = bot
+        self.config = config
         self.server = WebSocketServer(port=3000, host="localhost")
 
         # Register callbacks for d-back server
-        self.server.on_get_server_data(self._get_server_data)
-        self.server.on_get_user_data(self._get_user_data)
-        self.server.on_validate_discord_user(self._validate_discord_user)
-        self.server.on_get_client_id(self._get_client_id)
-        self.server.on_static_request(self._handle_static_request)
+        self.server.on_get_server_data(self.get_server_data)
+        self.server.on_get_user_data(self.get_user_data)
+        self.server.on_validate_discord_user(self.validate_discord_user)
+        self.server.on_get_client_id(self.get_client_id)
+        self.server.on_static_request(self.handle_static_request)
 
-    async def _validate_discord_user(
+    async def validate_discord_user(
         self, token: str, user_info: dict, discord_server_id: str
     ) -> bool:
         """Validate Discord OAuth2 user and check if they have access to the server."""
@@ -91,7 +101,7 @@ class WebsocketServerMixin:
             print(f"[ERROR] Discord user validation failed: {e}")
             return False
 
-    async def _get_server_data(self):
+    async def get_server_data(self):
         """Get server data in the format expected by the WebSocket server."""
         server_data = {}
 
@@ -114,7 +124,7 @@ class WebsocketServerMixin:
 
         return server_data
 
-    async def _get_user_data(self, discord_server_id: str = None):
+    async def get_user_data(self, discord_server_id: str = None):
         """Get user data for a specific guild in the format expected by the WebSocket server."""
         if not discord_server_id:
             return {}
@@ -154,7 +164,7 @@ class WebsocketServerMixin:
                 continue
 
             # Get the member's role color (checks config first, then Discord role)
-            role_color = await self._get_member_role_color(member, members_config)
+            role_color = await self.get_member_role_color(member, members_config)
 
             user_data[str(member.id)] = {
                 "uid": str(member.id),
@@ -165,14 +175,14 @@ class WebsocketServerMixin:
 
         return user_data
 
-    async def _get_client_id(self, discord_server_id: str = None):
+    async def get_client_id(self, discord_server_id: str = None):
         """Get the global OAuth2 client ID."""
         # Since client_id is now global, we don't need the discord_server_id parameter
         # but we keep it for compatibility with the callback interface
         client_id = await self.config.client_id()
         return client_id
 
-    async def _get_member_role_color(self, member, members_config=None):
+    async def get_member_role_color(self, member, members_config=None):
         """Get the role color for a member, checking custom config first.
 
         Args:
@@ -211,7 +221,7 @@ class WebsocketServerMixin:
         # Default to white
         return "#ffffff"
 
-    async def _handle_static_request(self, path: str):
+    async def handle_static_request(self, path: str):
         """Handle static file requests with optional custom d-zone version serving.
 
         Args:

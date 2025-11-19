@@ -3,11 +3,10 @@ from typing import Any, Dict
 import discord
 from redbot.core import commands
 
-from ...utils.dashboard import DashboardIntegration
 from ..common_styles import get_common_styles
 
 
-class SimulationPage(DashboardIntegration):
+class SimulationPage:
     """Simple simulation page that embeds the external d-zone iframe.
 
     This page returns a small HTML payload with an iframe and JS that appends
@@ -28,7 +27,7 @@ class SimulationPage(DashboardIntegration):
         """
         # Get guild config once for reuse
         guild_config = self.config.guild(guild)
-        
+
         # Load socketURL from guild config, fallback to global config, then to default
         try:
             socket_url = await guild_config.socketURL()
@@ -52,8 +51,8 @@ class SimulationPage(DashboardIntegration):
         # Sanitize selected_version to avoid double-hash and whitespace issues
         if selected_version:
             # Convert to string, strip whitespace, and remove any leading #
-            selected_version = str(selected_version).strip().lstrip('#')
-        
+            selected_version = str(selected_version).strip().lstrip("#")
+
         # Construct the version hash fragment
         if selected_version:
             version_hash = f"#{selected_version}"

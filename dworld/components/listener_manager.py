@@ -1,28 +1,35 @@
-from redbot.core import commands
+"""Listener manager component for D-World cog."""
 
 
-class ListenerMixin:
-    """A mixin providing listener functionality."""
+class ListenerManager:
+    """Manages Discord event listener functionality for D-World."""
 
-    def __init__(self):
-        pass
+    # Status mapping dictionary to avoid duplication
+    STATUS_MAPPING = {
+        "online": "online",
+        "idle": "idle",
+        "dnd": "dnd",
+        "offline": "offline",
+        "invisible": "offline",
+    }
 
-    @commands.Cog.listener()
-    async def on_member_update(self, before, after):
+    def __init__(self, server, get_member_role_color_func):
+        """Initialize the listener manager.
+
+        Args:
+            server: WebSocket server instance
+            get_member_role_color_func: Function to get member role color
+        """
+        self.server = server
+        self.get_member_role_color_func = get_member_role_color_func
+
+    async def handle_member_update(self, before, after):
         """Handle member status/presence updates."""
         if before.status != after.status:
             # Status changed, broadcast the update
-            role_color = await self._get_member_role_color(after)
+            role_color = await self.get_member_role_color_func(after)
 
-            status_mapping = {
-                "online": "online",
-                "idle": "idle",
-                "dnd": "dnd",
-                "offline": "offline",
-                "invisible": "offline",
-            }
-
-            status = status_mapping.get(str(after.status), "offline")
+            status = self.STATUS_MAPPING.get(str(after.status), "offline")
 
             await self.server.broadcast_presence(
                 server=str(after.guild.id),
@@ -32,20 +39,11 @@ class ListenerMixin:
                 role_color=role_color,
             )
 
-    @commands.Cog.listener()
-    async def on_member_join(self, member):
+    async def handle_member_join(self, member):
         """Handle member joining a guild."""
-        role_color = await self._get_member_role_color(member)
+        role_color = await self.get_member_role_color_func(member)
 
-        status_mapping = {
-            "online": "online",
-            "idle": "idle",
-            "dnd": "dnd",
-            "offline": "offline",
-            "invisible": "offline",
-        }
-
-        status = status_mapping.get(str(member.status), "offline")
+        status = self.STATUS_MAPPING.get(str(member.status), "offline")
 
         await self.server.broadcast_presence(
             server=str(member.guild.id),
@@ -55,8 +53,7 @@ class ListenerMixin:
             role_color=role_color,
         )
 
-    @commands.Cog.listener()
-    async def on_member_remove(self, member):
+    async def handle_member_remove(self, member):
         """Handle member leaving a guild."""
         await self.server.broadcast_presence(
             server=str(member.guild.id),
@@ -65,8 +62,7 @@ class ListenerMixin:
             delete=True,
         )
 
-    @commands.Cog.listener()
-    async def on_message(self, message):
+    async def handle_message(self, message):
         """Handle new messages and broadcast them."""
         # Skip messages from bots (including this bot)
         if message.author.bot:
