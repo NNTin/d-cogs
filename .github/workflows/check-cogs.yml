@@ -1,9 +1,9 @@
 
 # For tests with nektos/act use:
-# act -e .\.github\workflows\fixtures\push.json -W .\.github\workflows\check-cogs.yml --container-options "-v /c/privat/gitssh/Red-DiscordBot/dist:/tmp/dist:ro" --secret-file .secrets
+# act -e .\.github\workflows\fixtures\push.json -W .\.github\workflows\check-cogs.yml --container-options "-v /c/privat/codex/d-cogs/.artifacts/dist:/tmp/dist:ro" --secret-file .secrets
 
 # To test with local Red-DiscordBot build artifact, mount the host folder containing the built wheels to /tmp/dist in the container.
-# docker run -it --rm -v /c/privat/gitssh/Red-DiscordBot/dist:/tmp/dist python:3.11 bash
+# docker run -it --rm -v /c/privat/codex/d-cogs/.artifacts/dist:/tmp/dist python:3.11 bash
 name: "Check Cogs"
 
 on:
@@ -40,11 +40,15 @@ jobs:
           token: ${{ secrets.DISCORD_BOT_TOKEN }}
           optional_args: "--no-cogs"  # Example optional argument to run without loading any cogs
         continue-on-error: true  # This step sets up the configuration, --dry-run fails due to bug in Red-DiscordBot
-        
+      
+      - name: Install dependencies
+        run: |
+          uv pip install d-back wtforms --system
+
       - name: Test cogs via RPC
         uses: nntin/d-flows/actions/test-red-discordbot@feature/check-cog
         with:
           token: ${{ secrets.DISCORD_BOT_TOKEN }}
-          cog_paths: "./dworld"
+          cog_paths: "./dworld"  # comma-separated list of cog paths
           rpc_port: "6133"
         # Validates that each listed cog can be loaded and unloaded through RPC without errors.
