@@ -136,8 +136,6 @@ jobs:
         with:
           title: 'Cog Validation Results'
           markdown: |
-            ## Cog Validation Results
-
             | Stage | Status |
             |-------|--------|
             | Build Red-DiscordBot | ${{ needs.install.result == 'success' && '✅ Passed' || '❌ Failed' }} |
