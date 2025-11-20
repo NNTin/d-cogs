@@ -102,6 +102,7 @@ jobs:
             --arg test_status "$TEST_EMOJI $TEST_STATUS" \
             --arg cogs "${{ env.COG_PATHS }}" \
             --arg artifact "${{ env.BUILD_ARTIFACT_NAME }}" \
+            --arg actor "${{ github.actor }}" \
             --arg pr_number "${{ github.event.pull_request.number }}" \
             --arg pr_url "${{ github.event.pull_request.html_url }}" \
             --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
