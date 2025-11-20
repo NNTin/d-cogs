@@ -1,0 +1,28 @@
+name: Build and Install Red-DiscordBot
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Red-DiscordBot
+        uses: nntin/d-flows/actions/build-red-discordbot@feature/check-cog
+        with:
+          red_commit: ""                  # optional commit SHA
+          artifact_name: "my-build-artifact"  # optional artifact name
+
+  install:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Red-DiscordBot
+        uses: nntin/d-flows/actions/install-red-discordbot@feature/check-cog
+        with:
+          artifact_name: "my-build-artifact"  # same artifact name used for build
