@@ -10,6 +10,11 @@ on:
   push:
   pull_request:
 
+env:
+  BUILD_ARTIFACT_NAME: "my-build-artifact"
+  COG_PATHS: "dworld"
+  RPC_PORT: "6133"
+
 jobs:
   install:
     runs-on: ubuntu-latest
@@ -20,7 +25,7 @@ jobs:
         uses: nntin/d-flows/actions/build-red-discordbot@v1
         with:
           red_commit: ""                  # optional commit SHA
-          artifact_name: "my-build-artifact"  # optional artifact name
+          artifact_name: ${{ env.BUILD_ARTIFACT_NAME }}  # optional artifact name
 
   test-cogs:
     runs-on: ubuntu-latest
@@ -32,7 +37,7 @@ jobs:
       - name: Install Red-DiscordBot
         uses: nntin/d-flows/actions/install-red-discordbot@v1
         with:
-          artifact_name: "my-build-artifact"  # same artifact name used for build
+          artifact_name: ${{ env.BUILD_ARTIFACT_NAME }}  # same artifact name used for build
 
       - name: Configure Red-DiscordBot
         uses: nntin/d-flows/actions/setup-red-discordbot@v1
@@ -51,6 +56,110 @@ jobs:
         uses: nntin/d-flows/actions/test-red-discordbot@v1
         with:
           token: ${{ secrets.DISCORD_BOT_TOKEN }}
-          cog_paths: "dworld"  # comma-separated list of cog paths
-          rpc_port: "6133"
+          cog_paths: ${{ env.COG_PATHS }}  # comma-separated list of cog paths
+          rpc_port: ${{ env.RPC_PORT }}
         # Validates that each listed cog can be loaded and unloaded through RPC without errors.
+
+  ##################################################################
+  ####        Build validation results for Discord notification ####
+  ##################################################################
+  build-validation-fields:
+    name: Build Validation Fields
+    runs-on: ubuntu-latest
+    needs: [install, test-cogs]
+    if: always()
+    outputs:
+      discord_fields: ${{ steps.discord_fields.outputs.fields }}
+      validation_result: ${{ steps.validation_result.outputs.result }}
+
+    steps:
+      - name: Determine validation result
+        id: validation_result
+        run: |
+          BUILD_STATUS="${{ needs.install.result }}"
+          TEST_STATUS="${{ needs['test-cogs'].result }}"
+
+          if [[ "$BUILD_STATUS" == "success" && "$TEST_STATUS" == "success" ]]; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Discord Fields
+        id: discord_fields
+        run: |
+          BUILD_STATUS="${{ needs.install.result }}"
+          TEST_STATUS="${{ needs['test-cogs'].result }}"
+
+          BUILD_EMOJI=$([[ "$BUILD_STATUS" == "success" ]] && echo "✅" || echo "❌")
+          TEST_EMOJI=$([[ "$TEST_STATUS" == "success" ]] && echo "✅" || echo "❌")
+
+          FIELDS=$(jq -n \
+            --arg build_status "$BUILD_EMOJI $BUILD_STATUS" \
+            --arg test_status "$TEST_EMOJI $TEST_STATUS" \
+            --arg cogs "${{ env.COG_PATHS }}" \
+            --arg artifact "${{ env.BUILD_ARTIFACT_NAME }}" \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '[
+              {"name": "Build Red-DiscordBot", "value": $build_status, "inline": true},
+              {"name": "Cog Tests", "value": $test_status, "inline": true},
+              {"name": "Cogs Tested", "value": $cogs, "inline": true},
+              {"name": "Artifact", "value": $artifact, "inline": true},
+              {"name": "Run Details", "value": ("[View Full Run](" + $run_url + ")"), "inline": false}
+            ]')
+
+          delimiter="$(openssl rand -hex 8)"
+          {
+            echo "fields<<${delimiter}"
+            echo "$FIELDS"
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+  ##################################################################
+  ####          Display validation results via Step Summary        ####
+  ##################################################################
+  display-validation-summary:
+    name: Display Validation Summary
+    runs-on: ubuntu-latest
+    needs: [install, test-cogs, build-validation-fields]
+    if: always()
+
+    steps:
+      - name: Write Step Summary
+        uses: nntin/d-flows/actions/step-summary@v1
+        with:
+          title: 'Cog Validation Results'
+          markdown: |
+            ## Cog Validation Results
+
+            | Stage | Status |
+            |-------|--------|
+            | Build Red-DiscordBot | ${{ needs.install.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+            | Cog Tests | ${{ needs['test-cogs'].result == 'success' && '✅ Passed' || '❌ Failed' }} |
+
+            **Artifact**: `${{ env.BUILD_ARTIFACT_NAME }}`
+
+            **Cogs Tested**: `${{ env.COG_PATHS }}`
+
+            **Overall Result**: ${{ needs.build-validation-fields.outputs.validation_result == 'success' && '✅ All checks passed' || '⚠️ Some checks failed or were skipped' }}
+          overwrite: false
+
+  ##################################################################
+  ####              Display validation results via Discord         ####
+  ##################################################################
+  notify-cog-validation:
+    name: Notify Validation Results
+    runs-on: ubuntu-latest
+    needs: [build-validation-fields, display-validation-summary]
+    if: always()
+
+    steps:
+      - name: Send Discord Notification
+        uses: nntin/d-flows/actions/discord-notify@v1
+        with:
+          webhook_url: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          message_type: 'embed'
+          title: ${{ needs.build-validation-fields.outputs.validation_result == 'success' && '✅ Cog Validation Completed Successfully' || '⚠️ Cog Validation Completed with Issues' }}
+          description: ${{ needs.build-validation-fields.outputs.validation_result == 'success' && format('All cogs ({0}) passed build and RPC validation.', env.COG_PATHS) || format('One or more stages failed for cogs: {0}. Review the workflow logs.', env.COG_PATHS) }}
+          color: ${{ needs.build-validation-fields.outputs.validation_result == 'success' && '3066993' || '16776960' }}
+          fields: ${{ needs.build-validation-fields.outputs.discord_fields }}
