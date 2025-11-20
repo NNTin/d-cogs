@@ -7,7 +7,6 @@
 name: "Check Cogs"
 
 on:
-  push:
   pull_request:
 
 env:
@@ -103,12 +102,15 @@ jobs:
             --arg test_status "$TEST_EMOJI $TEST_STATUS" \
             --arg cogs "${{ env.COG_PATHS }}" \
             --arg artifact "${{ env.BUILD_ARTIFACT_NAME }}" \
+            --arg pr_number "${{ github.event.pull_request.number }}" \
+            --arg pr_url "${{ github.event.pull_request.html_url }}" \
             --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             '[
               {"name": "Build Red-DiscordBot", "value": $build_status, "inline": true},
               {"name": "Cog Tests", "value": $test_status, "inline": true},
               {"name": "Cogs Tested", "value": $cogs, "inline": true},
               {"name": "Artifact", "value": $artifact, "inline": true},
+              {"name": "PR Details", "value": ("[#" + $pr_number + "](" + $pr_url + ") by @" + $actor), "inline": false},
               {"name": "Run Details", "value": ("[View Full Run](" + $run_url + ")"), "inline": false}
             ]')
 
