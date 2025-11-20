@@ -89,3 +89,5 @@ ENV/
 .ropeproject
 *.xml
 .idea/nntin-cogs.iml
+
+.secrets
