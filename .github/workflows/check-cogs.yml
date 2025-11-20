@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Red-DiscordBot
-        uses: nntin/d-flows/actions/build-red-discordbot@feature/check-cog
+        uses: nntin/d-flows/actions/build-red-discordbot@v1
         with:
           red_commit: ""                  # optional commit SHA
           artifact_name: "my-build-artifact"  # optional artifact name
@@ -30,25 +30,27 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Red-DiscordBot
-        uses: nntin/d-flows/actions/install-red-discordbot@feature/check-cog
+        uses: nntin/d-flows/actions/install-red-discordbot@v1
         with:
           artifact_name: "my-build-artifact"  # same artifact name used for build
 
       - name: Configure Red-DiscordBot
-        uses: nntin/d-flows/actions/setup-red-discordbot@feature/check-cog
+        uses: nntin/d-flows/actions/setup-red-discordbot@v1
         with:
           token: ${{ secrets.DISCORD_BOT_TOKEN }}
           optional_args: "--no-cogs"  # Example optional argument to run without loading any cogs
-        continue-on-error: true  # This step sets up the configuration, --dry-run fails due to bug in Red-DiscordBot
+        # --dry-run fails due to bug in Red-DiscordBot https://github.com/Cog-Creators/Red-DiscordBot/issues/6572
+        continue-on-error: true
       
       - name: Install dependencies
         run: |
+          # For dworld cog d-back and wtforms are required
           uv pip install d-back wtforms --system
 
       - name: Test cogs via RPC
-        uses: nntin/d-flows/actions/test-red-discordbot@feature/check-cog
+        uses: nntin/d-flows/actions/test-red-discordbot@v1
         with:
           token: ${{ secrets.DISCORD_BOT_TOKEN }}
-          cog_paths: "./dworld"  # comma-separated list of cog paths
+          cog_paths: "dworld"  # comma-separated list of cog paths
           rpc_port: "6133"
         # Validates that each listed cog can be loaded and unloaded through RPC without errors.
