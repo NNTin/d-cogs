@@ -93,3 +93,5 @@ ENV/
 /.chunkhound.json
 /.chunkhound/db
 /.vscode/mcp.json
+
+.secrets
