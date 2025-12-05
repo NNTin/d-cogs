@@ -173,8 +173,8 @@ Function Install-RedEnvironments {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Successfully installed pip and wheel" -ForegroundColor Green
     }
     
-    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing Red-DiscordBot and d-back via uv... (this may take a few minutes)" -ForegroundColor Cyan
-    & $uvPath pip install --python $redbotPythonPath -U Red-DiscordBot d-back
+    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing Red-DiscordBot, d-back, and cookiecutter via uv... (this may take a few minutes)" -ForegroundColor Cyan
+    & $uvPath pip install --python $redbotPythonPath -U Red-DiscordBot d-back cookiecutter
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to install Red-DiscordBot and d-back. Manual installation may be required." -ForegroundColor Red
         Write-Host "You can try manually by activating the venv and running: pip install -U Red-DiscordBot d-back" -ForegroundColor Yellow
@@ -325,6 +325,40 @@ Function Get-UvPath {
     return $null
 }
 
+Function Ensure-PythonPackages {
+    param (
+        [string]$PythonPath,
+        [string[]]$Packages
+    )
+
+    $uvPath = Get-UvPath
+    if (-not $uvPath) {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: uv command not found. Please install uv first or add it to PATH." -ForegroundColor Red
+        return $false
+    }
+
+    $missing = @()
+    foreach ($pkg in $Packages) {
+        & $uvPath pip show --python $PythonPath $pkg | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            $missing += $pkg
+        }
+    }
+
+    if ($missing.Count -eq 0) {
+        return $true
+    }
+
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Installing missing packages in $($PythonPath): $($missing -join ', ')" -ForegroundColor Cyan
+    & $uvPath pip install --python $PythonPath -U @missing
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to install packages: $($missing -join ', ')" -ForegroundColor Red
+        return $false
+    }
+
+    return $true
+}
+
 Function Ensure-VirtualEnvironments {
     param(
         [switch]$RequireRedbot,
@@ -379,6 +413,9 @@ if ($needsRedbot -or $needsDashboard) {
 }
 
 if ($AddCog) {
+    if (-not (Ensure-PythonPackages -PythonPath $python -Packages @("cookiecutter"))) {
+        exit 1
+    }
     Assert-Errors $python -m cookiecutter https://github.com/Cog-Creators/cog-cookiecutter
 }
 
