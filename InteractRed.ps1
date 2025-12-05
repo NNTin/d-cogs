@@ -84,74 +84,50 @@ Function Install-RedEnvironments {
     Write-Host "  - redbot: $redbotPath" -ForegroundColor Cyan
     Write-Host "  - reddashboard: $dashboardPath`n" -ForegroundColor Cyan
     
-    # Check Python availability
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Checking Python availability..." -ForegroundColor Cyan
-    
-    # Try to find Python interpreter with fallbacks
-    $pythonCmd = $null
-    $pythonCandidates = @('python')
-    
-    if ($IsLinuxOS) {
-        $pythonCandidates += 'python3'
-    } else {
-        $pythonCandidates += @('py -3', 'python3')
-    }
-    
-    foreach ($candidate in $pythonCandidates) {
-        try {
-            $testVersion = $null
-            if ($candidate -eq 'py -3') {
-                $testVersion = & py -3 --version 2>&1
-            } else {
-                $testVersion = & $candidate --version 2>&1
-            }
-            
-            if ($testVersion -match 'Python \d+\.\d+') {
-                $pythonCmd = $candidate
-                Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Found Python using: $candidate" -ForegroundColor Green
-                break
-            }
-        } catch {
-            # Candidate not available, try next
-            continue
-        }
-    }
-    
-    if (-not $pythonCmd) {
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Python not found in PATH. Please install Python 3.8-3.11 first." -ForegroundColor Red
-        Write-Host "Tried: $($pythonCandidates -join ', ')" -ForegroundColor Red
+    # Ensure Python 3.11 via uv
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Ensuring Python 3.11 via uv..." -ForegroundColor Cyan
+    $uvPath = Get-UvPath
+    if (-not $uvPath) {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: uv command not found. Please install uv first or add it to PATH." -ForegroundColor Red
+        Write-Host "Current PATH: $($env:PATH)" -ForegroundColor Yellow
         $hadError = $true
-        $errorMessages += "Python interpreter not found"
+        $errorMessages += "uv command missing"
         return $false
     }
-    
-    # Get and validate Python version
+
     try {
-        if ($pythonCmd -eq 'py -3') {
-            $pythonVersion = & py -3 --version 2>&1
-        } else {
-            $pythonVersion = & $pythonCmd --version 2>&1
-        }
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Found: $pythonVersion" -ForegroundColor Green
-        
-        # Parse version and check range
-        if ($pythonVersion -match 'Python (\d+)\.(\d+)') {
-            $major = [int]$matches[1]
-            $minor = [int]$matches[2]
-            if ($major -eq 3 -and $minor -ge 8 -and $minor -le 11) {
-                Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Python version is compatible (3.8-3.11)" -ForegroundColor Green
-            } else {
-                Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Python version $major.$minor is not supported. Red-DiscordBot requires Python 3.8-3.11." -ForegroundColor Red
-                Write-Host "Please install a compatible Python version and try again." -ForegroundColor Red
-                $hadError = $true
-                $errorMessages += "Incompatible Python version ($major.$minor)"
-                return $false
-            }
+        & $uvPath python install 3.11 --managed-python | Out-Null
+    } catch {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to install Python 3.11 via uv." -ForegroundColor Red
+        $hadError = $true
+        $errorMessages += "uv python install failed"
+        return $false
+    }
+
+    $pythonCmd = $null
+    try {
+        $pythonCmd = (& $uvPath python find 3.11 --managed-python).Trim()
+        if (-not (Test-Path $pythonCmd)) {
+            $pythonCmd = $null
         }
     } catch {
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to retrieve Python version." -ForegroundColor Red
+        $pythonCmd = $null
+    }
+
+    if (-not $pythonCmd) {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Could not locate uv-managed Python 3.11." -ForegroundColor Red
         $hadError = $true
-        $errorMessages += "Failed to retrieve Python version"
+        $errorMessages += "Python 3.11 not found after uv install"
+        return $false
+    }
+
+    try {
+        $pythonVersion = & $pythonCmd --version 2>&1
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Using: $pythonCmd ($pythonVersion)" -ForegroundColor Green
+    } catch {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to run Python 3.11 from uv." -ForegroundColor Red
+        $hadError = $true
+        $errorMessages += "Failed to execute uv-managed Python"
         return $false
     }
     
@@ -178,11 +154,7 @@ Function Install-RedEnvironments {
     if (Test-Path $redbotPythonPath) {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Redbot virtual environment already exists, skipping creation" -ForegroundColor Yellow
     } else {
-        if ($pythonCmd -eq 'py -3') {
-            & py -3 -m venv $redbotPath
-        } else {
-            & $pythonCmd -m venv $redbotPath
-        }
+        & $uvPath venv --python $pythonCmd --managed-python --seed $redbotPath
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to create redbot virtual environment" -ForegroundColor Red
             $hadError = $true
@@ -193,17 +165,16 @@ Function Install-RedEnvironments {
     }
     
     # Install redbot dependencies
-    $redbotPip = Join-Path $redbotPath $pipSuffix
-    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing pip and wheel in redbot environment..." -ForegroundColor Cyan
-    & $redbotPip install -U pip wheel
+    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing pip and wheel in redbot environment via uv..." -ForegroundColor Cyan
+    & $uvPath pip install --python $redbotPythonPath -U pip wheel
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Warning: Failed to upgrade pip and wheel. Continuing anyway..." -ForegroundColor Yellow
     } else {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Successfully installed pip and wheel" -ForegroundColor Green
     }
     
-    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing Red-DiscordBot and d-back... (this may take a few minutes)" -ForegroundColor Cyan
-    & $redbotPip install -U Red-DiscordBot d-back
+    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing Red-DiscordBot, d-back, and cookiecutter via uv... (this may take a few minutes)" -ForegroundColor Cyan
+    & $uvPath pip install --python $redbotPythonPath -U Red-DiscordBot d-back cookiecutter
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to install Red-DiscordBot and d-back. Manual installation may be required." -ForegroundColor Red
         Write-Host "You can try manually by activating the venv and running: pip install -U Red-DiscordBot d-back" -ForegroundColor Yellow
@@ -219,11 +190,7 @@ Function Install-RedEnvironments {
     if (Test-Path $dashboardPythonPath) {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Reddashboard virtual environment already exists, skipping creation" -ForegroundColor Yellow
     } else {
-        if ($pythonCmd -eq 'py -3') {
-            & py -3 -m venv $dashboardPath
-        } else {
-            & $pythonCmd -m venv $dashboardPath
-        }
+        & $uvPath venv --python $pythonCmd --managed-python --seed $dashboardPath
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to create reddashboard virtual environment" -ForegroundColor Red
             $hadError = $true
@@ -234,17 +201,16 @@ Function Install-RedEnvironments {
     }
     
     # Install reddashboard dependencies
-    $dashboardPip = Join-Path $dashboardPath $pipSuffix
-    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing pip, setuptools, and wheel in reddashboard environment..." -ForegroundColor Cyan
-    & $dashboardPip install -U pip setuptools wheel
+    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing pip, setuptools, and wheel in reddashboard environment via uv..." -ForegroundColor Cyan
+    & $uvPath pip install --python $dashboardPythonPath -U pip setuptools wheel
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Warning: Failed to upgrade pip, setuptools, and wheel. Continuing anyway..." -ForegroundColor Yellow
     } else {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Successfully installed pip, setuptools, and wheel" -ForegroundColor Green
     }
     
-    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing Red-Web-Dashboard... (this may take a few minutes)" -ForegroundColor Cyan
-    & $dashboardPip install -U Red-Web-Dashboard
+    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Installing Red-Web-Dashboard via uv... (this may take a few minutes)" -ForegroundColor Cyan
+    & $uvPath pip install --python $dashboardPythonPath -U Red-Web-Dashboard
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to install Red-Web-Dashboard. Manual installation may be required." -ForegroundColor Red
         Write-Host "You can try manually by activating the venv and running: pip install -U Red-Web-Dashboard" -ForegroundColor Yellow
@@ -301,20 +267,155 @@ Function Assert-Errors {
         [parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
     )
 
-    & (Get-Command $Command -Type Application -TotalCount 1) $Arguments
+    # Resolve either an absolute path or something on PATH
+    $resolvedCommand = $null
+
+    if (Test-Path $Command) {
+        $resolvedCommand = $Command
+    } else {
+        $commandInfo = Get-Command $Command -ErrorAction SilentlyContinue
+        if ($commandInfo) {
+            $resolvedCommand = if ($commandInfo.Source) { $commandInfo.Source } elseif ($commandInfo.Definition) { $commandInfo.Definition } else { $commandInfo.Path }
+        }
+    }
+
+    if (-not $resolvedCommand) {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Command not found: $Command" -ForegroundColor Red
+        return
+    }
+
+    & $resolvedCommand @Arguments
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host ("$($TXT_RED)Error calling {0} {1}$($TXT_CLEAR)" -f $Command, [System.String]::Join(" ", $Arguments))
     }
 }
 
+Function Get-UvPath {
+    $cmd = Get-Command uv -ErrorAction SilentlyContinue
+    if ($cmd) {
+        $path = $cmd.Source
+        if (-not $path) { $path = $cmd.Path }
+        if (-not $path) { $path = $cmd.Definition }
+        if ($path) { return $path }
+    }
+
+    $candidates = @()
+    if ($IsLinuxOS) {
+        $candidates += @(
+            (Join-Path $env:HOME ".local/bin/uv"),
+            "/usr/local/bin/uv",
+            "/usr/bin/uv"
+        )
+    } else {
+        $candidates += @(
+            (Join-Path $env:LOCALAPPDATA "uv/uv.exe"),
+            (Join-Path $env:USERPROFILE "AppData/Local/uv/uv.exe"),
+            (Join-Path $env:USERPROFILE "AppData/Local/Programs/Python/Scripts/uv.exe"),
+            (Join-Path $env:USERPROFILE "AppData/Roaming/Python/Scripts/uv.exe")
+        )
+    }
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+Function Ensure-PythonPackages {
+    param (
+        [string]$PythonPath,
+        [string[]]$Packages
+    )
+
+    $uvPath = Get-UvPath
+    if (-not $uvPath) {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: uv command not found. Please install uv first or add it to PATH." -ForegroundColor Red
+        return $false
+    }
+
+    $missing = @()
+    foreach ($pkg in $Packages) {
+        & $uvPath pip show --python $PythonPath $pkg | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            $missing += $pkg
+        }
+    }
+
+    if ($missing.Count -eq 0) {
+        return $true
+    }
+
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Installing missing packages in $($PythonPath): $($missing -join ', ')" -ForegroundColor Cyan
+    & $uvPath pip install --python $PythonPath -U @missing
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: Failed to install packages: $($missing -join ', ')" -ForegroundColor Red
+        return $false
+    }
+
+    return $true
+}
+
+Function Ensure-VirtualEnvironments {
+    param(
+        [switch]$RequireRedbot,
+        [switch]$RequireDashboard
+    )
+
+    $missing = @()
+    if ($RequireRedbot -and -not (Test-Path $python)) {
+        $missing += "redbot"
+    }
+    if ($RequireDashboard -and -not (Test-Path $pythonDashboard)) {
+        $missing += "reddashboard"
+    }
+
+    if ($missing.Count -eq 0) {
+        return $true
+    }
+
+    Write-Host "`n[$(Get-Date -Format 'HH:mm:ss')] Missing virtual environment(s): $($missing -join ', ')." -ForegroundColor Yellow
+    Write-Host "Running installer to create required environment(s)..." -ForegroundColor Yellow
+    $installResult = Install-RedEnvironments
+
+    if (-not $installResult) {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Unable to create required environment(s). Aborting." -ForegroundColor Red
+        return $false
+    }
+
+    $postCheckFailed = ($RequireRedbot -and -not (Test-Path $python)) -or ($RequireDashboard -and -not (Test-Path $pythonDashboard))
+    if ($postCheckFailed) {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Installation completed but required executables were not found." -ForegroundColor Red
+        return $false
+    }
+
+    return $true
+}
+
 #-------------------------------------------------------- Script --------------------------------------------------#
 
 if ($InstallRequirements) {
-    Install-RedEnvironments
+    if (-not (Install-RedEnvironments)) {
+        exit 1
+    }
+}
+
+$needsRedbot = $AddCog -or $StartBot
+$needsDashboard = $StartDashboard
+
+if ($needsRedbot -or $needsDashboard) {
+    if (-not (Ensure-VirtualEnvironments -RequireRedbot:$needsRedbot -RequireDashboard:$needsDashboard)) {
+        exit 1
+    }
 }
 
 if ($AddCog) {
+    if (-not (Ensure-PythonPackages -PythonPath $python -Packages @("cookiecutter"))) {
+        exit 1
+    }
     Assert-Errors $python -m cookiecutter https://github.com/Cog-Creators/cog-cookiecutter
 }
 

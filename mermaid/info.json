@@ -1,0 +1,22 @@
+{
+    "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog.schema.json",
+    "name": "mermaid",
+    "short": "Create mermaid images from text",
+    "description": "Using weasyprint, mermaid.js a mermaid image is created from text. In future we will support prompt using the assistant cog as dependency",
+    "end_user_data_statement": "This cog does not persistently store any data or metadata about users.",
+    "install_msg": "Thanks for using my cog. Feel free on hitting me up on the Red discord server and joining me on my AI journey.",
+    "author": [
+        "Tin Nguyen"
+    ],
+    "required_cogs": {},
+    "requirements": ["jinja2==3.1.6", "playwright>=1.49.0"],
+    "tags": [
+        "mermaid",
+        "playwright",
+        "jinja2"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}
