@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {% set page_title = page_title | default('Mermaid Sequence Diagram') %}
+  {% set main_title = main_title | default('Hybrid Architecture Flow') %}
+  {% set description = description | default('Sequence diagram rendered with Mermaid.') %}
+  {% set default_diagram %}
+sequenceDiagram
+    participant User as User Device
+    participant Keycloak as Keycloak (OIDC)
+    participant Headscale as Headscale (Discovery)
+    participant SyncService as Sync Service (Bridge)
+    participant WireGuard as WireGuard Server
+    participant LAN as LAN Services
+
+    Note over User,LAN: Proof of Work: Hybrid Architecture
+
+    %% Step 1: User authenticates via Keycloak OIDC
+    User->>Keycloak: Login with test user credentials
+    Keycloak-->>User: Issue OIDC token
+
+    %% Step 2: User registers node with Headscale
+    User->>Headscale: Register node with OIDC token
+    Headscale->>Keycloak: Validate OIDC token
+    Keycloak-->>Headscale: Token valid
+    Headscale-->>User: Node registered (node_id)
+
+    %% Step 3: Sync Service detects new node
+    SyncService->>Headscale: Poll API for new nodes
+    Headscale-->>SyncService: New node detected (node_id)
+    
+    %% Step 4: Sync Service creates WireGuard peer
+    SyncService->>SyncService: Generate WireGuard peer keys
+    SyncService->>WireGuard: Add peer config to wg0.conf
+    WireGuard->>WireGuard: Reload config (wg syncconf)
+    SyncService-->>User: Peer config available (API endpoint)
+
+    %% Step 5: User retrieves WireGuard config
+    User->>SyncService: GET /peer/:node_id/config
+    SyncService-->>User: WireGuard peer config (keys, endpoint, allowed IPs)
+
+    %% Step 6: User connects via WireGuard
+    User->>WireGuard: Connect with peer config
+    WireGuard-->>User: VPN tunnel established
+
+    %% Step 7: User accesses LAN services
+    User->>LAN: Access services via VPN tunnel
+    LAN-->>User: Service response
+  {% endset %}
+  <title>{{ page_title }}</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 20px 24px;
+      max-width: 1200px;
+      width: 100%;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 22px;
+      letter-spacing: 0.5px;
+      color: #f8fafc;
+    }
+    p {
+      margin: 0 0 18px;
+      color: #cbd5e1;
+    }
+    .mermaid {
+      background: #0b1220;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 12px;
+    }
+  </style>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      securityLevel: 'strict'
+    });
+  </script>
+</head>
+<body>
+  <main class="card">
+    <h1>{{ main_title }}</h1>
+    <p>{{ description }}</p>
+    <div class="mermaid">{{ diagram | default(default_diagram) | safe }}</div>
+  </main>
+</body>
+</html>

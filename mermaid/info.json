@@ -9,10 +9,11 @@
         "Tin Nguyen"
     ],
     "required_cogs": {},
-    "requirements": [],
+    "requirements": ["weasyprint==67.0", "jinja2==3.1.6"],
     "tags": [
         "mermaid",
-        "weasyprint"
+        "weasyprint",
+        "jinja2"
     ],
     "min_bot_version": "3.5.0",
     "hidden": false,
