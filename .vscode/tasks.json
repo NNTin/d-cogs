@@ -6,8 +6,11 @@
         {
             "label": "Install virtual environments and dependencies",
             "type": "shell",
-            "command": "powershell.exe",
+            "command": "pwsh",
             "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
                 "-File",
                 "${workspaceFolder}/InteractRed.ps1",
                 "-InstallRequirements"
@@ -17,8 +20,11 @@
         {
             "label": "Add Cog",
             "type": "shell",
-            "command": "powershell.exe",
+            "command": "pwsh",
             "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
                 "-File",
                 "${workspaceFolder}/InteractRed.ps1",
                 "-AddCog"
@@ -28,8 +34,11 @@
         {
             "label": "Start Discord Bot",
             "type": "shell",
-            "command": "powershell.exe",
+            "command": "pwsh",
             "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
                 "-File",
                 "${workspaceFolder}/InteractRed.ps1",
                 "-StartBot"
@@ -40,8 +49,11 @@
         {
             "label": "Start Dashboard",
             "type": "shell",
-            "command": "powershell.exe",
+            "command": "pwsh",
             "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
                 "-File",
                 "${workspaceFolder}/InteractRed.ps1",
                 "-StartDashboard"
