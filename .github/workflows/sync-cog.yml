@@ -14,7 +14,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Sync assistant cog
-        uses: nntin/d-flows/actions/sync-cogs@bfda97c0bf6d168f1b8c70328ba5f5be578c0ca9
+        uses: nntin/d-flows/actions/sync-cogs@dd1635a26084c4b6000951a7413085e7255c3fd7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           source_repo: https://github.com/nntin/vrt-cogs.git
@@ -28,7 +28,7 @@ jobs:
             This PR syncs the latest changes from the `assistant` cog in the `vrt-cogs` repository. Repository URL: https://github.com/vertyco/vrt-cogs, Fork: https://github.com/nntin/vrt-cogs
 
       - name: Sync hotreload cog
-        uses: nntin/d-flows/actions/sync-cogs@bfda97c0bf6d168f1b8c70328ba5f5be578c0ca9
+        uses: nntin/d-flows/actions/sync-cogs@dd1635a26084c4b6000951a7413085e7255c3fd7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           source_repo: https://c.csw.im/cswimr/SeaCogs.git
