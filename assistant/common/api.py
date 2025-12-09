@@ -13,7 +13,7 @@ import ollama
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.create_embedding_response import CreateEmbeddingResponse
-from ollama import ChatResponse as OllamaChatResponse
+from ollama import ChatResponse as OllamaChatResponse, EmbedResponse
 from redbot.core import commands
 from redbot.core.i18n import Translator, cog_i18n
 from redbot.core.utils.chat_formatting import box, humanize_number
@@ -52,7 +52,7 @@ class API(MixinMeta):
         model_override: Optional[str] = None,
         temperature_override: Optional[float] = None,
     ) -> ChatCompletionMessage:
-        model = model_override or conf.get_user_model(member)
+        model = model_override or conf.get_chat_model(self.db.endpoint_override, member)
 
         max_convo_tokens = self.get_max_tokens(conf, member)
         max_response_tokens = conf.get_user_max_response_tokens(member)
@@ -174,7 +174,7 @@ class API(MixinMeta):
             )
             return response.data[0].embedding
 
-        if hasattr(response, "embeddings"):
+        if isinstance(response, EmbedResponse):
             embedding = response.embeddings[0] if response.embeddings else []
             conf.update_usage(response.model, 0, 0, 0)
             return embedding
@@ -409,7 +409,7 @@ class API(MixinMeta):
 
     def get_max_tokens(self, conf: GuildSettings, user: Optional[discord.Member]) -> int:
         user_max = conf.get_user_max_tokens(user)
-        model = conf.get_user_model(user)
+        model = conf.get_chat_model(self.db.endpoint_override, user)
         max_model_tokens = MODELS.get(model, 4000)
         if not user_max or user_max > max_model_tokens:
             return max_model_tokens
@@ -419,8 +419,9 @@ class API(MixinMeta):
         if not text:
             log.debug("No text to cut by tokens!")
             return text
-        tokens = await self.get_tokens(text, conf.get_user_model(user))
-        return await self.get_text(tokens[: self.get_max_tokens(conf, user)], conf.get_user_model(user))
+        model = conf.get_chat_model(self.db.endpoint_override, user)
+        tokens = await self.get_tokens(text, model)
+        return await self.get_text(tokens[: self.get_max_tokens(conf, user)], model)
 
     async def get_text(self, tokens: list, model: str = "gpt-5.1") -> str:
         """Get text from token list"""
@@ -469,7 +470,7 @@ class API(MixinMeta):
             bool: whether the conversation was degraded
         """
         # Fetch the current model the user is using
-        model = conf.get_user_model(user)
+        model = conf.get_chat_model(self.db.endpoint_override, user)
         # Fetch the max token limit for the current user
         max_tokens = self.get_max_tokens(conf, user)
         # Token count of current conversation
@@ -606,7 +607,7 @@ class API(MixinMeta):
                 }
 
         conf = self.db.get_conf(user.guild)
-        model = conf.get_user_model(user)
+        model = conf.get_chat_model(self.db.endpoint_override, user)
 
         pages = sum(len(v) for v in registry.values())
         page = 1
@@ -671,7 +672,7 @@ class API(MixinMeta):
         embeddings = sorted(conf.embeddings.items(), key=lambda x: x[0])
         embeds = []
         pages = math.ceil(len(embeddings) / 5)
-        model = conf.get_user_model()
+        model = conf.get_chat_model(self.db.endpoint_override)
         start = 0
         stop = 5
         for page in range(pages):
