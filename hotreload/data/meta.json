@@ -1,0 +1,16 @@
+{
+  "$schema": "https://c.csw.im/cswimr/tidegear/raw/branch/main/schema/meta/meta.json",
+  "version": "1.5.18",
+  "authors": [
+    {
+      "name": "cswimr",
+      "url": "https://c.csw.im/cswimr"
+    }
+  ],
+  "repository": {
+    "name": "SeaCogs",
+    "owner": "cswimr",
+    "url": "https://c.csw.im/cswimr/SeaCogs"
+  },
+  "documentation": "https://seacogs.csw.im/hotreload/"
+}
