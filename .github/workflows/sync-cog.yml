@@ -1,0 +1,41 @@
+name: "Sync Cog"
+
+on:
+  schedule:
+    - cron: "0 0,12 * * *" # Twice daily
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Sync assistant cog
+        uses: nntin/d-flows/actions/sync-cogs@5753214a2ccd58688d9b9d4322e2f287539b24b5
+        with:
+          token: ${{ secrets.SYNC_TOKEN }}
+          source_repo: https://github.com/nntin/vrt-cogs.git
+          source_branch: feature/ollama-embedding
+          destination_repo: nntin/d-cogs
+          destination_branch: main
+          cog_names: assistant
+          pr_branch: sync/assistant-cog
+          pr_title: "Sync assistant cog from vrt-cogs"
+          pr_body: |
+            This PR syncs the latest changes from the `assistant` cog in the `vrt-cogs` repository. Repository URL: https://github.com/vertyco/vrt-cogs, Fork: https://github.com/nntin/vrt-cogs
+
+      - name: Sync hotreload cog
+        uses: nntin/d-flows/actions/sync-cogs@5753214a2ccd58688d9b9d4322e2f287539b24b5
+        with:
+          token: ${{ secrets.SYNC_TOKEN }}
+          source_repo: https://c.csw.im/cswimr/SeaCogs.git
+          source_branch: main
+          destination_repo: nntin/d-cogs
+          destination_branch: main
+          cog_names: hotreload
+          pr_branch: sync/hotreload-cog
+          pr_title: "Sync hotreload cog from SeaCogs"
+          pr_body: |
+            This PR syncs the latest changes from the `hotreload` cog in the `SeaCogs` repository. Repository URL: https://c.csw.im/cswimr/SeaCogs
