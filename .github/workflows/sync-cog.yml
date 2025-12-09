@@ -16,7 +16,7 @@ jobs:
       - name: Sync assistant cog
         uses: nntin/d-flows/actions/sync-cogs@5753214a2ccd58688d9b9d4322e2f287539b24b5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SYNC_TOKEN }}
           source_repo: https://github.com/nntin/vrt-cogs.git
           source_branch: feature/ollama-embedding
           destination_repo: nntin/d-cogs
@@ -30,7 +30,7 @@ jobs:
       - name: Sync hotreload cog
         uses: nntin/d-flows/actions/sync-cogs@5753214a2ccd58688d9b9d4322e2f287539b24b5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SYNC_TOKEN }}
           source_repo: https://c.csw.im/cswimr/SeaCogs.git
           source_branch: main
           destination_repo: nntin/d-cogs
