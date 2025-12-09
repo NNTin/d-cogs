@@ -1,0 +1,33 @@
+name: "Sync Cog"
+
+on:
+  schedule:
+    - cron: "0 0,12 * * *" # Twice daily
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Sync assistant cog
+        uses: nntin/d-flows/actions/sync-cogs@feature/sync-cogs
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          source_repo: https://github.com/nntin/vrt-cogs.git
+          source_branch: feature/ollama-embedding
+          destination_repo: nntin/d-cogs
+          destination_branch: main
+          cog_names: assistant
+          
+      - name: Sync hotreload cog
+        uses: nntin/d-flows/actions/sync-cogs@feature/sync-cogs
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          source_repo: https://c.csw.im/cswimr/SeaCogs.git
+          source_branch: main
+          destination_repo: nntin/d-cogs
+          destination_branch: main
+          cog_names: hotreload
