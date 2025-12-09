@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/refs/heads/V3/develop/schema/red_cog.schema.json",
+  "author": [
+    "cswimr"
+  ],
+  "install_msg": "Thank you for installing HotReload! Please see the [documentation](https://seacogs.csw.im/hotreload) to get started.",
+  "name": "HotReload",
+  "short": "Automatically reload cogs in local cog paths on file change.",
+  "description": "Automatically reload cogs in local cog paths on file change.",
+  "end_user_data_statement": "This cog does not store end user data.",
+  "hidden": false,
+  "disabled": false,
+  "min_bot_version": "3.5.22",
+  "min_python_version": [
+    3,
+    11,
+    0
+  ],
+  "requirements": [
+    "red-tidegear>=1.23.1",
+    "watchdog~=6.0"
+  ],
+  "tags": [
+    "utility",
+    "development"
+  ]
+}
