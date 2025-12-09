@@ -3,22 +3,15 @@ name: "Check Cogs"
 on:
   pull_request:
 
-env:
-  COG_PATHS: "dworld,mermaid"  # comma-separated list of cog folder names
 
 jobs:
   test-cogs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install Playwright browser dependencies (used in mermaid cog)
-        run: sudo apt-get update && sudo apt-get install -y libnspr4 libnss3 libasound2t64
 
       - name: Install Red-DiscordBot
         run: pip install red-discordbot
@@ -27,7 +20,8 @@ jobs:
         uses: nntin/d-flows/actions/test-red-discordbot-downloader@v1
         with:
           token: ${{ secrets.DISCORD_BOT_TOKEN }}
-          cog_paths: ${{ env.COG_PATHS }}
+          repo_url: https://github.com/${{ github.repository }}
+          repo_branch: ${{ github.head_ref || github.ref_name }}
 
   ##################################################################
   ####     Build validation results for Discord notification    ####
@@ -61,16 +55,12 @@ jobs:
 
           FIELDS=$(jq -n \
             --arg test_status "$TEST_EMOJI $TEST_STATUS" \
-            --arg cogs "${{ env.COG_PATHS }}" \
-            --arg artifact "${{ env.BUILD_ARTIFACT_NAME }}" \
             --arg actor "${{ github.actor }}" \
             --arg pr_number "${{ github.event.pull_request.number }}" \
             --arg pr_url "${{ github.event.pull_request.html_url }}" \
             --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             '[
               {"name": "Cog Tests", "value": $test_status, "inline": true},
-              {"name": "Cogs Tested", "value": $cogs, "inline": true},
-              {"name": "Artifact", "value": $artifact, "inline": true},
               {"name": "PR Details", "value": ("[#" + $pr_number + "](" + $pr_url + ") by @" + $actor), "inline": false},
               {"name": "Run Details", "value": ("[View Full Run](" + $run_url + ")"), "inline": false}
             ]')
@@ -101,15 +91,11 @@ jobs:
             |-------|--------|
             | Cog Tests | ${{ needs['test-cogs'].result == 'success' && '✅ Passed' || '❌ Failed' }} |
 
-            **Artifact**: `${{ env.BUILD_ARTIFACT_NAME }}`
-
-            **Cogs Tested**: `${{ env.COG_PATHS }}`
-
             **Overall Result**: ${{ needs.build-validation-fields.outputs.validation_result == 'success' && '✅ All checks passed' || '⚠️ Some checks failed or were skipped' }}
           overwrite: false
 
   ##################################################################
-  ####              Display validation results via Discord         ####
+  ####            Display validation results via Discord        ####
   ##################################################################
   notify-cog-validation:
     name: Notify Validation Results
@@ -125,6 +111,6 @@ jobs:
           message_type: 'embed'
           title: ${{ needs.build-validation-fields.outputs.validation_result == 'success' && '✅ Cog Validation Completed Successfully' || '⚠️ Cog Validation Completed with Issues' }}
           description: >-
-            ${{ needs.build-validation-fields.outputs.validation_result == 'success' && format('All cogs ({0}) passed build and RPC validation.', env.COG_PATHS) || format('One or more stages failed for cogs: {0}. Review the workflow logs.', env.COG_PATHS) }}
+            ${{ needs.build-validation-fields.outputs.validation_result == 'success' && format('All cogs passed build and RPC validation.') || format('One or more stages failed for cogs. Review the workflow logs.') }}
           color: ${{ needs.build-validation-fields.outputs.validation_result == 'success' && '3066993' || '16776960' }}
           fields: ${{ needs.build-validation-fields.outputs.discord_fields }}
