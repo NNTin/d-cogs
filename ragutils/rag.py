@@ -8,6 +8,7 @@ breaking current setups.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -17,6 +18,7 @@ import discord
 import numpy as np
 from redbot.core import Config, commands
 from redbot.core.bot import Red
+from redbot.core.utils.chat_formatting import box, escape, pagify
 from pydantic import BaseModel, Field
 
 log = logging.getLogger("red.nntin.d-cogs.ragutils.rag")
@@ -792,6 +794,31 @@ class RAGUtils(commands.Cog):
         await self._save_guild_config(guild_id, config)
         return True
 
+    async def set_mmr_lambda(self, guild_id: int, lambda_value: float) -> bool:
+        if not 0.0 <= lambda_value <= 1.0:
+            return False
+        config = await self._load_guild_config(guild_id)
+        config.mmr_lambda = lambda_value
+        await self._save_guild_config(guild_id, config)
+        return True
+
+    async def set_chunk_size(self, guild_id: int, min_words: int, max_words: int) -> bool:
+        if min_words < 1 or max_words < 1 or min_words > max_words:
+            return False
+        config = await self._load_guild_config(guild_id)
+        config.chunk_min_words = min_words
+        config.chunk_max_words = max_words
+        await self._save_guild_config(guild_id, config)
+        return True
+
+    async def set_qdrant_url(self, guild_id: int, url: str) -> bool:
+        if not url or not url.startswith(("http://", "https://")):
+            return False
+        config = await self._load_guild_config(guild_id)
+        config.qdrant_url = url
+        await self._save_guild_config(guild_id, config)
+        return True
+
     @commands.group(name="ragutils", invoke_without_command=True)
     @commands.admin_or_permissions(administrator=True)
     @commands.guild_only()
@@ -843,6 +870,11 @@ class RAGUtils(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    @ragutils_group.command(name="settings", aliases=["config"])
+    async def ragutils_settings(self, ctx: commands.Context):
+        """Show current RAG configuration (alias for status)."""
+        await self.ragutils_status(ctx)
+
     @ragutils_group.command(name="enable")
     async def ragutils_enable(self, ctx: commands.Context, feature: str):
         """Enable a RAG feature (reranking, mmr, chunking)."""
@@ -860,6 +892,185 @@ class RAGUtils(commands.Cog):
             await ctx.send(f"Disabled {feature.lower()} for this guild.")
         else:
             await ctx.send("Invalid feature. Choose from reranking, mmr, or chunking.")
+
+    @ragutils_group.command(name="threshold")
+    async def ragutils_threshold(self, ctx: commands.Context, value: float):
+        """Set the rerank threshold (0.0 - 1.0).
+
+        Higher values mean stricter filtering of reranked results.
+        Default: 0.33
+        """
+        if not 0.0 <= value <= 1.0:
+            await ctx.send("Threshold must be between 0.0 and 1.0.")
+            return
+        success = await self.set_threshold(ctx.guild.id, value)
+        if not success:
+            await ctx.send("Failed to update threshold. Ensure the value is between 0.0 and 1.0.")
+            return
+        await ctx.send(f"Rerank threshold set to {value}. Higher values filter more results after reranking.")
+
+    @ragutils_group.command(name="backend")
+    async def ragutils_backend(self, ctx: commands.Context, backend: str):
+        """Switch vector database backend.
+
+        Options: chromadb, qdrant
+        Default: chromadb
+        """
+        backend_normalized = backend.lower()
+        if backend_normalized not in {"chromadb", "qdrant"}:
+            await ctx.send("Invalid backend. Choose either chromadb or qdrant.")
+            return
+        if backend_normalized == "qdrant" and QdrantClient is None:
+            await ctx.send("qdrant-client is not installed. Install it to use the Qdrant backend.")
+            return
+        success = await self.set_backend(ctx.guild.id, backend_normalized)
+        if not success:
+            await ctx.send("Failed to update backend. Please try again.")
+            return
+        message = f"Backend set to {backend_normalized}."
+        config = self.get_rag_config(ctx.guild.id) or await self._load_guild_config(ctx.guild.id)
+        if backend_normalized == "qdrant" and not getattr(config, "qdrant_url", ""):
+            message += " Warning: Qdrant URL is not configured."
+        await ctx.send(message)
+
+    @ragutils_group.command(name="test")
+    @commands.bot_has_permissions(embed_links=True)
+    async def ragutils_test(self, ctx: commands.Context, *, query: str):
+        """Test the RAG retrieval pipeline with a query.
+
+        This will show you what embeddings would be retrieved for the given query
+        using the current RAG configuration.
+        """
+        assistant = self.bot.get_cog("Assistant")
+        if not assistant:
+            await ctx.send("Assistant cog is not loaded. Load it before testing RAG.")
+            return
+
+        conf = assistant.db.get_conf(ctx.guild)
+        if not conf.embeddings:
+            await ctx.send("You do not have any embeddings configured.")
+            return
+        top_n = getattr(conf, "top_n", 0) or 0
+        if top_n <= 0:
+            await ctx.send("Top N is set to 0 so no embeddings will be returned.")
+            return
+
+        rag_config = self.get_rag_config(ctx.guild.id) or await self._load_guild_config(ctx.guild.id)
+
+        async with ctx.typing():
+            try:
+                query_embedding = await assistant.request_embedding(query, conf)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Failed to generate query embedding for guild %s: %s", ctx.guild.id, exc)
+                await ctx.send("Failed to generate embedding for that query.")
+                return
+
+            if not query_embedding:
+                await ctx.send("Failed to generate embedding for that query.")
+                return
+
+            try:
+                results = await asyncio.to_thread(
+                    enhanced_retrieval,
+                    query,
+                    query_embedding,
+                    ctx.guild.id,
+                    conf,
+                    rag_config,
+                    top_n,
+                )
+            except DependencyMissingError as exc:
+                await ctx.send(f"Missing dependency needed for retrieval: {exc}")
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Enhanced retrieval test failed for guild %s: %s", ctx.guild.id, exc)
+                await ctx.send("Something went wrong while testing the RAG pipeline.")
+                return
+
+        if not results:
+            await ctx.send("No embeddings matched this query with the current RAG settings.")
+            return
+
+        feature_flags = [
+            flag
+            for flag, enabled in [
+                ("reranking", rag_config.enable_reranking),
+                ("mmr", rag_config.enable_mmr),
+                ("chunking", rag_config.enable_chunking),
+            ]
+            if enabled
+        ]
+        backend_label = (
+            "Qdrant"
+            if rag_config.use_qdrant or getattr(conf, "rag_backend", "").lower() == "qdrant"
+            else "ChromaDB"
+        )
+        footer_text = (
+            f"{len(results)} result(s) • Backend: {backend_label} • Features: {', '.join(feature_flags) if feature_flags else 'none'}"  # noqa: E501
+        )
+
+        color = await ctx.embed_color()
+        for name, em, score, dimension in results:
+            base_text = (
+                f"`Entry Name:  `{escape(str(name))}\n"
+                f"`Relatedness: `{round(score, 4)}\n"
+                f"`Dimensions:  `{dimension}\n"
+            )
+            for page in pagify(em, page_length=4000):
+                escaped = escape(page)
+                boxed = box(escaped)
+                embed = discord.Embed(description=base_text + boxed, color=color)
+                embed.set_footer(text=footer_text)
+                await ctx.send(embed=embed)
+
+    @ragutils_group.command(name="mmrlambda")
+    async def ragutils_mmr_lambda(self, ctx: commands.Context, value: float):
+        """Set MMR lambda parameter (0.0 - 1.0).
+
+        Controls diversity vs relevance tradeoff.
+        0.0 = maximum diversity, 1.0 = maximum relevance
+        Default: 0.5
+        """
+        if not 0.0 <= value <= 1.0:
+            await ctx.send("MMR lambda must be between 0.0 and 1.0.")
+            return
+        success = await self.set_mmr_lambda(ctx.guild.id, value)
+        if not success:
+            await ctx.send("Failed to update MMR lambda. Ensure the value is between 0.0 and 1.0.")
+            return
+        await ctx.send(
+            f"MMR lambda set to {value}. Lower values favor diversity; higher values favor relevance in results."
+        )
+
+    @ragutils_group.command(name="chunksize")
+    async def ragutils_chunk_size(self, ctx: commands.Context, min_words: int, max_words: int):
+        """Set word count range for chunk filtering.
+
+        Default: 12-120 words
+        """
+        if min_words < 1 or max_words < 1 or min_words > max_words:
+            await ctx.send("Chunk size bounds must be positive and the minimum cannot exceed the maximum.")
+            return
+        success = await self.set_chunk_size(ctx.guild.id, min_words, max_words)
+        if not success:
+            await ctx.send("Failed to update chunk size. Please provide valid positive bounds.")
+            return
+        await ctx.send(f"Chunk word range set to {min_words}-{max_words} words.")
+
+    @ragutils_group.command(name="qdranturl")
+    async def ragutils_qdrant_url(self, ctx: commands.Context, url: str):
+        """Set Qdrant server URL.
+
+        Default: http://localhost:6333
+        """
+        if not url.startswith(("http://", "https://")):
+            await ctx.send("Please provide a valid URL (including http/https).")
+            return
+        success = await self.set_qdrant_url(ctx.guild.id, url)
+        if not success:
+            await ctx.send("Failed to update Qdrant URL. Please provide a valid URL.")
+            return
+        await ctx.send(f"Qdrant URL set to {url}.")
 
     async def get_enhanced_embeddings(
         self,
