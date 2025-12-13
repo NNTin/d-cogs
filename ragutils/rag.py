@@ -13,7 +13,10 @@ import logging
 import re
 import typing as t
 
+import discord
 import numpy as np
+from redbot.core import Config, commands
+from redbot.core.bot import Red
 from pydantic import BaseModel, Field
 
 log = logging.getLogger("red.nntin.d-cogs.ragutils.rag")
@@ -659,3 +662,229 @@ async def benchmark_retrieval(
     )
 
     return {"chroma": chroma_results, "qdrant": qdrant_results, "rag": rag_results}
+
+
+class RAGUtils(commands.Cog):
+    """Red cog that exposes per-guild RAG configuration."""
+
+    __author__ = "nntin"
+    __version__ = "0.0.1"
+
+    def __init__(self, bot: Red):
+        self.bot = bot
+        self.config = Config.get_conf(self, identifier=867530901, force_registration=True)
+        default_guild = {
+            "enable_reranking": False,
+            "enable_mmr": False,
+            "enable_chunking": False,
+            "rerank_threshold": 0.33,
+            "rerank_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            "chunk_min_words": 12,
+            "chunk_max_words": 120,
+            "mmr_lambda": 0.5,
+            "use_qdrant": False,
+            "qdrant_url": "http://localhost:6333",
+            "groq_api_key": None,
+            "groq_model": "llama-3.1-8b-instant",
+        }
+        self.config.register_guild(**default_guild)
+        self._rag_configs: dict[int, RAGConfig] = {}
+        self.assistant_cog = None
+
+    def format_help_for_context(self, ctx: commands.Context) -> str:
+        base = super().format_help_for_context(ctx)
+        return f"{base}\n\nCog Author: {self.__author__}\nCog Version: {self.__version__}"
+
+    async def _load_guild_config(self, guild_id: int) -> RAGConfig:
+        data = await self.config.guild_from_id(guild_id).all()
+        try:
+            rag_conf = RAGConfig.model_validate(data)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Invalid RAG config for guild %s, using defaults: %s", guild_id, exc)
+            rag_conf = RAGConfig()
+        self._rag_configs[guild_id] = rag_conf
+        return rag_conf
+
+    async def _save_guild_config(self, guild_id: int, rag_config: RAGConfig):
+        guild_conf = self.config.guild_from_id(guild_id)
+        data = rag_config.model_dump()
+        fields = [
+            "enable_reranking",
+            "enable_mmr",
+            "enable_chunking",
+            "rerank_threshold",
+            "rerank_model",
+            "chunk_min_words",
+            "chunk_max_words",
+            "mmr_lambda",
+            "use_qdrant",
+            "qdrant_url",
+            "groq_api_key",
+            "groq_model",
+        ]
+        for key in fields:
+            await getattr(guild_conf, key).set(data.get(key))
+        self._rag_configs[guild_id] = rag_config
+
+    def get_rag_config(self, guild_id: int) -> RAGConfig | None:
+        return self._rag_configs.get(guild_id)
+
+    @commands.Cog.listener()
+    async def on_assistant_cog_add(self, assistant_cog):
+        log.info("Registering RAGUtils with assistant cog.")
+        self.assistant_cog = assistant_cog
+        loaded = 0
+        for guild in self.bot.guilds:
+            await self._load_guild_config(guild.id)
+            loaded += 1
+        log.info("RAGUtils registered with assistant; cached configs for %s guild(s).", loaded)
+
+    async def cog_load(self):
+        await self.bot.wait_until_red_ready()
+        assistant = self.bot.get_cog("Assistant")
+        if assistant:
+            await self.on_assistant_cog_add(assistant)
+        else:
+            for guild in self.bot.guilds:
+                await self._load_guild_config(guild.id)
+        log.info("RAGUtils cog loaded.")
+
+    async def cog_unload(self):
+        self._rag_configs.clear()
+        log.info("RAGUtils cog unloaded and cache cleared.")
+
+    async def enable_feature(self, guild_id: int, feature: str) -> bool:
+        feature_key = {"reranking": "enable_reranking", "mmr": "enable_mmr", "chunking": "enable_chunking"}.get(
+            feature.lower()
+        )
+        if not feature_key:
+            return False
+        config = await self._load_guild_config(guild_id)
+        setattr(config, feature_key, True)
+        await self._save_guild_config(guild_id, config)
+        return True
+
+    async def disable_feature(self, guild_id: int, feature: str) -> bool:
+        feature_key = {"reranking": "enable_reranking", "mmr": "enable_mmr", "chunking": "enable_chunking"}.get(
+            feature.lower()
+        )
+        if not feature_key:
+            return False
+        config = await self._load_guild_config(guild_id)
+        setattr(config, feature_key, False)
+        await self._save_guild_config(guild_id, config)
+        return True
+
+    async def set_threshold(self, guild_id: int, threshold: float) -> bool:
+        if not 0.0 <= threshold <= 1.0:
+            return False
+        config = await self._load_guild_config(guild_id)
+        config.rerank_threshold = threshold
+        await self._save_guild_config(guild_id, config)
+        return True
+
+    async def set_backend(self, guild_id: int, backend: str) -> bool:
+        backend_normalized = backend.lower()
+        if backend_normalized not in {"chromadb", "qdrant"}:
+            return False
+        config = await self._load_guild_config(guild_id)
+        config.use_qdrant = backend_normalized == "qdrant"
+        await self._save_guild_config(guild_id, config)
+        return True
+
+    @commands.group(name="ragutils", invoke_without_command=True)
+    @commands.admin_or_permissions(administrator=True)
+    @commands.guild_only()
+    async def ragutils_group(self, ctx: commands.Context):
+        """Manage RAG configuration for this guild."""
+        if not self.bot.get_cog("Assistant"):
+            await ctx.send("Assistant cog is not loaded. Load it before configuring RAG.")
+            return
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help()
+
+    @ragutils_group.command(name="status")
+    async def ragutils_status(self, ctx: commands.Context):
+        """Show current RAG configuration for this guild."""
+        config = self.get_rag_config(ctx.guild.id) or await self._load_guild_config(ctx.guild.id)
+        embed = discord.Embed(title="RAG Utils Status", color=await ctx.embed_color())
+        feature_text = "\n".join(
+            [
+                f"Reranking: {'enabled' if config.enable_reranking else 'disabled'}",
+                f"MMR: {'enabled' if config.enable_mmr else 'disabled'}",
+                f"Chunking: {'enabled' if config.enable_chunking else 'disabled'}",
+            ]
+        )
+        embed.add_field(name="Features", value=feature_text, inline=False)
+        embed.add_field(
+            name="Thresholds",
+            value=f"Rerank threshold: {config.rerank_threshold}\nMMR lambda: {config.mmr_lambda}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Backend",
+            value="Qdrant" if config.use_qdrant else "ChromaDB",
+            inline=True,
+        )
+        embed.add_field(
+            name="Models",
+            value=f"Rerank: {config.rerank_model}\nGroq: {config.groq_model}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Dependencies",
+            value="\n".join(
+                [
+                    f"sentence-transformers: {'available' if CrossEncoder and SentenceTransformer else 'missing'}",
+                    f"qdrant-client: {'available' if QdrantClient else 'missing'}",
+                ]
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
+    @ragutils_group.command(name="enable")
+    async def ragutils_enable(self, ctx: commands.Context, feature: str):
+        """Enable a RAG feature (reranking, mmr, chunking)."""
+        success = await self.enable_feature(ctx.guild.id, feature)
+        if success:
+            await ctx.send(f"Enabled {feature.lower()} for this guild.")
+        else:
+            await ctx.send("Invalid feature. Choose from reranking, mmr, or chunking.")
+
+    @ragutils_group.command(name="disable")
+    async def ragutils_disable(self, ctx: commands.Context, feature: str):
+        """Disable a RAG feature (reranking, mmr, chunking)."""
+        success = await self.disable_feature(ctx.guild.id, feature)
+        if success:
+            await ctx.send(f"Disabled {feature.lower()} for this guild.")
+        else:
+            await ctx.send("Invalid feature. Choose from reranking, mmr, or chunking.")
+
+    async def get_enhanced_embeddings(
+        self,
+        guild_id: int,
+        query: str,
+        query_embedding: list[float],
+        conf: t.Any,
+        top_n: int = 3,
+    ) -> list[tuple[str, str, float, int]]:
+        rag_config = self.get_rag_config(guild_id)
+        if rag_config is None:
+            rag_config = await self._load_guild_config(guild_id)
+        if not rag_config or not any(
+            [rag_config.enable_reranking, rag_config.enable_mmr, rag_config.enable_chunking, rag_config.use_qdrant]
+        ):
+            return []
+        try:
+            return await enhanced_retrieval(
+                query=query,
+                query_embedding=query_embedding,
+                guild_id=guild_id,
+                conf=conf,
+                rag_config=rag_config,
+                top_n=top_n,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Enhanced retrieval failed for guild %s: %s", guild_id, exc)
+            return []

@@ -4,7 +4,7 @@
     ],
   "description": "Extend the assistant cog with Retrieval Augmented Generation (RAG) capabilities. Allow the assistant to answer questions based on your own documents.",
   "disabled": false,
-  "end_user_data_statement": "todo: not yet finalized and implemented",
+  "end_user_data_statement": "This cog stores per-guild RAG configuration settings. End users can also store embeddings in the vector database for RAG purposes.",
   "hidden": false,
   "install_msg": "Thank you for installing the RAG Utils cog! Configure it using `[p]help ragutils`.",
   "min_bot_version": "3.5.0",
