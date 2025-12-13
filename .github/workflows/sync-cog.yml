@@ -1,8 +1,8 @@
 name: "Sync Cog"
 
 on:
-  schedule:
-    - cron: "0 0,12 * * *" # Twice daily
+  # schedule:
+  #   - cron: "0 0,12 * * *" # Twice daily
   workflow_dispatch:
 
 jobs:
@@ -17,7 +17,7 @@ jobs:
         with:
           token: ${{ secrets.SYNC_TOKEN }}
           source_repo: https://github.com/nntin/vrt-cogs.git
-          source_branch: feature/ollama-embedding
+          source_branch: feature/ragutils
           destination_repo: nntin/d-cogs
           destination_branch: main
           cog_names: assistant
