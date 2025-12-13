@@ -9,6 +9,7 @@ breaking current setups.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import re
@@ -91,6 +92,8 @@ class RAGConfig(BaseModel):
     boost_patterns: dict[str, list[str]] = Field(default_factory=lambda: DEFAULT_BOOSTS.copy())
     groq_api_key: str | None = None
     groq_model: str = "llama-3.1-8b-instant"
+    last_migration: str | None = None
+    migration_status: str = "never"
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -530,8 +533,11 @@ async def enhanced_retrieval(
         try:
             backend = QdrantBackend(getattr(conf, "qdrant_url", rag_config.qdrant_url))
             candidates = backend.query_embeddings(guild_id, query_embedding, limit=top_pool)
-        except DependencyMissingError as e:
-            log.warning("Qdrant disabled: %s", e)
+            log.debug("Using Qdrant backend for guild %s, retrieved %s candidates", guild_id, len(candidates))
+        except (ConnectionError, TimeoutError, DependencyMissingError) as e:
+            log.warning("Qdrant configured for guild %s but unavailable, falling back to ChromaDB: %s", guild_id, e)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Qdrant retrieval failed for guild %s, falling back to ChromaDB: %s", guild_id, e)
 
     if not candidates:
         if chroma_client is None:
@@ -688,6 +694,8 @@ class RAGUtils(commands.Cog):
             "qdrant_url": "http://localhost:6333",
             "groq_api_key": None,
             "groq_model": "llama-3.1-8b-instant",
+            "last_migration": None,
+            "migration_status": "never",
         }
         self.config.register_guild(**default_guild)
         self._rag_configs: dict[int, RAGConfig] = {}
@@ -723,6 +731,8 @@ class RAGUtils(commands.Cog):
             "qdrant_url",
             "groq_api_key",
             "groq_model",
+            "last_migration",
+            "migration_status",
         ]
         for key in fields:
             await getattr(guild_conf, key).set(data.get(key))
@@ -819,6 +829,88 @@ class RAGUtils(commands.Cog):
         await self._save_guild_config(guild_id, config)
         return True
 
+    async def sync_embeddings_to_qdrant(self, guild_id: int, force_reset: bool = False) -> tuple[bool, str]:
+        rag_config = await self._load_guild_config(guild_id)
+        if not self.assistant_cog:
+            rag_config.migration_status = "failed"
+            await self._save_guild_config(guild_id, rag_config)
+            return False, "Assistant cog not loaded"
+        conf = self.assistant_cog.db.get_conf(guild_id)
+        if not getattr(conf, "embeddings", None):
+            rag_config.migration_status = "failed"
+            await self._save_guild_config(guild_id, rag_config)
+            return False, "No embeddings to migrate"
+        if not rag_config.qdrant_url:
+            rag_config.migration_status = "failed"
+            await self._save_guild_config(guild_id, rag_config)
+            return False, "Qdrant URL not configured"
+        if QdrantClient is None:
+            rag_config.migration_status = "failed"
+            await self._save_guild_config(guild_id, rag_config)
+            return False, "qdrant-client not installed"
+
+        try:
+            backend = QdrantBackend(rag_config.qdrant_url)
+            target_dim = len(next(iter(conf.embeddings.values())).embedding)
+            await asyncio.to_thread(backend.sync_embeddings, guild_id, conf.embeddings, target_dim, force_reset)
+            rag_config.last_migration = datetime.now(timezone.utc).isoformat()
+            rag_config.migration_status = "success"
+            await self._save_guild_config(guild_id, rag_config)
+            return True, f"Migrated {len(conf.embeddings)} embeddings to Qdrant"
+        except DependencyMissingError as e:
+            log.error("Migration failed due to missing dependency for guild %s: %s", guild_id, e)
+            rag_config.migration_status = "failed"
+            await self._save_guild_config(guild_id, rag_config)
+            return False, "qdrant-client not installed"
+        except Exception as e:  # noqa: BLE001
+            log.error("Migration to Qdrant failed for guild %s: %s", guild_id, e)
+            rag_config.migration_status = "failed"
+            await self._save_guild_config(guild_id, rag_config)
+            return False, f"Migration failed: {e}"
+
+    async def check_backend_health(self, guild_id: int) -> dict[str, t.Any]:
+        rag_config = await self._load_guild_config(guild_id)
+        health = {
+            "backend": "qdrant" if rag_config.use_qdrant else "chromadb",
+            "status": "unknown",
+            "details": {},
+            "error": None,
+        }
+        if not rag_config.use_qdrant:
+            health["status"] = "healthy"
+            health["details"] = {"type": "embedded", "note": "ChromaDB runs in-process"}
+            return health
+
+        if not rag_config.qdrant_url:
+            health["status"] = "misconfigured"
+            health["error"] = "URL not set"
+            return health
+        if QdrantClient is None:
+            health["status"] = "unavailable"
+            health["error"] = "qdrant-client not installed"
+            return health
+
+        try:
+            backend = QdrantBackend(rag_config.qdrant_url)
+            backend.client.get_collections()
+            collection_name = f"assistant-{guild_id}"
+            try:
+                info = backend.client.get_collection(collection_name)
+                point_count = info.points_count if hasattr(info, "points_count") else 0
+                health["details"] = {
+                    "url": rag_config.qdrant_url,
+                    "collection": collection_name,
+                    "documents": point_count,
+                }
+            except Exception:  # noqa: BLE001
+                health["details"] = {"url": rag_config.qdrant_url, "collection": collection_name, "documents": 0}
+            health["status"] = "healthy"
+        except Exception as e:  # noqa: BLE001
+            health["status"] = "unreachable"
+            health["error"] = str(e)
+            log.warning("Qdrant health check failed for guild %s: %s", guild_id, e)
+        return health
+
     @commands.group(name="ragutils", invoke_without_command=True)
     @commands.admin_or_permissions(administrator=True)
     @commands.guild_only()
@@ -835,6 +927,16 @@ class RAGUtils(commands.Cog):
         """Show current RAG configuration for this guild."""
         config = self.get_rag_config(ctx.guild.id) or await self._load_guild_config(ctx.guild.id)
         embed = discord.Embed(title="RAG Utils Status", color=await ctx.embed_color())
+        health = await self.check_backend_health(ctx.guild.id)
+        backend_label = "Qdrant" if config.use_qdrant else "ChromaDB"
+        if health.get("status") == "healthy":
+            if config.use_qdrant:
+                docs = health.get("details", {}).get("documents", 0)
+                backend_label = f"Qdrant ✅ ({docs} docs)"
+            else:
+                backend_label = f"{backend_label} ✅"
+        else:
+            backend_label = f"{backend_label} ❌ ({health.get('status')})"
         feature_text = "\n".join(
             [
                 f"Reranking: {'enabled' if config.enable_reranking else 'disabled'}",
@@ -850,9 +952,11 @@ class RAGUtils(commands.Cog):
         )
         embed.add_field(
             name="Backend",
-            value="Qdrant" if config.use_qdrant else "ChromaDB",
+            value=backend_label,
             inline=True,
         )
+        if config.qdrant_url:
+            embed.add_field(name="Qdrant URL", value=config.qdrant_url, inline=False)
         embed.add_field(
             name="Models",
             value=f"Rerank: {config.rerank_model}\nGroq: {config.groq_model}",
@@ -868,6 +972,17 @@ class RAGUtils(commands.Cog):
             ),
             inline=False,
         )
+        if config.migration_status:
+            status_emoji = {"success": "✅", "failed": "❌", "never": "⏸️"}.get(config.migration_status, "ℹ️")
+            embed.add_field(name="Migration Status", value=f"{status_emoji} {config.migration_status}", inline=True)
+        if config.last_migration:
+            try:
+                last_dt = datetime.fromisoformat(config.last_migration)
+                embed.add_field(name="Last Migration", value=f"<t:{int(last_dt.timestamp())}:R>", inline=True)
+            except Exception:  # noqa: BLE001
+                embed.add_field(name="Last Migration", value=config.last_migration, inline=True)
+        if config.use_qdrant and health.get("error"):
+            embed.add_field(name="Backend Error", value=health["error"], inline=False)
         await ctx.send(embed=embed)
 
     @ragutils_group.command(name="settings", aliases=["config"])
@@ -970,14 +1085,13 @@ class RAGUtils(commands.Cog):
                 return
 
             try:
-                results = await asyncio.to_thread(
-                    enhanced_retrieval,
+                results = await enhanced_retrieval(
                     query,
                     query_embedding,
                     ctx.guild.id,
                     conf,
                     rag_config,
-                    top_n,
+                    top_n=top_n,
                 )
             except DependencyMissingError as exc:
                 await ctx.send(f"Missing dependency needed for retrieval: {exc}")
@@ -1071,6 +1185,79 @@ class RAGUtils(commands.Cog):
             await ctx.send("Failed to update Qdrant URL. Please provide a valid URL.")
             return
         await ctx.send(f"Qdrant URL set to {url}.")
+
+    @ragutils_group.command(name="migrate")
+    @commands.bot_has_permissions(embed_links=True)
+    async def ragutils_migrate(self, ctx: commands.Context, force_reset: bool = False):
+        """Migrate embeddings from ChromaDB to Qdrant.
+
+        This copies all embeddings from the Assistant cog's ChromaDB storage
+        to the configured Qdrant server. Existing Qdrant collections will be
+        updated unless force_reset is True.
+
+        Arguments:
+            force_reset: If True, recreate the Qdrant collection from scratch.
+                         Default: False (incremental update)
+
+        Example:
+            [p]ragutils migrate
+            [p]ragutils migrate True
+        """
+        if not self.assistant_cog:
+            await ctx.send("Assistant cog not loaded. Load it first.")
+            return
+        rag_config = await self._load_guild_config(ctx.guild.id)
+        if not rag_config.use_qdrant:
+            await ctx.send(
+                "Warning: Backend is set to ChromaDB. Switch to Qdrant first with [p]ragutils backend qdrant"
+            )
+        msg = await ctx.send("Starting migration to Qdrant...")
+        try:
+            success, message = await self.sync_embeddings_to_qdrant(ctx.guild.id, force_reset)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Migration command failed for guild %s: %s", ctx.guild.id, exc)
+            success, message = False, f"Migration failed: {exc}"
+
+        status_label = "Success" if success else "Failed"
+        color = discord.Color.green() if success else discord.Color.red()
+        embed = discord.Embed(title="Embedding Migration", color=color)
+        embed.add_field(name="Status", value=status_label, inline=True)
+        embed.add_field(name="Details", value=message, inline=False)
+        embed.add_field(name="Backend", value=rag_config.qdrant_url or "Not configured", inline=False)
+        embed.add_field(name="Force Reset", value="Yes" if force_reset else "No", inline=True)
+        await msg.edit(content=None, embed=embed)
+
+    @ragutils_group.command(name="health")
+    @commands.bot_has_permissions(embed_links=True)
+    async def ragutils_health(self, ctx: commands.Context):
+        """Check the health of the configured vector database backend.
+
+        Shows connection status, collection info, and document counts.
+        Useful for diagnosing Qdrant connectivity issues.
+        """
+        async with ctx.typing():
+            health = await self.check_backend_health(ctx.guild.id)
+
+        status = health.get("status", "unknown")
+        if status == "healthy":
+            color = discord.Color.green()
+            emoji = "✅"
+        elif status == "misconfigured":
+            color = discord.Color.gold()
+            emoji = "⚠️"
+        else:
+            color = discord.Color.red()
+            emoji = "❌"
+
+        embed = discord.Embed(title="RAG Backend Health", color=color, timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="Backend", value=str(health.get("backend", "unknown")).upper(), inline=True)
+        embed.add_field(name="Status", value=f"{emoji} {status.title()}", inline=True)
+        if health.get("error"):
+            embed.add_field(name="Error", value=health["error"], inline=False)
+        if health.get("details"):
+            detail_text = "\n".join(f"{k.title()}: {v}" for k, v in health["details"].items())
+            embed.add_field(name="Details", value=detail_text, inline=False)
+        await ctx.send(embed=embed)
 
     async def get_enhanced_embeddings(
         self,
