@@ -1,0 +1,33 @@
+{
+  "author": [
+        "Tin Nguyen"
+    ],
+  "description": "Extend the assistant cog with Retrieval Augmented Generation (RAG) capabilities. Allow the assistant to answer questions based on your own documents.",
+  "disabled": false,
+  "end_user_data_statement": "todo: not yet finalized and implemented",
+  "hidden": false,
+  "install_msg": "Thank you for installing the RAG Utils cog! Configure it using `[p]help ragutils`.",
+  "min_bot_version": "3.5.0",
+  "min_python_version": [3, 10, 0],
+  "permissions": ["read_messages", "send_messages", "embed_links", "attach_files"],
+  "required_cogs": {},
+  "requirements": [
+    "chromadb",
+    "sentence-transformers>=3.3.1",
+    "nltk>=3.9.1",
+    "qdrant-client>=1.12.1",
+    "ollama==0.6.1"
+  ],
+  "short": "RAG capabilities for Assistant",
+  "tags": [
+    "utility",
+    "assistant",
+    "rag",
+    "ai",
+    "chat",
+    "ollama",
+    "llm",
+    "language model"
+  ],
+  "type": "COG"
+}
