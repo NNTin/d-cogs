@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+protected_dirs=("assistant" "hotreload")
+
+# Gather staged files (add/modify/rename/copy/delete/typechange)
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMRTD)
+
+if ((${#staged[@]} == 0)); then
+  exit 0
+fi
+
+blocked=()
+for path in "${staged[@]}"; do
+  for dir in "${protected_dirs[@]}"; do
+    if [[ $path == "$dir" || $path == "$dir"/* ]]; then
+      blocked+=("$path")
+      break
+    fi
+  done
+done
+
+if ((${#blocked[@]} > 0)); then
+  {
+    echo "Commit aborted: 'assistant' and 'hotreload' cogs are synced by CI (see .github/workflows/sync-cog.yml)."
+    echo "Please drop these files from the commit and update the source repo instead:"
+    for path in "${blocked[@]}"; do
+      echo "  - $path"
+    done
+  } >&2
+  exit 1
+fi
+
+exit 0
