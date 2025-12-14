@@ -751,15 +751,18 @@ class RAGUtils(commands.Cog):
             loaded += 1
         log.info("RAGUtils registered with assistant; cached configs for %s guild(s).", loaded)
 
-    async def cog_load(self):
-        await self.bot.wait_until_red_ready()
-        assistant = self.bot.get_cog("Assistant")
-        if assistant:
-            await self.on_assistant_cog_add(assistant)
-        else:
+    @commands.Cog.listener()
+    async def on_assistant_cog_add(self, cog):
+        await self._post_ready_init()
+        log.info("Functions have been registered")
+
+    async def _post_ready_init(self):
+        try:
             for guild in self.bot.guilds:
                 await self._load_guild_config(guild.id)
-        log.info("RAGUtils cog loaded.")
+            log.info("RAGUtils post-ready initialization complete.")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("RAGUtils failed during post-ready init: %s", exc)
 
     async def cog_unload(self):
         self._rag_configs.clear()
