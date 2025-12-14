@@ -17,7 +17,7 @@
     0
   ],
   "requirements": [
-    "red-tidegear>=1.23.1",
+    "red-tidegear>=1.23.4",
     "watchdog~=6.0"
   ],
   "tags": [
