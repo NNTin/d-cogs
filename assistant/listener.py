@@ -155,12 +155,14 @@ class AssistantListener(MixinMeta):
             if is_question(message.content):
                 # Check if any embeddings match above the threshold
                 embedding = await self.request_embedding(message.content, conf)
-                related = await asyncio.to_thread(
-                    conf.get_related_embeddings,
+                related = await conf.get_related_embeddings(
                     guild_id=message.guild.id,
                     query_embedding=embedding,
                     top_n_override=1,
                     relatedness_override=conf.auto_answer_threshold,
+                    use_rag=True,
+                    bot=self.bot,
+                    query_text=message.content,
                 )
                 conditions.append(len(related) == 0)
                 if len(related) > 0:
@@ -268,7 +270,12 @@ class AssistantListener(MixinMeta):
                 {"role": "developer", "content": REACT_SUMMARY_MESSAGE.strip()},
                 {"role": "user", "content": content.getvalue()},
             ]
-            res = await create_memory_call(messages=messages, api_key=conf.api_key, base_url=self.db.endpoint_override)
+            res = await create_memory_call(
+                messages=messages,
+                api_key=conf.api_key,
+                base_url=self.db.endpoint_override,
+                model=conf.model,
+            )
             if res:
                 embedding = await self.add_embedding(guild, res.memory_name, res.memory_content)
                 if embedding is None:
