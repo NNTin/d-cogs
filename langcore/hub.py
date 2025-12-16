@@ -83,6 +83,15 @@ class ChainHub:
             )
             return False
 
+        allowed_permissions = {"user", "mod", "admin", "owner"}
+        if permission_level not in allowed_permissions:
+            log.warning(
+                "Function registry failed for %s: invalid permission level %s",
+                cog_name,
+                permission_level,
+            )
+            return False
+
         if cog_name not in self._registry:
             self._registry[cog_name] = {}
 
@@ -154,7 +163,7 @@ class ChainHub:
             if not cog:
                 continue
             for function_name, data in functions.items():
-                if not guild_config.function_statuses.get(function_name, False):
+                if not guild_config.function_statuses.get(function_name, True):
                     log.debug(
                         "Function %s disabled for guild %s; skipping",
                         function_name,
