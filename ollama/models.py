@@ -1,0 +1,56 @@
+from datetime import datetime
+from typing import Dict, List, Optional
+
+import discord
+from pydantic import Field
+
+from langcore.models import BaseModel
+
+
+class OllamaGuildConfig(BaseModel):
+    chat_model: str = "llama3.1"
+    embed_model: str = "nomic-embed-text"
+    chat_fallback: str = "llama3.1"
+    embed_fallback: str = "nomic-embed-text"
+    tool_scope: str = "core"
+    role_model_overrides: Dict[int, str] = Field(default_factory=dict)
+
+    def get_user_model(
+        self, member: Optional[discord.Member], available_models: Optional[List[str]]
+    ) -> str:
+        models = available_models or []
+
+        if member:
+            for role in sorted(member.roles, key=lambda r: r.position, reverse=True):
+                override = self.role_model_overrides.get(role.id)
+                if not override:
+                    continue
+                if not models or override in models:
+                    return override
+
+        if models and self.chat_model not in models:
+            return self.chat_fallback
+        return self.chat_model
+
+
+class OllamaConfig(BaseModel):
+    endpoint: str = "http://localhost:11434"
+    available_models: List[str] = Field(default_factory=list)
+    health_check_enabled: bool = False
+    health_check_interval: int = 60
+    last_health_check: float = 0.0
+    endpoint_healthy: bool = False
+
+    def is_healthy(self) -> bool:
+        if not self.health_check_enabled:
+            return self.endpoint_healthy
+
+        now = datetime.utcnow().timestamp()
+        if not self.last_health_check:
+            return False
+        return self.endpoint_healthy and now - self.last_health_check <= self.health_check_interval
+
+    def update_health(self, healthy: bool, models: List[str]) -> None:
+        self.endpoint_healthy = healthy
+        self.available_models = models
+        self.last_health_check = datetime.utcnow().timestamp()
