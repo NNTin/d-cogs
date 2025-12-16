@@ -3,11 +3,12 @@ from redbot.core.utils import get_end_user_data_statement_or_raise
 
 from .langcore import langcore
 from .abc import ChainProvider, ChainStore
+from .conversation import ConversationManager
 from .models import BaseModel, Conversation, GuildConfig
 
 __red_end_user_data_statement__ = get_end_user_data_statement_or_raise(__file__)
 
-__all__ = ["langcore", "BaseModel", "Conversation", "GuildConfig", "ChainProvider", "ChainStore"]
+__all__ = ["langcore", "BaseModel", "Conversation", "ConversationManager", "GuildConfig", "ChainProvider", "ChainStore"]
 
 
 async def setup(bot: Red) -> None:

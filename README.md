@@ -7,12 +7,37 @@ Huge thanks goes out towards [vertyco](http://github.com/vertyco/). While workin
 
 ```mermaid
 graph TD
+
+    subgraph RedDiscord-Bot with CogManager
+        LangCore
+        ProviderCog
+        StorageCog
+        ChainHubCogs
+    end
+
     %% Core framework
     subgraph LangCore[langcore: Cog]
         LangChain[LangChain Framework]
         LangChain --> ChainHub[ChainHub]
-        LangChain --> ChainProvider[ChainProvider Abstraction]
         LangChain --> ChainStore[ChainStore Abstraction]
+        LangChain --> ChainProvider[ChainProvider Abstraction]
+    end
+
+    %% ChainHub cogs
+    subgraph ChainHubCogs[Collection of cogs]
+        subgraph RagCogSub[RagCog: ragutils]
+            Rag[ragutils] --> CSRInstance[ChainStore Instance]
+        end
+
+        subgraph MemoryCogSub[MemoryCog: memory]
+            Memory[memory] --> CPMInstance[ChainProvider Instance]
+            Memory[memory] --> CSMInstance[ChainStore Instance]
+        end
+
+        subgraph MermaidCogSub[MermaidCog: mermaid]
+            Mermaid[mermaid] --> CPMeInstance[ChainProvider Instance]
+            Mermaid[mermaid]
+        end
     end
 
     %% Provider cog
@@ -27,24 +52,13 @@ graph TD
         localhost:6333
     end
 
-    %% Extension cog
-    subgraph RagCog[ragutils: Cog]
-        Rag[ragutils] --> CPRInstance[ChainProvider Instance]
-        Rag[ragutils] --> CSRInstance[ChainStore Instance]
-    end
-
     %% Connections
-    LangCore -->|implements abstraction| ChainProvider
     LangCore -->|implements abstraction| ChainStore
+    LangCore -->|implements abstraction| ChainProvider
     ChainProvider -->|implemented by| Ollama
     ChainStore -->|implemented by| QDrant
-    ChainHub -->|registers functions| Memory
-    ChainHub -->|registers functions| Rag
 
-    CogManager --> LangCore
-    CogManager --> RagCog
-    CogManager --> ProviderCog
-    CogManager --> StorageCog
+    ChainHub -->|for each cog registers functions| ChainHubCogs
 ```
 
 ## Red-DiscordBot Cogs Overview
