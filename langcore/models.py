@@ -36,7 +36,11 @@ class Conversation(BaseModel):
             self.reset()
             return
 
-        if max_retention and len(self.messages) > max_retention:
+        if not max_retention:
+            self.messages.clear()
+            return
+
+        if len(self.messages) > max_retention:
             self.messages = self.messages[-max_retention:]
 
     def is_expired(self, max_retention_time: int) -> bool:
