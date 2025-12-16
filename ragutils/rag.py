@@ -425,20 +425,32 @@ class QdrantBackend:
             return
 
         try:
-            collections = self.client.get_collections()
-            existing = {c.name for c in (collections.collections or [])}
+            exists = self.client.collection_exists(collection)
         except Exception as e:  # noqa: BLE001
-            log.warning("Failed to list Qdrant collections: %s", e)
-            existing = set()
+            log.warning("Failed to check Qdrant collection %s: %s", collection, e)
+            exists = False
 
-        if force_reset or collection not in existing:
+        if force_reset:
+            if exists:
+                try:
+                    self.client.delete_collection(collection)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Failed to delete Qdrant collection %s: %s", collection, e)
             try:
-                self.client.recreate_collection(
+                self.client.create_collection(
                     collection_name=collection,
                     vectors_config=qmodels.VectorParams(size=dim, distance=qmodels.Distance.COSINE),
                 )
             except Exception as e:  # noqa: BLE001
-                log.warning("Failed to reset Qdrant collection %s: %s", collection, e)
+                log.warning("Failed to create Qdrant collection %s: %s", collection, e)
+        elif not exists:
+            try:
+                self.client.create_collection(
+                    collection_name=collection,
+                    vectors_config=qmodels.VectorParams(size=dim, distance=qmodels.Distance.COSINE),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("Failed to create Qdrant collection %s: %s", collection, e)
 
         points = []
         for name, em in embeddings.items():
@@ -463,13 +475,14 @@ class QdrantBackend:
     ) -> list[dict[str, t.Any]]:
         collection = self._collection(guild_id)
         try:
-            search = self.client.search(
+            search_result = self.client.query_points(
                 collection_name=collection,
-                query_vector=query_embedding,
+                query=query_embedding,
                 limit=limit,
                 with_payload=True,
                 with_vectors=True,
             )
+            search = search_result.points or []
         except Exception as e:  # noqa: BLE001
             log.error("Qdrant search failed for guild %s: %s", guild_id, e)
             return []
