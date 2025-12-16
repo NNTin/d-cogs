@@ -1,0 +1,24 @@
+{
+    "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog.schema.json",
+    "name": "qdrant",
+    "short": "implements the ChainStore abstraction from langcore",
+    "description": "Provides persistent vector storage for embeddings using qdrant.",
+    "end_user_data_statement": "Work in Progress",
+    "install_msg": "Work in Progress",
+    "author": [
+        "Tin Nguyen"
+    ],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": [
+        "vectordb",
+        "vector",
+        "ai",
+        "agent",
+        "storage"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

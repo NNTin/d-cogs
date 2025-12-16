@@ -1,0 +1,24 @@
+{
+    "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog.schema.json",
+    "name": "langcore",
+    "short": "core framework cog build on top of LangChain framework",
+    "description": "longcore is the core framework cog for the bot, built on top of the LangChain framework. It provides the foundational abstractions for AI agent orchestration: ChainProvider Abstraction, ChainStore Abstraction and ChainHub. Other cogs connect to langcore either by implementing its abstractions or registering functionality via ChainHub.",
+    "end_user_data_statement": "Work in Progress",
+    "install_msg": "Work in Progress",
+    "author": [
+        "Tin Nguyen"
+    ],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": [
+        "LangChain",
+        "AI",
+        "Agent",
+        "LLM",
+        "Vector"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}
