@@ -175,7 +175,30 @@ def _same_topic_sentences(a: str, b: str) -> bool:
 
 def chunk_text(text: str, config: RAGConfig) -> list[dict[str, t.Any]]:
     """Split text into sentence-level chunks with word bounds.
-    TODO: We will need to do semantic splitting since our information is messy."""
+    TODO: We will need to do semantic splitting since our information is messy.
+
+    There is different ways to chunk:
+    For example conversation-aware chunking:
+      Always split when:
+      - Speaker changes and topic similarity drops
+      - System → user → assistant boundary
+      - Long pauses / timestamps
+      - Task reset (“new question”, “different issue”)
+      Never split when:
+      - Question + immediate answer
+      - Follow-up clarification
+      - Tool call + result
+    
+    Different kind of chunking is needed for different data types:
+    - Technical docs: section + subsection + code block
+    - Conversations: speaker turns + topic shifts
+    - FAQs: Q&A pairs
+    - Reports: headings + paragraphs + tables
+    
+    For now we should concentrate on conversation-aware chunking since that's the main use case.
+    Later we will do markdown-aware chunking for docs for my many other projects.
+    After that we can look into wiki-style chunking for general knowledge bases.
+    """
     if not config.enable_chunking:
         return [{"text": text, "word_count": len(text.split()), "sentence_count": 1}]
 
