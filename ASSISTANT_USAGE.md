@@ -76,7 +76,7 @@ Ollama is free, self-hosted, and private (no API costs; limited function support
   - `ollama pull nomic-embed-text` (alt embedding, 768 dims)
 
 **Initial configuration (bot owner)**
-- `[p]assistant endpointoverride http://localhost:11434/v1`
+- `[p]assistant endpointoverride http://localhost:11434/`
 
 **Choose models (per server)**
 - `[p]assistant model gemma3`
@@ -148,7 +148,7 @@ Bot owners control global config across all servers.
 Admins configure the Assistant per server and manage embeddings.
 
 ### Basic Setup
-1) Enable: `[p]assistant toggle`  
+1) Enable: `[p]assistant toggle`
 2) API key (OpenAI only, if no global endpoint): `[p]assistant openaikey` (DM flow)  
 3) Core settings:
 ```

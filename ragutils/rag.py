@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import re
+import uuid
 import typing as t
 
 import discord
@@ -406,6 +407,10 @@ class QdrantBackend:
     def _collection(self, guild_id: int) -> str:
         return f"assistant-{guild_id}"
 
+    @staticmethod
+    def _name_to_uuid(name: str) -> str:
+        return str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
+
     def sync_embeddings(
         self,
         guild_id: int,
@@ -439,11 +444,12 @@ class QdrantBackend:
         for name, em in embeddings.items():
             if target_dimension and len(em.embedding) != target_dimension:
                 continue
+            point_id = self._name_to_uuid(name)
             points.append(
                 qmodels.PointStruct(
-                    id=name,
+                    id=point_id,
                     vector=em.embedding,
-                    payload=em.model_dump(exclude={"embedding"}),
+                    payload={"name": name, **em.model_dump(exclude={"embedding"})},
                 )
             )
         if points:
@@ -475,7 +481,7 @@ class QdrantBackend:
             dim = len(hit.vector) if hit.vector else 0
             results.append(
                 {
-                    "name": str(hit.id),
+                    "name": payload.get("name", str(hit.id)),
                     "text": text,
                     "score": float(hit.score),
                     "dimensions": dim,
@@ -488,9 +494,9 @@ class QdrantBackend:
             return
         points = [
             qmodels.PointStruct(
-                id=name,
+                id=self._name_to_uuid(name),
                 vector=em.embedding,
-                payload=em.model_dump(exclude={"embedding"}),
+                payload={"name": name, **em.model_dump(exclude={"embedding"})},
             )
             for name, em in embeddings.items()
         ]
@@ -505,7 +511,7 @@ class QdrantBackend:
         try:
             self.client.delete(
                 collection_name=self._collection(guild_id),
-                points_selector=qmodels.PointIdsList(points=ids),
+                points_selector=qmodels.PointIdsList(points=[self._name_to_uuid(id_str) for id_str in ids]),
             )
         except Exception as e:  # noqa: BLE001
             log.warning("Failed to delete embeddings from Qdrant for guild %s: %s", guild_id, e)
@@ -750,9 +756,6 @@ class RAGUtils(commands.Cog):
             await self._load_guild_config(guild.id)
             loaded += 1
         log.info("RAGUtils registered with assistant; cached configs for %s guild(s).", loaded)
-
-    @commands.Cog.listener()
-    async def on_assistant_cog_add(self, cog):
         await self._post_ready_init()
         log.info("Functions have been registered")
 
