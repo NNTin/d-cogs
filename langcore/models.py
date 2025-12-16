@@ -70,6 +70,7 @@ class GuildConfig(BaseModel):
     max_retention_time: int = 1800
     blacklist: List[int] = Field(default_factory=list)
     role_overrides: Dict[int, str] = Field(default_factory=dict)
+    function_statuses: Dict[str, bool] = Field(default_factory=dict)
 
     def get_user_max_retention(self, member: Optional[discord.Member]) -> int:
         if not member:
