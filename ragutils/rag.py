@@ -174,7 +174,8 @@ def _same_topic_sentences(a: str, b: str) -> bool:
 
 
 def chunk_text(text: str, config: RAGConfig) -> list[dict[str, t.Any]]:
-    """Split text into sentence-level chunks with word bounds."""
+    """Split text into sentence-level chunks with word bounds.
+    TODO: We will need to do semantic splitting since our information is messy."""
     if not config.enable_chunking:
         return [{"text": text, "word_count": len(text.split()), "sentence_count": 1}]
 
@@ -417,11 +418,18 @@ class QdrantBackend:
         embeddings: dict[str, t.Any],
         target_dimension: int | None = None,
         force_reset: bool = False,
+        progress_callback: t.Callable[[int, int], None] | None = None,
     ):
         collection = self._collection(guild_id)
         dim = target_dimension or (len(next(iter(embeddings.values())).embedding) if embeddings else None)
         if dim is None:
-            log.info("No embeddings to sync to Qdrant for guild %s", guild_id)
+            if force_reset:
+                try:
+                    self.client.delete_collection(collection)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Failed to delete Qdrant collection %s: %s", collection, e)
+            else:
+                log.info("No embeddings to sync to Qdrant for guild %s", guild_id)
             return
 
         try:
@@ -452,7 +460,10 @@ class QdrantBackend:
             except Exception as e:  # noqa: BLE001
                 log.warning("Failed to create Qdrant collection %s: %s", collection, e)
 
-        points = []
+        points: list[qmodels.PointStruct] = []
+        total = len(embeddings)
+        processed = 0
+        batch_size = 256
         for name, em in embeddings.items():
             if target_dimension and len(em.embedding) != target_dimension:
                 continue
@@ -464,8 +475,17 @@ class QdrantBackend:
                     payload={"name": name, **em.model_dump(exclude={"embedding"})},
                 )
             )
+            if len(points) >= batch_size:
+                self.client.upsert(collection_name=collection, points=points)
+                processed += len(points)
+                if progress_callback:
+                    progress_callback(processed, total)
+                points.clear()
         if points:
             self.client.upsert(collection_name=collection, points=points)
+            processed += len(points)
+            if progress_callback:
+                progress_callback(processed, total)
 
     def query_embeddings(
         self,
@@ -760,6 +780,22 @@ class RAGUtils(commands.Cog):
     def get_rag_config(self, guild_id: int) -> RAGConfig | None:
         return self._rag_configs.get(guild_id)
 
+    def is_qdrant_enabled(self, guild_id: int) -> bool:
+        """Return True if Qdrant backend is enabled and configured for this guild."""
+        conf = self._rag_configs.get(guild_id)
+        return bool(conf and conf.use_qdrant and conf.qdrant_url)
+
+    def get_qdrant_backend(self, guild_id: int) -> QdrantBackend | None:
+        """Return a configured QdrantBackend for this guild or None if unavailable."""
+        conf = self._rag_configs.get(guild_id)
+        if not conf or not conf.qdrant_url or not conf.use_qdrant:
+            return None
+        try:
+            return QdrantBackend(conf.qdrant_url)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to initialize Qdrant backend for guild %s: %s", guild_id, exc)
+            return None
+
     @commands.Cog.listener()
     async def on_assistant_cog_add(self, assistant_cog):
         log.info("Registering RAGUtils with assistant cog.")
@@ -848,7 +884,9 @@ class RAGUtils(commands.Cog):
         await self._save_guild_config(guild_id, config)
         return True
 
-    async def sync_embeddings_to_qdrant(self, guild_id: int, force_reset: bool = False) -> tuple[bool, str]:
+    async def sync_embeddings_to_qdrant(
+        self, guild_id: int, force_reset: bool = False, progress_callback: t.Callable[[int, int], None] | None = None
+    ) -> tuple[bool, str]:
         rag_config = await self._load_guild_config(guild_id)
         if not self.assistant_cog:
             rag_config.migration_status = "failed"
@@ -869,12 +907,20 @@ class RAGUtils(commands.Cog):
             return False, "qdrant-client not installed"
 
         try:
-            backend = QdrantBackend(rag_config.qdrant_url)
+            backend = self.get_qdrant_backend(guild_id) or QdrantBackend(rag_config.qdrant_url)
             target_dim = len(next(iter(conf.embeddings.values())).embedding)
-            await asyncio.to_thread(backend.sync_embeddings, guild_id, conf.embeddings, target_dim, force_reset)
+            await asyncio.to_thread(
+                backend.sync_embeddings,
+                guild_id,
+                conf.embeddings,
+                target_dim,
+                force_reset,
+                progress_callback,
+            )
             rag_config.last_migration = datetime.now(timezone.utc).isoformat()
             rag_config.migration_status = "success"
             await self._save_guild_config(guild_id, rag_config)
+            log.info("Qdrant sync succeeded for guild %s (%s embeddings).", guild_id, len(conf.embeddings))
             return True, f"Migrated {len(conf.embeddings)} embeddings to Qdrant"
         except DependencyMissingError as e:
             log.error("Migration failed due to missing dependency for guild %s: %s", guild_id, e)
