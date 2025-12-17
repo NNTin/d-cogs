@@ -110,6 +110,15 @@ class ollama(commands.Cog):
             self.health_monitor.endpoint = self.ollama_config.endpoint
             self.health_monitor.health_loop.change_interval(seconds=self.ollama_config.health_check_interval)
 
+            healthy, models = await self.health_monitor.check_health()
+            self.ollama_config.update_health(healthy, models)
+            log.debug(
+                "Initial Ollama health check for %s: healthy=%s (%s models)",
+                self.ollama_config.endpoint,
+                healthy,
+                len(models),
+            )
+
             for guild in self.bot.guilds:
                 await self.get_guild_config(guild.id)
 
