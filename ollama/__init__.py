@@ -1,7 +1,6 @@
 from redbot.core.bot import Red
 from redbot.core.utils import get_end_user_data_statement_or_raise
 
-from .api import OllamaAPIError, OllamaClient, OllamaClientError, OllamaConnectionError
 from .ollama import ollama
 from .models import OllamaConfig, OllamaGuildConfig
 
@@ -11,10 +10,6 @@ __all__ = [
     "ollama",
     "OllamaGuildConfig",
     "OllamaConfig",
-    "OllamaClient",
-    "OllamaClientError",
-    "OllamaConnectionError",
-    "OllamaAPIError",
 ]
 
 

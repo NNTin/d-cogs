@@ -7,7 +7,7 @@ Huge thanks goes out towards [vertyco](http://github.com/vertyco/). While workin
 
 ```mermaid
 graph TD
-    subgraph RedDiscord-Bot with CogManager
+    subgraph CogManager
         LangCore
         ProviderCog
         StorageCog
@@ -15,36 +15,36 @@ graph TD
     end
 
     %% Core framework
-    subgraph LangCore[langcore: Cog]
-        LangChain[LangChain Framework]
-        LangChain --> ChainHubManager[ChainHubManager]
-        LangChain -->|implements| ConversationManager
-        LangChain --> ChainStore[ChainStore Abstraction]
-        LangChain --> ChainProvider[ChainProvider Abstraction]
+    subgraph LangCore[langcore: Cog uses LangChain Framework]
+        ChainHubManager[ChainHubManager]
+        ConversationManager
+        ChainStore[ChainStore Abstraction]
+        ChainProvider[ChainProvider Abstraction]
     end
 
     subgraph ConversationManager[ConversationManager]
         langchainModule[PyPI: langchain]
         conversation[conversation.py]
-        CPCInstance[ChainProvider instance]
+        CPCInstance[langcore.get_provider]
     end
 
     %% ChainHub cogs
     subgraph ChainHubCogs[ExtensionCogs for tools/functions]
         subgraph RagCogSub[RagCog: ragutils]
             Rag[ragutils]
-            CSRInstance[ChainStore Instance]
+            CPRInstance[langcore.get_provider]
+            CSRInstance[langcore.get_store]
         end
 
         subgraph MemoryCogSub[MemoryCog: memory]
             Memory[memory]
-            CPMInstance[ChainProvider Instance]
-            CSMInstance[ChainStore Instance]
+            CPMInstance[langcore.get_provider]
+            CSMInstance[langcore.get_store]
         end
 
         subgraph MermaidCogSub[MermaidCog: mermaid]
             Mermaid[mermaid]
-            CPMeInstance[ChainProvider Instance]
+            CPMeInstance[langcore.get_provider]
         end
     end
 
@@ -65,8 +65,8 @@ graph TD
     %% Connections
     LangCore -->|implements abstraction| ChainStore
     LangCore -->|implements abstraction| ChainProvider
-    ChainProvider -->|implemented by| Ollama
-    ChainStore -->|implemented by| QDrant
+    ChainProvider -->|implemented by| ProviderCog
+    ChainStore -->|implemented by| StorageCog
 
     subgraph ChainHubManager
         hub.py

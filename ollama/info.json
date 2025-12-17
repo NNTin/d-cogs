@@ -9,7 +9,9 @@
         "Tin Nguyen"
     ],
     "required_cogs": {},
-    "requirements": [],
+    "requirements": [
+        "langchain-ollama"
+    ],
     "tags": [
         "ollama",
         "ai",

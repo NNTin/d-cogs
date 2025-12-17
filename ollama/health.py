@@ -5,10 +5,9 @@ from typing import List, Tuple
 
 import discord
 from discord.ext import tasks
+from ollama import AsyncClient, ResponseError
 from redbot.core.bot import Red
 
-from . import api
-from .api import OllamaAPIError, OllamaConnectionError, OllamaModelInfo
 from .models import OllamaConfig
 
 log = logging.getLogger("red.tin.ollama.health")
@@ -24,16 +23,13 @@ class HealthMonitor:
 
     async def check_health(self) -> Tuple[bool, List[str]]:
         try:
-            healthy = await api.check_health(self.endpoint)
-            if not healthy:
-                log.debug("Health check failed for %s", self.endpoint)
-                return False, []
-
-            model_infos: List[OllamaModelInfo] = await api.OllamaClient.list_models(self.endpoint)
-            models = [model.name for model in model_infos]
-            log.debug("Health check ok for %s (%s models)", self.endpoint, len(models))
-            return True, models
-        except (OllamaConnectionError, OllamaAPIError) as exc:
+            client = AsyncClient(host=self.endpoint)
+            response = await client.list()
+            models = response.get("models", [])
+            model_names = [model.get("model") or model.get("name") for model in models]
+            log.debug("Health check ok for %s (%s models)", self.endpoint, len(model_names))
+            return True, model_names
+        except ResponseError as exc:
             log.debug("Health check error for %s: %s", self.endpoint, exc)
             return False, []
         except Exception:  # noqa: BLE001
@@ -42,11 +38,13 @@ class HealthMonitor:
 
     async def discover_models(self) -> List[str]:
         try:
-            model_infos: List[OllamaModelInfo] = await api.OllamaClient.list_models(self.endpoint)
-            models = [model.name for model in model_infos]
-            log.debug("Discovered %s models from %s", len(models), self.endpoint)
-            return models
-        except (OllamaConnectionError, OllamaAPIError) as exc:
+            client = AsyncClient(host=self.endpoint)
+            response = await client.list()
+            models = response.get("models", [])
+            model_names = [model.get("model") or model.get("name") for model in models]
+            log.debug("Discovered %s models from %s", len(model_names), self.endpoint)
+            return model_names
+        except ResponseError as exc:
             log.debug("Model discovery error for %s: %s", self.endpoint, exc)
             return []
         except Exception:  # noqa: BLE001

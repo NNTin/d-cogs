@@ -6,11 +6,14 @@ from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
 
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langcore.abc import ChainProvider
+from ollama import AsyncClient, ResponseError
 
-from .api import OllamaAPIError, OllamaClient, OllamaConnectionError, format_error_message
 from .health import HealthMonitor
 from .models import OllamaConfig, OllamaGuildConfig
+from .utils import format_ollama_error
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
@@ -63,6 +66,8 @@ class ollama(commands.Cog):
             config=self.ollama_config,
             endpoint=self.ollama_config.endpoint,
         )
+        self.llm = None
+        self.embedder = None
         self.provider = OllamaChainProvider(self)
 
     async def get_guild_config(self, guild_id: int) -> OllamaGuildConfig:
@@ -193,20 +198,34 @@ class ollama(commands.Cog):
         preferred_model = guild_config.get_user_model(member, available_models)
         model = self._select_model_with_fallback(preferred_model, guild_config.chat_fallback, available_models)
 
-        allowed_options = {"temperature", "num_predict", "frequency_penalty", "presence_penalty", "seed"}
+        langchain_messages: List[Any] = []
+        for message in messages:
+            role = (message.get("role") or "").lower()
+            content = message.get("content") or ""
+            if role == "system":
+                langchain_messages.append(SystemMessage(content=content))
+            elif role == "assistant":
+                langchain_messages.append(AIMessage(content=content))
+            else:
+                langchain_messages.append(HumanMessage(content=content))
+
+        chat_model_fields = getattr(ChatOllama, "model_fields", None)
+        allowed_options = set(chat_model_fields.keys()) if chat_model_fields else {"temperature", "num_predict", "seed"}
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_options and v is not None}
 
-        try:
-            response = await OllamaClient.chat(
-                endpoint=self.ollama_config.endpoint,
-                model=model,
-                messages=messages,
+        async def invoke_chat(selected_model: str) -> str:
+            llm = ChatOllama(
+                base_url=self.ollama_config.endpoint,
+                model=selected_model,
                 **filtered_kwargs,
             )
-            return str(response.message.get("content", "") or "")
-        except OllamaAPIError as exc:
-            response_text = (exc.response_text or "").lower()
-            is_not_found = exc.status_code == 404 or "model not found" in response_text
+            response = await llm.ainvoke(langchain_messages)
+            return str(response.content)
+
+        try:
+            return await invoke_chat(model)
+        except ResponseError as exc:
+            is_not_found = exc.status_code == 404 or "not found" in str(exc).lower()
             if is_not_found and model != guild_config.chat_fallback:
                 retry_model = self._select_model_with_fallback(
                     guild_config.chat_fallback,
@@ -215,31 +234,34 @@ class ollama(commands.Cog):
                 )
                 if retry_model != model:
                     try:
-                        response = await OllamaClient.chat(
-                            endpoint=self.ollama_config.endpoint,
-                            model=retry_model,
-                            messages=messages,
-                            **filtered_kwargs,
-                        )
-                        return str(response.message.get("content", "") or "")
-                    except (OllamaConnectionError, OllamaAPIError) as retry_exc:
+                        return await invoke_chat(retry_model)
+                    except ResponseError as retry_exc:
                         log.warning("Ollama chat failed for guild %s model=%s: %s", guild.id, retry_model, retry_exc)
                         raise commands.UserFeedbackCheckFailure(
-                            format_error_message(retry_exc, model=retry_model)
+                            format_ollama_error(
+                                retry_exc,
+                                model=retry_model,
+                                endpoint=self.ollama_config.endpoint,
+                            )
                         ) from retry_exc
                     except Exception as retry_exc:  # noqa: BLE001
                         log.exception("Unexpected Ollama chat error for guild %s model=%s", guild.id, retry_model)
                         raise commands.UserFeedbackCheckFailure(
-                            format_error_message(retry_exc, model=retry_model)
+                            format_ollama_error(
+                                retry_exc,
+                                model=retry_model,
+                                endpoint=self.ollama_config.endpoint,
+                            )
                         ) from retry_exc
             log.warning("Ollama chat failed for guild %s model=%s: %s", guild.id, model, exc)
-            raise commands.UserFeedbackCheckFailure(format_error_message(exc, model=model)) from exc
-        except OllamaConnectionError as exc:
-            log.warning("Ollama chat failed for guild %s model=%s: %s", guild.id, model, exc)
-            raise commands.UserFeedbackCheckFailure(format_error_message(exc, model=model)) from exc
+            raise commands.UserFeedbackCheckFailure(
+                format_ollama_error(exc, model=model, endpoint=self.ollama_config.endpoint)
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             log.exception("Unexpected Ollama chat error for guild %s model=%s", guild.id, model)
-            raise commands.UserFeedbackCheckFailure(format_error_message(exc, model=model)) from exc
+            raise commands.UserFeedbackCheckFailure(
+                format_ollama_error(exc, model=model, endpoint=self.ollama_config.endpoint)
+            ) from exc
 
     async def embed(self, text: str, guild: discord.Guild, **kwargs: Any) -> List[float]:
         guild_config = await self.get_guild_config(guild.id)
@@ -252,14 +274,13 @@ class ollama(commands.Cog):
         )
 
         try:
-            return await OllamaClient.embed(
-                endpoint=self.ollama_config.endpoint,
+            embedder = OllamaEmbeddings(
+                base_url=self.ollama_config.endpoint,
                 model=model,
-                text=text,
             )
-        except OllamaAPIError as exc:
-            response_text = (exc.response_text or "").lower()
-            is_not_found = exc.status_code == 404 or "model not found" in response_text
+            return await embedder.aembed_query(text)
+        except ResponseError as exc:
+            is_not_found = exc.status_code == 404 or "not found" in str(exc).lower()
             if is_not_found and model != guild_config.embed_fallback:
                 retry_model = self._select_model_with_fallback(
                     guild_config.embed_fallback,
@@ -268,29 +289,38 @@ class ollama(commands.Cog):
                 )
                 if retry_model != model:
                     try:
-                        return await OllamaClient.embed(
-                            endpoint=self.ollama_config.endpoint,
+                        embedder = OllamaEmbeddings(
+                            base_url=self.ollama_config.endpoint,
                             model=retry_model,
-                            text=text,
                         )
-                    except (OllamaConnectionError, OllamaAPIError) as retry_exc:
+                        return await embedder.aembed_query(text)
+                    except ResponseError as retry_exc:
                         log.warning("Ollama embed failed for guild %s model=%s: %s", guild.id, retry_model, retry_exc)
                         raise commands.UserFeedbackCheckFailure(
-                            format_error_message(retry_exc, model=retry_model)
+                            format_ollama_error(
+                                retry_exc,
+                                model=retry_model,
+                                endpoint=self.ollama_config.endpoint,
+                            )
                         ) from retry_exc
                     except Exception as retry_exc:  # noqa: BLE001
                         log.exception("Unexpected Ollama embed error for guild %s model=%s", guild.id, retry_model)
                         raise commands.UserFeedbackCheckFailure(
-                            format_error_message(retry_exc, model=retry_model)
+                            format_ollama_error(
+                                retry_exc,
+                                model=retry_model,
+                                endpoint=self.ollama_config.endpoint,
+                            )
                         ) from retry_exc
             log.warning("Ollama embed failed for guild %s model=%s: %s", guild.id, model, exc)
-            raise commands.UserFeedbackCheckFailure(format_error_message(exc, model=model)) from exc
-        except OllamaConnectionError as exc:
-            log.warning("Ollama embed failed for guild %s model=%s: %s", guild.id, model, exc)
-            raise commands.UserFeedbackCheckFailure(format_error_message(exc, model=model)) from exc
+            raise commands.UserFeedbackCheckFailure(
+                format_ollama_error(exc, model=model, endpoint=self.ollama_config.endpoint)
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             log.exception("Unexpected Ollama embed error for guild %s model=%s", guild.id, model)
-            raise commands.UserFeedbackCheckFailure(format_error_message(exc, model=model)) from exc
+            raise commands.UserFeedbackCheckFailure(
+                format_ollama_error(exc, model=model, endpoint=self.ollama_config.endpoint)
+            ) from exc
 
     @commands.group(name="ollama")
     @commands.admin_or_permissions(administrator=True)
@@ -434,8 +464,10 @@ class ollama(commands.Cog):
     async def list_models(self, ctx: commands.Context):
         """List all available models from Ollama endpoint."""
         try:
-            model_infos = await OllamaClient.list_models(self.ollama_config.endpoint)
-            model_names = [model.name for model in model_infos]
+            client = AsyncClient(host=self.ollama_config.endpoint)
+            response = await client.list()
+            models = response.get("models", [])
+            model_names = [model.get("model") or model.get("name") for model in models]
             if not model_names:
                 await ctx.send("No models found.")
                 return
