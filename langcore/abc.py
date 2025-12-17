@@ -56,6 +56,36 @@ class ChainProvider(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    async def get_chat_llm(
+        self,
+        guild_id: int,
+        member_id: Optional[int] = None,
+    ) -> Any:
+        """Get a bindable LangChain chat model instance for advanced workflows.
+
+        This method returns the underlying LangChain chat model object that can be
+        used with .bind_tools() for tool calling and agentic execution patterns.
+
+        Args:
+            guild_id: Guild identifier for configuration lookup.
+            member_id: Optional member ID for role-based model overrides.
+
+        Returns:
+            A LangChain chat model instance (e.g., ChatOllama, ChatOpenAI) that
+            supports .bind_tools() and .ainvoke() methods.
+
+        Raises:
+            NotImplementedError: If the provider does not implement this interface.
+
+        Example:
+            >>> provider = get_provider("ollama")
+            >>> llm = await provider.get_chat_llm(guild_id=123, member_id=456)
+            >>> bound_llm = llm.bind_tools(tool_schemas)
+            >>> response = await bound_llm.ainvoke(messages)
+        """
+        raise NotImplementedError
+
 
 class ChainStore(ABC):
     """Interface for vector storage backends (e.g., Qdrant)."""

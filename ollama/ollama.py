@@ -89,6 +89,25 @@ class ollama(commands.Cog):
             async def embed(self, text: str, guild: discord.Guild, **kwargs: Any) -> List[float]:
                 return await cog.embed(text=text, guild=guild, **kwargs)
 
+            async def get_chat_llm(
+                self,
+                guild_id: int,
+                member_id: Optional[int] = None,
+            ) -> ChatOllama:
+                """Get a configured ChatOllama instance for tool binding and agentic workflows.
+
+                Args:
+                    guild_id: Guild identifier for configuration lookup.
+                    member_id: Optional member ID for role-based model overrides.
+
+                Returns:
+                    ChatOllama instance configured with the appropriate model for the guild/member.
+
+                Raises:
+                    commands.UserFeedbackCheckFailure: If configuration is invalid or model unavailable.
+                """
+                return await cog.get_chat_llm(guild_id=guild_id, member_id=member_id)
+
         return _OllamaChainProvider()
 
     def _refresh_provider(self) -> None:
@@ -402,6 +421,65 @@ class ollama(commands.Cog):
             raise commands.UserFeedbackCheckFailure(
                 format_ollama_error(exc, model=model, endpoint=self.ollama_config.endpoint)
             ) from exc
+
+    async def get_chat_llm(
+        self,
+        guild_id: int,
+        member_id: Optional[int] = None,
+    ) -> ChatOllama:
+        """Get a configured ChatOllama instance for the specified guild and member.
+
+        This method performs model selection using the same logic as chat(), including:
+        - Guild-specific model configuration
+        - Role-based model overrides
+        - Fallback model handling
+        - Model availability validation
+
+        Args:
+            guild_id: Guild identifier for configuration lookup.
+            member_id: Optional member ID for role-based model overrides.
+
+        Returns:
+            ChatOllama instance ready for tool binding and invocation.
+
+        Raises:
+            commands.UserFeedbackCheckFailure: If model selection fails or endpoint unavailable.
+        """
+        guild_config = await self.get_guild_config(guild_id)
+        available_models = self.ollama_config.available_models
+
+        # Get member object if member_id provided
+        member = None
+        if member_id:
+            guild = self.bot.get_guild(guild_id)
+            if guild:
+                member = guild.get_member(member_id)
+
+        # Use same model selection logic as chat()
+        preferred_model = guild_config.get_user_model(member, available_models)
+        model = self._select_model_with_fallback(
+            preferred_model,
+            guild_config.chat_fallback,
+            available_models,
+        )
+
+        # Validate model availability
+        if available_models and model not in available_models:
+            log.warning(
+                "Selected model '%s' not in available models for guild %s; using anyway",
+                model,
+                guild_id,
+            )
+
+        # Return configured ChatOllama instance
+        try:
+            return ChatOllama(
+                base_url=self.ollama_config.endpoint,
+                model=model,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failed to create ChatOllama instance for guild %s: %s", guild_id, exc)
+            raise commands.UserFeedbackCheckFailure(f"Failed to initialize chat model: {exc}") from exc
 
     @commands.group(name="ollama")
     @commands.admin_or_permissions(administrator=True)
