@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import discord
 from langchain_core.messages import (
@@ -124,10 +124,46 @@ class ConversationManager:
                 log.debug("Processing %d tool calls", len(ai_msg.tool_calls))
 
                 # Execute each tool call
-                for tool_call in ai_msg.tool_calls:
-                    tool_name = tool_call["name"]
-                    tool_args = tool_call["args"]
-                    tool_id = tool_call["id"]
+                for tool_index, tool_call in enumerate(ai_msg.tool_calls):
+                    # LangChain may return ToolCall objects instead of plain dicts.
+                    # Prefer attribute access, with a dict fallback.
+                    tool_name: Optional[str]
+                    tool_args: Any
+                    tool_id: Optional[str]
+
+                    if isinstance(tool_call, dict):
+                        tool_name = tool_call.get("name")
+                        tool_args = tool_call.get("args")
+                        tool_id = tool_call.get("id")
+                    else:
+                        tool_name = getattr(tool_call, "name", None)
+                        tool_args = getattr(tool_call, "args", None)
+                        tool_id = getattr(tool_call, "id", None)
+
+                        # Some implementations are mapping-like without being dicts.
+                        if (tool_name is None or tool_args is None or tool_id is None) and hasattr(tool_call, "get"):
+                            tool_name = tool_name or tool_call.get("name")
+                            tool_args = tool_args if tool_args is not None else tool_call.get("args")
+                            tool_id = tool_id or tool_call.get("id")
+
+                    if tool_name is None:
+                        log.warning("Tool call missing name (type=%s): %r", type(tool_call), tool_call)
+                        tool_name = ""
+
+                    if tool_args is None:
+                        tool_args = {}
+
+                    if not isinstance(tool_args, dict):
+                        log.warning(
+                            "Tool %s args expected dict, got %s: %r",
+                            tool_name,
+                            type(tool_args),
+                            tool_args,
+                        )
+                        tool_args = {}
+
+                    if tool_id is None:
+                        tool_id = f"tool_call_{iteration}_{tool_index}"
 
                     # Get callback function
                     callback = callbacks.get(tool_name)
