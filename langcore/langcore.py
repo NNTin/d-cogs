@@ -1,11 +1,12 @@
 import logging
-from typing import Literal, Union
+from typing import Dict, Literal, Optional, Union
 
 import discord
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
 
+from .abc import ChainProvider
 from .conversation import ConversationManager
 from .hub import ChainHub
 from .models import GuildConfig
@@ -39,6 +40,86 @@ class langcore(commands.Cog):
 
         self.conversation_manager = ConversationManager()
         self.hub = ChainHub(self.bot)
+        self.providers: Dict[str, ChainProvider] = {}
+
+    def register_provider(self, name: str, provider: ChainProvider) -> bool:
+        """Register a ChainProvider implementation.
+
+        Args:
+            name: Unique identifier for the provider (typically cog name)
+            provider: ChainProvider implementation instance
+
+        Returns:
+            bool: True if registration succeeded
+        """
+        if not isinstance(provider, ChainProvider):
+            log.warning("Provider registration failed for %s: not a ChainProvider instance", name)
+            return False
+
+        existing = self.providers.get(name)
+        if existing is provider:
+            log.debug("Provider %s already registered with same instance; skipping", name)
+            return True
+
+        if existing is not None:
+            log.warning("Provider %s already registered, overwriting", name)
+
+        self.providers[name] = provider
+        log.info("Registered provider: %s", name)
+        return True
+
+    def unregister_provider(self, name: str) -> None:
+        """Unregister a ChainProvider implementation.
+
+        Args:
+            name: Provider identifier to remove
+        """
+        if name not in self.providers:
+            log.debug("Provider %s not in registry", name)
+            return
+
+        del self.providers[name]
+        log.info("Unregistered provider: %s", name)
+
+    def get_provider(self, name: str) -> Optional[ChainProvider]:
+        """Retrieve a registered provider by name.
+
+        Args:
+            name: Provider identifier
+
+        Returns:
+            ChainProvider instance or None if not found
+        """
+        return self.providers.get(name)
+
+    def get_providers(self) -> Dict[str, ChainProvider]:
+        """Get all registered providers.
+
+        Returns:
+            Dictionary mapping provider names to ChainProvider instances
+        """
+        return self.providers.copy()
+
+    async def cog_load(self) -> None:
+        """Initialize langcore and discover existing providers."""
+        await self.bot.wait_until_red_ready()
+
+        log.info("LangCore cog_load starting provider discovery")
+
+        # Discover and register existing ChainProvider cogs
+        for cog_name, cog in self.bot.cogs.items():
+            if isinstance(cog, ChainProvider):
+                self.register_provider(cog_name, cog)
+                log.info("Discovered existing provider: %s", cog_name)
+
+        # Dispatch event to notify provider cogs that langcore is ready
+        self.bot.dispatch("langcore_cog_add", self)
+        log.info("LangCore initialized with %d provider(s)", len(self.providers))
+
+    async def cog_unload(self) -> None:
+        """Clean up when langcore is unloaded."""
+        self.bot.dispatch("langcore_cog_remove")
+        log.info("LangCore unloaded")
 
     async def get_guild_config(self, guild_id: int) -> GuildConfig:
         """Retrieve guild configuration with validation and fallback to defaults."""
@@ -107,6 +188,28 @@ class langcore(commands.Cog):
             value=f"{len(config.role_overrides)} configured" if config.role_overrides else "None",
             inline=True,
         )
+
+        await ctx.send(embed=embed)
+
+    @langcore_config.command(name="providers")
+    async def view_providers(self, ctx: commands.Context):
+        """List all registered ChainProvider implementations."""
+        if not self.providers:
+            await ctx.send("No providers registered.")
+            return
+
+        embed = discord.Embed(
+            title="Registered Providers",
+            color=discord.Color.green(),
+        )
+
+        for name, provider in self.providers.items():
+            provider_type = type(provider).__name__
+            embed.add_field(
+                name=name,
+                value=f"Type: `{provider_type}`\nModule: `{provider.__module__}`",
+                inline=False,
+            )
 
         await ctx.send(embed=embed)
 
@@ -240,6 +343,23 @@ class langcore(commands.Cog):
             statuses[function_name] = not current
             status = "enabled" if not current else "disabled"
         await ctx.send(f"Function `{function_name}` has been {status}.")
+
+    @commands.Cog.listener()
+    async def on_cog_add(self, cog: commands.Cog):
+        """Notify provider cogs when langcore is available."""
+        log.info("Cog added while langcore loaded: %s", cog.qualified_name)
+        event = "on_langcore_cog_add"
+        funcs = [func for event_name, func in cog.get_listeners() if event_name == event]
+        for func in funcs:
+            self.bot._schedule_event(func, event, self)
+
+    @commands.Cog.listener()
+    async def on_cog_remove(self, cog: commands.Cog):
+        """Clean up when provider cogs are removed."""
+        log.info("Cog removed while langcore loaded: %s", cog.qualified_name)
+        cog_name = cog.qualified_name
+        self.unregister_provider(cog_name)
+        self.hub.unregister_cog(cog_name)
 
     async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
         # TODO: Replace this with the proper end user data removal handling.

@@ -97,11 +97,32 @@ class ollama(commands.Cog, ChainProvider):
 
             if self.ollama_config.health_check_enabled:
                 self.health_monitor.start()
+
+            # Register with langcore if it's already loaded
+            langcore_cog = self.bot.get_cog("langcore")
+            if langcore_cog:
+                success = langcore_cog.register_provider(self.qualified_name, self)
+                if success:
+                    log.info("Registered ollama with existing langcore instance")
         except Exception:  # noqa: BLE001
             log.exception("Failed to initialize Ollama cog health monitoring")
 
     async def cog_unload(self) -> None:
         self.health_monitor.stop()
+
+    @commands.Cog.listener()
+    async def on_langcore_cog_add(self, langcore_cog):
+        """Register this cog as a ChainProvider when langcore loads."""
+        success = langcore_cog.register_provider(self.qualified_name, self)
+        if success:
+            log.info("Registered ollama as ChainProvider with langcore")
+        else:
+            log.error("Failed to register ollama with langcore")
+
+    @commands.Cog.listener()
+    async def on_langcore_cog_remove(self):
+        """Handle langcore cog removal."""
+        log.info("LangCore cog removed, provider registration cleared")
 
     async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
         # TODO: Replace this with the proper end user data removal handling.
