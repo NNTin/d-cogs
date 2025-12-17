@@ -8,7 +8,6 @@ from redbot.core.config import Config
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langcore.abc import ChainProvider
 from ollama import AsyncClient, ResponseError
 
 from .health import HealthMonitor
@@ -24,23 +23,6 @@ from .utils import format_ollama_error
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
 log = logging.getLogger("red.tin.ollama")
-
-
-class OllamaChainProvider(ChainProvider):
-    def __init__(self, cog: "ollama") -> None:
-        self._cog = cog
-
-    async def chat(
-        self,
-        messages: List[Dict[str, Any]],
-        guild: discord.Guild,
-        member: Optional[discord.Member] = None,
-        **kwargs: Any,
-    ) -> str:
-        return await self._cog.chat(messages=messages, guild=guild, member=member, **kwargs)
-
-    async def embed(self, text: str, guild: discord.Guild, **kwargs: Any) -> List[float]:
-        return await self._cog.embed(text=text, guild=guild, **kwargs)
 
 
 class ollama(commands.Cog):
@@ -74,7 +56,43 @@ class ollama(commands.Cog):
         )
         self.llm = None
         self.embedder = None
-        self.provider = OllamaChainProvider(self)
+        self.provider = self._build_provider()
+
+    def _build_provider(self):
+        """
+        Build a ChainProvider instance compatible with the *currently loaded*
+        `langcore.abc.ChainProvider` class.
+
+        This matters when langcore is hot-reloaded: `ChainProvider` is redefined,
+        and instances created before the reload will fail `isinstance(...)`.
+        """
+        try:
+            from importlib import import_module
+
+            chainprovider_cls = getattr(import_module("langcore.abc"), "ChainProvider")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Unable to import langcore.abc.ChainProvider: %s", exc)
+            chainprovider_cls = object  # type: ignore[assignment]
+
+        cog = self
+
+        class _OllamaChainProvider(chainprovider_cls):  # type: ignore[misc,valid-type]
+            async def chat(
+                self,
+                messages: List[Dict[str, Any]],
+                guild: discord.Guild,
+                member: Optional[discord.Member] = None,
+                **kwargs: Any,
+            ) -> str:
+                return await cog.chat(messages=messages, guild=guild, member=member, **kwargs)
+
+            async def embed(self, text: str, guild: discord.Guild, **kwargs: Any) -> List[float]:
+                return await cog.embed(text=text, guild=guild, **kwargs)
+
+        return _OllamaChainProvider()
+
+    def _refresh_provider(self) -> None:
+        self.provider = self._build_provider()
 
     async def get_guild_config(self, guild_id: int) -> OllamaGuildConfig:
         data = await self.config.guild_from_id(guild_id).all()
@@ -139,6 +157,7 @@ class ollama(commands.Cog):
             # Register with langcore if it's already loaded
             langcore_cog = self.bot.get_cog("langcore")
             if langcore_cog:
+                self._refresh_provider()
                 success = langcore_cog.register_provider(self.qualified_name, self.provider)
                 if success:
                     log.info("Registered ollama with existing langcore instance")
@@ -151,6 +170,7 @@ class ollama(commands.Cog):
     @commands.Cog.listener()
     async def on_langcore_cog_add(self, langcore_cog):
         """Register this cog as a ChainProvider when langcore loads."""
+        self._refresh_provider()
         success = langcore_cog.register_provider(self.qualified_name, self.provider)
         if success:
             log.info("Registered ollama as ChainProvider with langcore")
