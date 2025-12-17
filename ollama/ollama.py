@@ -70,6 +70,15 @@ class ollama(commands.Cog, ChainProvider):
                 log.exception("Failed to reset Ollama config for guild %s", guild_id)
             return default
 
+    async def save_ollama_config(self) -> bool:
+        """Save global Ollama configuration."""
+        try:
+            await self.config.ollama_config.set(self.ollama_config.model_dump())
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failed to save Ollama config: %s", exc)
+            return False
+
     async def cog_load(self) -> None:
         try:
             stored = await self.config.ollama_config()
@@ -234,3 +243,226 @@ class ollama(commands.Cog, ChainProvider):
         except Exception as exc:  # noqa: BLE001
             log.exception("Unexpected Ollama embed error for guild %s model=%s", guild.id, model)
             raise commands.UserFeedbackCheckFailure(format_error_message(exc, model=model)) from exc
+
+    @commands.group(name="ollama")
+    @commands.admin_or_permissions(administrator=True)
+    @commands.guild_only()
+    async def ollama_config(self, ctx: commands.Context):
+        """Manage Ollama provider configuration."""
+        pass
+
+    @ollama_config.command(name="settings")
+    async def view_settings(self, ctx: commands.Context):
+        """View current Ollama configuration for this server."""
+        guild_config = await self.get_guild_config(ctx.guild.id)
+
+        embed = discord.Embed(
+            title="Ollama Configuration",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="Endpoint",
+            value=self.ollama_config.endpoint,
+            inline=False,
+        )
+        embed.add_field(
+            name="Health Check",
+            value=(
+                f"Enabled: {self.ollama_config.health_check_enabled}\n"
+                f"Interval: {self.ollama_config.health_check_interval}s\n"
+                f"Status: {'✅ Healthy' if self.ollama_config.endpoint_healthy else '❌ Unhealthy'}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Models",
+            value=(
+                f"Chat: {guild_config.chat_model}\n"
+                f"Embed: {guild_config.embed_model}\n"
+                f"Chat Fallback: {guild_config.chat_fallback}\n"
+                f"Embed Fallback: {guild_config.embed_fallback}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Available Models",
+            value=", ".join(self.ollama_config.available_models)
+            if self.ollama_config.available_models
+            else "None discovered",
+            inline=False,
+        )
+        embed.add_field(
+            name="Role Overrides",
+            value=f"{len(guild_config.role_model_overrides)} configured"
+            if guild_config.role_model_overrides
+            else "None",
+            inline=True,
+        )
+        embed.add_field(
+            name="Tool Scope",
+            value=guild_config.tool_scope,
+            inline=True,
+        )
+
+        await ctx.send(embed=embed)
+
+    @ollama_config.command(name="endpoint")
+    async def set_endpoint(self, ctx: commands.Context, url: str):
+        """Set the Ollama endpoint URL."""
+        if not url.startswith(("http://", "https://")):
+            await ctx.send("Endpoint must start with http:// or https://")
+            return
+
+        self.ollama_config.endpoint = url
+        await self.config.ollama_config.set(self.ollama_config.model_dump())
+        self.health_monitor.endpoint = url
+        await ctx.send(f"Ollama endpoint set to: {url}")
+
+    @ollama_config.command(name="healthcheck")
+    async def toggle_health_check(self, ctx: commands.Context, enabled: bool):
+        """Enable or disable endpoint health monitoring."""
+        self.ollama_config.health_check_enabled = enabled
+        await self.config.ollama_config.set(self.ollama_config.model_dump())
+
+        if enabled:
+            if not self.health_monitor.health_loop.is_running():
+                self.health_monitor.start()
+            await ctx.send("Health check enabled.")
+        else:
+            if self.health_monitor.health_loop.is_running():
+                self.health_monitor.stop()
+            await ctx.send("Health check disabled.")
+
+    @ollama_config.command(name="healthinterval")
+    async def set_health_interval(self, ctx: commands.Context, seconds: int):
+        """Set health check interval in seconds."""
+        if seconds < 10:
+            await ctx.send("Interval must be at least 10 seconds.")
+            return
+
+        self.ollama_config.health_check_interval = seconds
+        await self.config.ollama_config.set(self.ollama_config.model_dump())
+        self.health_monitor.health_loop.change_interval(seconds=seconds)
+        await ctx.send(f"Health check interval set to {seconds} seconds.")
+
+    async def model_autocomplete(self, interaction: discord.Interaction, current: str):
+        """Autocomplete callback for model selection."""
+        models = self.ollama_config.available_models
+        if not models:
+            return []
+
+        filtered = [model for model in models if current.lower() in model.lower()]
+        return [discord.app_commands.Choice(name=model, value=model) for model in filtered[:25]]
+
+    @ollama_config.command(name="chatmodel")
+    @discord.app_commands.autocomplete(model=model_autocomplete)
+    async def set_chat_model(self, ctx: commands.Context, model: str):
+        """Set the default chat model for this server."""
+        await self.config.guild(ctx.guild).chat_model.set(model)
+        await ctx.send(f"Chat model set to: {model}")
+
+    @ollama_config.command(name="embedmodel")
+    @discord.app_commands.autocomplete(model=model_autocomplete)
+    async def set_embed_model(self, ctx: commands.Context, model: str):
+        """Set the default embedding model for this server."""
+        await self.config.guild(ctx.guild).embed_model.set(model)
+        await ctx.send(f"Embed model set to: {model}")
+
+    @ollama_config.command(name="chatfallback")
+    @discord.app_commands.autocomplete(model=model_autocomplete)
+    async def set_chat_fallback(self, ctx: commands.Context, model: str):
+        """Set the fallback chat model."""
+        await self.config.guild(ctx.guild).chat_fallback.set(model)
+        await ctx.send(f"Chat fallback model set to: {model}")
+
+    @ollama_config.command(name="embedfallback")
+    @discord.app_commands.autocomplete(model=model_autocomplete)
+    async def set_embed_fallback(self, ctx: commands.Context, model: str):
+        """Set the fallback embedding model."""
+        await self.config.guild(ctx.guild).embed_fallback.set(model)
+        await ctx.send(f"Embed fallback model set to: {model}")
+
+    @ollama_config.command(name="listmodels")
+    async def list_models(self, ctx: commands.Context):
+        """List all available models from Ollama endpoint."""
+        try:
+            model_infos = await OllamaClient.list_models(self.ollama_config.endpoint)
+            model_names = [model.name for model in model_infos]
+            if not model_names:
+                await ctx.send("No models found.")
+                return
+
+            embed = discord.Embed(
+                title="Available Ollama Models",
+                description="\n".join(f"- {model}" for model in model_names),
+                color=discord.Color.green(),
+            )
+            await ctx.send(embed=embed)
+        except Exception as exc:  # noqa: BLE001
+            await ctx.send(f"Failed to fetch models: {exc}")
+
+    @ollama_config.group(name="roleoverride")
+    async def role_override_group(self, ctx: commands.Context):
+        """Manage role-based model overrides."""
+        pass
+
+    @role_override_group.command(name="add")
+    @discord.app_commands.autocomplete(model=model_autocomplete)
+    async def role_override_add(
+        self,
+        ctx: commands.Context,
+        role: discord.Role,
+        model: str,
+    ):
+        """Set a model override for a specific role."""
+        async with self.config.guild(ctx.guild).role_model_overrides() as overrides:
+            overrides[role.id] = model
+        await ctx.send(f"Role {role.mention} will use model: {model}")
+
+    @role_override_group.command(name="remove")
+    async def role_override_remove(self, ctx: commands.Context, role: discord.Role):
+        """Remove a role's model override."""
+        async with self.config.guild(ctx.guild).role_model_overrides() as overrides:
+            if role.id not in overrides:
+                await ctx.send(f"Role {role.mention} has no override.")
+                return
+            del overrides[role.id]
+        await ctx.send(f"Removed model override for {role.mention}")
+
+    @role_override_group.command(name="list")
+    async def role_override_list(self, ctx: commands.Context):
+        """List all role model overrides."""
+        overrides = await self.config.guild(ctx.guild).role_model_overrides()
+        if not overrides:
+            await ctx.send("No role overrides configured.")
+            return
+
+        entries = []
+        for role_id, model in overrides.items():
+            try:
+                role_id_int = int(role_id)
+            except (TypeError, ValueError):
+                role_id_int = role_id  # type: ignore[assignment]
+            role = ctx.guild.get_role(role_id_int) if isinstance(role_id_int, int) else None
+            if role:
+                entries.append(f"- {role.mention}: `{model}`")
+            else:
+                entries.append(f"- Unknown Role ({role_id}): `{model}`")
+
+        embed = discord.Embed(
+            title="Role Model Overrides",
+            description="\n".join(entries),
+            color=discord.Color.blue(),
+        )
+        await ctx.send(embed=embed)
+
+    @ollama_config.command(name="toolscope")
+    async def set_tool_scope(self, ctx: commands.Context, scope: str):
+        """Set tool calling scope (core, extended, all)."""
+        valid_scopes = ["core", "extended", "all"]
+        if scope not in valid_scopes:
+            await ctx.send(f"Invalid scope. Choose from: {', '.join(valid_scopes)}")
+            return
+
+        await self.config.guild(ctx.guild).tool_scope.set(scope)
+        await ctx.send(f"Tool scope set to: {scope}")
