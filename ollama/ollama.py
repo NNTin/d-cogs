@@ -147,7 +147,37 @@ class ollama(commands.Cog, ChainProvider):
                 **filtered_kwargs,
             )
             return str(response.message.get("content", "") or "")
-        except (OllamaConnectionError, OllamaAPIError) as exc:
+        except OllamaAPIError as exc:
+            response_text = (exc.response_text or "").lower()
+            is_not_found = exc.status_code == 404 or "model not found" in response_text
+            if is_not_found and model != guild_config.chat_fallback:
+                retry_model = self._select_model_with_fallback(
+                    guild_config.chat_fallback,
+                    guild_config.chat_fallback,
+                    available_models,
+                )
+                if retry_model != model:
+                    try:
+                        response = await OllamaClient.chat(
+                            endpoint=self.ollama_config.endpoint,
+                            model=retry_model,
+                            messages=messages,
+                            **filtered_kwargs,
+                        )
+                        return str(response.message.get("content", "") or "")
+                    except (OllamaConnectionError, OllamaAPIError) as retry_exc:
+                        log.warning("Ollama chat failed for guild %s model=%s: %s", guild.id, retry_model, retry_exc)
+                        raise commands.UserFeedbackCheckFailure(
+                            format_error_message(retry_exc, model=retry_model)
+                        ) from retry_exc
+                    except Exception as retry_exc:  # noqa: BLE001
+                        log.exception("Unexpected Ollama chat error for guild %s model=%s", guild.id, retry_model)
+                        raise commands.UserFeedbackCheckFailure(
+                            format_error_message(retry_exc, model=retry_model)
+                        ) from retry_exc
+            log.warning("Ollama chat failed for guild %s model=%s: %s", guild.id, model, exc)
+            raise commands.UserFeedbackCheckFailure(format_error_message(exc, model=model)) from exc
+        except OllamaConnectionError as exc:
             log.warning("Ollama chat failed for guild %s model=%s: %s", guild.id, model, exc)
             raise commands.UserFeedbackCheckFailure(format_error_message(exc, model=model)) from exc
         except Exception as exc:  # noqa: BLE001
@@ -170,7 +200,35 @@ class ollama(commands.Cog, ChainProvider):
                 model=model,
                 text=text,
             )
-        except (OllamaConnectionError, OllamaAPIError) as exc:
+        except OllamaAPIError as exc:
+            response_text = (exc.response_text or "").lower()
+            is_not_found = exc.status_code == 404 or "model not found" in response_text
+            if is_not_found and model != guild_config.embed_fallback:
+                retry_model = self._select_model_with_fallback(
+                    guild_config.embed_fallback,
+                    guild_config.embed_fallback,
+                    available_models,
+                )
+                if retry_model != model:
+                    try:
+                        return await OllamaClient.embed(
+                            endpoint=self.ollama_config.endpoint,
+                            model=retry_model,
+                            text=text,
+                        )
+                    except (OllamaConnectionError, OllamaAPIError) as retry_exc:
+                        log.warning("Ollama embed failed for guild %s model=%s: %s", guild.id, retry_model, retry_exc)
+                        raise commands.UserFeedbackCheckFailure(
+                            format_error_message(retry_exc, model=retry_model)
+                        ) from retry_exc
+                    except Exception as retry_exc:  # noqa: BLE001
+                        log.exception("Unexpected Ollama embed error for guild %s model=%s", guild.id, retry_model)
+                        raise commands.UserFeedbackCheckFailure(
+                            format_error_message(retry_exc, model=retry_model)
+                        ) from retry_exc
+            log.warning("Ollama embed failed for guild %s model=%s: %s", guild.id, model, exc)
+            raise commands.UserFeedbackCheckFailure(format_error_message(exc, model=model)) from exc
+        except OllamaConnectionError as exc:
             log.warning("Ollama embed failed for guild %s model=%s: %s", guild.id, model, exc)
             raise commands.UserFeedbackCheckFailure(format_error_message(exc, model=model)) from exc
         except Exception as exc:  # noqa: BLE001
