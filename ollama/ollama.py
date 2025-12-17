@@ -30,7 +30,7 @@ class ollama(commands.Cog, ChainProvider):
             force_registration=True,
         )
         self.config.register_global(ollama_config={})
-        default_guild = OllamaGuildConfig().model_dump()
+        default_guild = OllamaGuildConfig().model_dump(exclude_defaults=False)
         self.config.register_guild(
             chat_model=default_guild["chat_model"],
             embed_model=default_guild["embed_model"],
@@ -56,7 +56,7 @@ class ollama(commands.Cog, ChainProvider):
             default = OllamaGuildConfig()
             try:
                 guild_conf = self.config.guild_from_id(guild_id)
-                default_data = default.model_dump()
+                default_data = default.model_dump(exclude_defaults=False)
                 for key in (
                     "chat_model",
                     "embed_model",
@@ -73,7 +73,7 @@ class ollama(commands.Cog, ChainProvider):
     async def save_ollama_config(self) -> bool:
         """Save global Ollama configuration."""
         try:
-            await self.config.ollama_config.set(self.ollama_config.model_dump())
+            await self.config.ollama_config.set(self.ollama_config.model_dump(exclude_defaults=False))
             return True
         except Exception as exc:  # noqa: BLE001
             log.error("Failed to save Ollama config: %s", exc)
@@ -84,10 +84,10 @@ class ollama(commands.Cog, ChainProvider):
             stored = await self.config.ollama_config()
             if stored:
                 loaded = OllamaConfig.model_validate(stored)
-                for key, value in loaded.model_dump().items():
+                for key, value in loaded.model_dump(exclude_defaults=False).items():
                     setattr(self.ollama_config, key, value)
             else:
-                await self.config.ollama_config.set(self.ollama_config.model_dump())
+                await self.config.ollama_config.set(self.ollama_config.model_dump(exclude_defaults=False))
 
             self.health_monitor.endpoint = self.ollama_config.endpoint
             self.health_monitor.health_loop.change_interval(seconds=self.ollama_config.health_check_interval)
@@ -314,7 +314,7 @@ class ollama(commands.Cog, ChainProvider):
             return
 
         self.ollama_config.endpoint = url
-        await self.config.ollama_config.set(self.ollama_config.model_dump())
+        await self.config.ollama_config.set(self.ollama_config.model_dump(exclude_defaults=False))
         self.health_monitor.endpoint = url
         await ctx.send(f"Ollama endpoint set to: {url}")
 
@@ -322,7 +322,7 @@ class ollama(commands.Cog, ChainProvider):
     async def toggle_health_check(self, ctx: commands.Context, enabled: bool):
         """Enable or disable endpoint health monitoring."""
         self.ollama_config.health_check_enabled = enabled
-        await self.config.ollama_config.set(self.ollama_config.model_dump())
+        await self.config.ollama_config.set(self.ollama_config.model_dump(exclude_defaults=False))
 
         if enabled:
             if not self.health_monitor.health_loop.is_running():
@@ -341,7 +341,7 @@ class ollama(commands.Cog, ChainProvider):
             return
 
         self.ollama_config.health_check_interval = seconds
-        await self.config.ollama_config.set(self.ollama_config.model_dump())
+        await self.config.ollama_config.set(self.ollama_config.model_dump(exclude_defaults=False))
         self.health_monitor.health_loop.change_interval(seconds=seconds)
         await ctx.send(f"Health check interval set to {seconds} seconds.")
 

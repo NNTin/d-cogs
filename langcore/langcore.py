@@ -27,7 +27,7 @@ class langcore(commands.Cog):
             identifier=257263088,
             force_registration=True,
         )
-        default_guild = GuildConfig().model_dump()
+        default_guild = GuildConfig().model_dump(exclude_defaults=False)
         self.config.register_guild(
             enabled=default_guild["enabled"],
             max_retention=default_guild["max_retention"],
@@ -49,7 +49,7 @@ class langcore(commands.Cog):
             log.warning("Invalid langcore config for guild %s, using defaults: %s", guild_id, exc)
             default = GuildConfig()
             guild_conf = self.config.guild_from_id(guild_id)
-            default_data = default.model_dump()
+            default_data = default.model_dump(exclude_defaults=False)
             for key in default_data.keys():
                 await getattr(guild_conf, key).set(default_data[key])
             return default
@@ -58,7 +58,7 @@ class langcore(commands.Cog):
         """Save guild configuration with validation."""
         try:
             guild_conf = self.config.guild_from_id(guild_id)
-            config_data = config.model_dump()
+            config_data = config.model_dump(exclude_defaults=False)
             for key, value in config_data.items():
                 await getattr(guild_conf, key).set(value)
             return True
