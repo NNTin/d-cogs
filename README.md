@@ -7,7 +7,6 @@ Huge thanks goes out towards [vertyco](http://github.com/vertyco/). While workin
 
 ```mermaid
 graph TD
-
     subgraph RedDiscord-Bot with CogManager
         LangCore
         ProviderCog
@@ -18,38 +17,49 @@ graph TD
     %% Core framework
     subgraph LangCore[langcore: Cog]
         LangChain[LangChain Framework]
-        LangChain --> ChainHub[ChainHub]
+        LangChain --> ChainHubManager[ChainHubManager]
+        LangChain -->|implements| ConversationManager
         LangChain --> ChainStore[ChainStore Abstraction]
         LangChain --> ChainProvider[ChainProvider Abstraction]
     end
 
+    subgraph ConversationManager[ConversationManager]
+        langchainModule[PyPI: langchain]
+        conversation[conversation.py]
+        CPCInstance[ChainProvider instance]
+    end
+
     %% ChainHub cogs
-    subgraph ChainHubCogs[Collection of cogs]
+    subgraph ChainHubCogs[ExtensionCogs for tools/functions]
         subgraph RagCogSub[RagCog: ragutils]
-            Rag[ragutils] --> CSRInstance[ChainStore Instance]
+            Rag[ragutils]
+            CSRInstance[ChainStore Instance]
         end
 
         subgraph MemoryCogSub[MemoryCog: memory]
-            Memory[memory] --> CPMInstance[ChainProvider Instance]
-            Memory[memory] --> CSMInstance[ChainStore Instance]
+            Memory[memory]
+            CPMInstance[ChainProvider Instance]
+            CSMInstance[ChainStore Instance]
         end
 
         subgraph MermaidCogSub[MermaidCog: mermaid]
-            Mermaid[mermaid] --> CPMeInstance[ChainProvider Instance]
             Mermaid[mermaid]
+            CPMeInstance[ChainProvider Instance]
         end
     end
 
     %% Provider cog
     subgraph ProviderCog[ollama: Cog]
         Ollama[ollama]
-        localhost:11434
+        backendOllama[localhost:11434]
+        ollamaModule[PyPI: langchain-ollama]
     end
 
     %% Storage cog
     subgraph StorageCog[qdrant: Cog]
         QDrant[qdrant]
-        localhost:6333
+        backendQdrant[localhost:6333]
+        qdrantModule[PyPI: langchain-qdrant]
     end
 
     %% Connections
@@ -58,7 +68,25 @@ graph TD
     ChainProvider -->|implemented by| Ollama
     ChainStore -->|implemented by| QDrant
 
-    ChainHub -->|for each cog registers functions| ChainHubCogs
+    subgraph ChainHubManager
+        hub.py
+        langchainModule2[PyPI: langchain]
+    end
+
+    ChainHubManager -->|for each langcore-compatible cog registers functions| ChainHubCogs
+
+    
+    %% Define styles
+    classDef PyPI fill:#ffedb3,stroke:#c88a12,stroke-width:2px,color:#000;
+    classDef chainStore fill:#e3f5ee,stroke:#2f8f6b,stroke-width:2px,color:#000;
+    classDef chainProvider fill:#eef2ff,stroke:#4c63d2,stroke-width:2px,color:#000;
+
+
+
+    %% Apply styles
+    class langchainModule,langchainModule2,ollamaModule,qdrantModule PyPI;
+    class ChainStore,CSRInstance,CSMInstance chainStore;
+    class ChainProvider,CPMInstance,CPMeInstance,CPCInstance chainProvider;
 ```
 
 ## Red-DiscordBot Cogs Overview
