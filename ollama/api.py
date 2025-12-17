@@ -10,7 +10,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ra
 
 from langcore.models import BaseModel
 
-log = logging.getLogger("red.ollama.api")
+log = logging.getLogger("red.tin.ollama.api")
 
 
 class OllamaChatResponse(BaseModel):

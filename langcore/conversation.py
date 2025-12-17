@@ -5,7 +5,7 @@ import discord
 
 from .models import Conversation, GuildConfig
 
-logger = logging.getLogger("red.langcore.conversation")
+log = logging.getLogger("red.tin.langcore.conversation")
 
 
 class ConversationManager:
@@ -31,7 +31,7 @@ class ConversationManager:
         """
         key = f"{member_id}-{channel_id}-{guild_id}"
         if key not in self._conversations:
-            logger.debug("Created new conversation for member %s in channel %s (guild %s)", member_id, channel_id, guild_id)
+            log.debug("Created new conversation for member %s in channel %s (guild %s)", member_id, channel_id, guild_id)
         return self._conversations.setdefault(key, Conversation())
 
     def cleanup_expired(self, guild_id: int, config: GuildConfig, member: Optional[discord.Member] = None) -> int:
@@ -64,7 +64,7 @@ class ConversationManager:
             if not conversation.messages:
                 del self._conversations[key]
             cleaned += 1
-        logger.info("Cleaned %s conversations for guild %s", cleaned, guild_id)
+        log.info("Cleaned %s conversations for guild %s", cleaned, guild_id)
         return cleaned
 
     def reset_conversation(self, member_id: int, channel_id: int, guild_id: int) -> bool:
@@ -83,7 +83,7 @@ class ConversationManager:
         if not conversation:
             return False
         conversation.reset()
-        logger.debug("Reset conversation for member %s in channel %s (guild %s)", member_id, channel_id, guild_id)
+        log.debug("Reset conversation for member %s in channel %s (guild %s)", member_id, channel_id, guild_id)
         return True
 
     def get_conversation_count(self, guild_id: Optional[int] = None) -> int:
@@ -125,5 +125,5 @@ class ConversationManager:
                 continue
             del self._conversations[key]
             removed += 1
-        logger.info("Cleared %s conversations for guild %s", removed, guild_id)
+        log.info("Cleared %s conversations for guild %s", removed, guild_id)
         return removed

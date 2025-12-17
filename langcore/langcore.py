@@ -13,7 +13,7 @@ from .models import GuildConfig
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
-log = logging.getLogger("red.langcore")
+log = logging.getLogger("red.tin.langcore")
 
 
 class langcore(commands.Cog):

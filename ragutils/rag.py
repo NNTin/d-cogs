@@ -23,7 +23,7 @@ from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import box, escape, pagify
 from pydantic import BaseModel, Field
 
-log = logging.getLogger("red.nntin.d-cogs.ragutils.rag")
+log = logging.getLogger("red.tin.ragutils")
 
 try:
     import chromadb

@@ -17,7 +17,7 @@ from redbot.core.bot import Red
 from .models import GuildConfig
 from .utils import validate_function_schema
 
-log = logging.getLogger("red.langcore.hub")
+log = logging.getLogger("red.tin.langcore.hub")
 
 
 class ChainHub:

@@ -3,7 +3,7 @@
 from typing import Any, Dict
 import logging
 
-log = logging.getLogger("red.langcore.utils")
+log = logging.getLogger("red.tin.langcore.utils")
 
 
 def validate_function_schema(schema: Dict[str, Any]) -> str:

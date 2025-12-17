@@ -14,7 +14,7 @@ from .models import OllamaConfig, OllamaGuildConfig
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
-log = logging.getLogger("red.ollama")
+log = logging.getLogger("red.tin.ollama")
 
 
 class ollama(commands.Cog, ChainProvider):
