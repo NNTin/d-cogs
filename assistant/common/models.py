@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import typing as t
 from datetime import datetime, timezone
@@ -160,13 +159,8 @@ class GuildSettings(AssistantBaseModel):
                 log.warning(f"Failed to peek collection for guild {guild_id}: {e}")
                 return None
             embeddings = peek.get("embeddings") if peek else []
-            # Chroma can return numpy arrays; avoid truthiness on arrays to prevent ValueError.
-            if embeddings is not None:
-                try:
-                    if len(embeddings) > 0 and embeddings[0] is not None:
-                        return len(embeddings[0])
-                except Exception as e:  # noqa: BLE001
-                    log.debug("Failed to inspect collection embeddings for guild %s: %s", guild_id, e)
+            if embeddings and embeddings[0] is not None:
+                return len(embeddings[0])
             return None
 
         collection_name = f"assistant-{guild_id}"
@@ -291,54 +285,16 @@ class GuildSettings(AssistantBaseModel):
             f"(skipped {len(self.embeddings) - len(valid_embeddings)})."
         )
 
-    async def get_related_embeddings(
+    def get_related_embeddings(
         self,
         guild_id: int,
         query_embedding: t.List[float],
         top_n_override: t.Optional[int] = None,
         relatedness_override: t.Optional[float] = None,
-        use_rag: bool = False,
-        bot: t.Optional[Red] = None,
-        query_text: t.Optional[str] = None,
     ) -> t.List[t.Tuple[str, str, float, int]]:
-        """
-        Retrieve embeddings related to a query.
-
-        Parameters:
-            use_rag: Whether to attempt the RAG pipeline when available.
-            bot: Red bot instance, required for RAG pipeline access.
-            query_text: Original query text used for RAG reranking/boosting.
-        """
         def cosine_similarity(a, b):
             return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-        if use_rag and bot:
-            try:
-                ragutils_cog = bot.get_cog("RAGUtils")
-                if not ragutils_cog:
-                    log.warning(f"RAG requested but RAGUtils cog not available for guild {guild_id}")
-                else:
-                    rag_config = ragutils_cog.get_rag_config(guild_id)
-                    if rag_config:
-                        try:
-                            from ragutils.rag import enhanced_retrieval
-                        except ImportError:
-                            enhanced_retrieval = None
-                        if enhanced_retrieval:
-                            log.debug(f"Using RAG pipeline for guild {guild_id}")
-                            return await enhanced_retrieval(
-                                query=query_text or "",
-                                query_embedding=query_embedding,
-                                guild_id=guild_id,
-                                conf=self,
-                                rag_config=rag_config,
-                                top_n=top_n_override or self.top_n,
-                                chroma_client=_chroma_client,
-                            )
-            except Exception as e:  # noqa: BLE001
-                log.error(f"Error during RAG retrieval for guild {guild_id}: {e}")
-
-        log.debug(f"Using standard ChromaDB retrieval for guild {guild_id}")
         if not query_embedding:
             return []
         # Name, text, score, dimensions
