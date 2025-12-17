@@ -12,6 +12,12 @@ from langcore.abc import ChainProvider
 from ollama import AsyncClient, ResponseError
 
 from .health import HealthMonitor
+from .model_utils import (
+    is_embedding_model,
+    resolve_model_name,
+    select_default_chat_model,
+    select_default_embed_model,
+)
 from .models import OllamaConfig, OllamaGuildConfig
 from .utils import format_ollama_error
 
@@ -169,14 +175,16 @@ class ollama(commands.Cog):
         if not available_models:
             return preferred_model
 
-        if preferred_model in available_models:
-            return preferred_model
+        resolved_preferred = resolve_model_name(preferred_model, available_models) or preferred_model
+        if resolved_preferred in available_models:
+            return resolved_preferred
 
-        if fallback_model in available_models:
-            log.warning("Preferred model '%s' unavailable; falling back to '%s'", preferred_model, fallback_model)
-            return fallback_model
+        resolved_fallback = resolve_model_name(fallback_model, available_models) or fallback_model
+        if resolved_fallback in available_models:
+            log.warning("Preferred model '%s' unavailable; falling back to '%s'", preferred_model, resolved_fallback)
+            return resolved_fallback
 
-        selected = available_models[0]
+        selected = select_default_chat_model(available_models) or available_models[0]
         log.warning(
             "Neither preferred model '%s' nor fallback '%s' available; using '%s'",
             preferred_model,
@@ -225,6 +233,26 @@ class ollama(commands.Cog):
         try:
             return await invoke_chat(model)
         except ResponseError as exc:
+            is_not_chat = exc.status_code == 400 and "does not support chat" in str(exc).lower()
+            if is_not_chat and available_models:
+                chat_candidates = [
+                    m for m in available_models if m and not is_embedding_model(m) and m != model
+                ]
+                # Prefer configured chat model name (tagless → resolved) if possible
+                configured = resolve_model_name(guild_config.chat_model, available_models)
+                if configured and configured in chat_candidates:
+                    chat_candidates.remove(configured)
+                    chat_candidates.insert(0, configured)
+
+                for candidate in chat_candidates[:5]:
+                    try:
+                        log.warning("Model '%s' does not support chat; retrying with '%s'", model, candidate)
+                        return await invoke_chat(candidate)
+                    except ResponseError as retry_exc:
+                        if retry_exc.status_code == 400 and "does not support chat" in str(retry_exc).lower():
+                            continue
+                        raise
+
             is_not_found = exc.status_code == 404 or "not found" in str(exc).lower()
             if is_not_found and model != guild_config.chat_fallback:
                 retry_model = self._select_model_with_fallback(
@@ -267,11 +295,19 @@ class ollama(commands.Cog):
         guild_config = await self.get_guild_config(guild.id)
         available_models = self.ollama_config.available_models
 
-        model = self._select_model_with_fallback(
-            guild_config.embed_model,
-            guild_config.embed_fallback,
-            available_models,
+        # Prefer embedding-like models when choosing defaults
+        resolved_embed = resolve_model_name(guild_config.embed_model, available_models) or guild_config.embed_model
+        resolved_fallback = (
+            resolve_model_name(guild_config.embed_fallback, available_models) or guild_config.embed_fallback
         )
+        if available_models:
+            model = resolved_embed if resolved_embed in available_models else None
+            if not model:
+                model = resolved_fallback if resolved_fallback in available_models else None
+            if not model:
+                model = select_default_embed_model(available_models) or available_models[0]
+        else:
+            model = resolved_embed
 
         try:
             embedder = OllamaEmbeddings(
@@ -280,13 +316,38 @@ class ollama(commands.Cog):
             )
             return await embedder.aembed_query(text)
         except ResponseError as exc:
+            is_not_embed = exc.status_code == 400 and "does not support" in str(exc).lower() and "embed" in str(exc).lower()
+            if is_not_embed and available_models:
+                embed_candidates = [
+                    m for m in available_models if m and is_embedding_model(m) and m != model
+                ]
+                configured = resolve_model_name(guild_config.embed_model, available_models)
+                if configured and configured in embed_candidates:
+                    embed_candidates.remove(configured)
+                    embed_candidates.insert(0, configured)
+                for candidate in embed_candidates[:5]:
+                    try:
+                        log.warning("Model '%s' does not support embeddings; retrying with '%s'", model, candidate)
+                        embedder = OllamaEmbeddings(
+                            base_url=self.ollama_config.endpoint,
+                            model=candidate,
+                        )
+                        return await embedder.aembed_query(text)
+                    except ResponseError as retry_exc:
+                        if retry_exc.status_code == 400 and "does not support" in str(retry_exc).lower():
+                            continue
+                        raise
+
             is_not_found = exc.status_code == 404 or "not found" in str(exc).lower()
             if is_not_found and model != guild_config.embed_fallback:
-                retry_model = self._select_model_with_fallback(
-                    guild_config.embed_fallback,
-                    guild_config.embed_fallback,
-                    available_models,
-                )
+                if available_models:
+                    retry_model = (
+                        resolve_model_name(guild_config.embed_fallback, available_models)
+                        or select_default_embed_model(available_models)
+                        or available_models[0]
+                    )
+                else:
+                    retry_model = guild_config.embed_fallback
                 if retry_model != model:
                     try:
                         embedder = OllamaEmbeddings(

@@ -6,6 +6,8 @@ from pydantic import Field
 
 from langcore.models import BaseModel
 
+from .model_utils import resolve_model_name
+
 
 class OllamaGuildConfig(BaseModel):
     chat_model: str = "gemma3"
@@ -25,11 +27,23 @@ class OllamaGuildConfig(BaseModel):
                 override = self.role_model_overrides.get(role.id)
                 if not override:
                     continue
-                if not models or override in models:
+                if not models:
                     return override
+                resolved_override = resolve_model_name(override, models)
+                if resolved_override:
+                    return resolved_override
+                # If override isn't resolvable, still honor it (it may exist but
+                # not be reported yet); failures are handled at call time.
+                return override
 
-        if models and self.chat_model not in models:
-            return self.chat_fallback
+        if models:
+            resolved_primary = resolve_model_name(self.chat_model, models)
+            if resolved_primary:
+                return resolved_primary
+            resolved_fallback = resolve_model_name(self.chat_fallback, models)
+            if resolved_fallback:
+                return resolved_fallback
+
         return self.chat_model
 
 
