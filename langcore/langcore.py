@@ -1,11 +1,12 @@
 import logging
-from typing import Dict, Literal, Optional, Union
+from datetime import datetime
+from typing import Dict, List, Literal, Optional, Union
 
 import discord
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
-from redbot.core.utils.chat_formatting import pagify
+from redbot.core.utils.chat_formatting import pagify, text_to_file
 
 from .abc import ChainProvider
 from .conversation import ConversationManager
@@ -37,6 +38,10 @@ class langcore(commands.Cog):
             blacklist=default_guild["blacklist"],
             role_overrides=default_guild["role_overrides"],
             function_statuses=default_guild["function_statuses"],
+            channel_id=default_guild["channel_id"],
+            listen_channels=default_guild["listen_channels"],
+            mention_respond=default_guild["mention_respond"],
+            min_length=default_guild["min_length"],
         )
 
         self.conversation_manager = ConversationManager()
@@ -159,6 +164,10 @@ class langcore(commands.Cog):
     async def view_settings(self, ctx: commands.Context):
         """View current langcore configuration for this server."""
         config = await self.get_guild_config(ctx.guild.id)
+        channel_mention = "None"
+        if config.channel_id:
+            channel = ctx.guild.get_channel(config.channel_id)
+            channel_mention = channel.mention if channel else f"<#{config.channel_id}>"
 
         embed = discord.Embed(
             title="LangCore Configuration",
@@ -188,6 +197,16 @@ class langcore(commands.Cog):
             name="Role Overrides",
             value=f"{len(config.role_overrides)} configured" if config.role_overrides else "None",
             inline=True,
+        )
+        embed.add_field(
+            name="Listener Settings",
+            value=(
+                f"Assistant Channel: {channel_mention if config.channel_id else 'None'}\n"
+                f"Listen Channels: {len(config.listen_channels)}\n"
+                f"Mention Respond: {config.mention_respond}\n"
+                f"Min Length: {config.min_length}"
+            ),
+            inline=False,
         )
 
         await ctx.send(embed=embed)
@@ -239,6 +258,79 @@ class langcore(commands.Cog):
             return
         await self.config.guild(ctx.guild).max_retention_time.set(seconds)
         await ctx.send(f"Max retention time set to {seconds} seconds.")
+
+    @langcore_config.group(name="channel", invoke_without_command=True)
+    async def channel_group(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        """Set the dedicated assistant channel where the bot always responds."""
+        if channel is None:
+            await ctx.send("Please provide a channel, or use `langcore channel clear`.")
+            return
+        await self.config.guild(ctx.guild).channel_id.set(channel.id)
+        await ctx.send(f"Assistant channel set to {channel.mention}.")
+
+    @channel_group.command(name="clear")
+    async def channel_clear(self, ctx: commands.Context):
+        """Clear the dedicated assistant channel."""
+        await self.config.guild(ctx.guild).channel_id.set(None)
+        await ctx.send("Assistant channel cleared.")
+
+    @langcore_config.group(name="listenchannels")
+    async def listenchannels_group(self, ctx: commands.Context):
+        """Manage additional channels to listen in."""
+        pass
+
+    @listenchannels_group.command(name="add")
+    async def listenchannels_add(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Add a channel to the listen list."""
+        async with self.config.guild(ctx.guild).listen_channels() as listen_channels:
+            if channel.id in listen_channels:
+                await ctx.send(f"{channel.mention} is already in the listen list.")
+                return
+            listen_channels.append(channel.id)
+        await ctx.send(f"Added {channel.mention} to the listen list.")
+
+    @listenchannels_group.command(name="remove")
+    async def listenchannels_remove(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Remove a channel from the listen list."""
+        async with self.config.guild(ctx.guild).listen_channels() as listen_channels:
+            if channel.id not in listen_channels:
+                await ctx.send(f"{channel.mention} is not in the listen list.")
+                return
+            listen_channels.remove(channel.id)
+        await ctx.send(f"Removed {channel.mention} from the listen list.")
+
+    @listenchannels_group.command(name="list")
+    async def listenchannels_list(self, ctx: commands.Context):
+        """Show all listen channels."""
+        listen_channels = await self.config.guild(ctx.guild).listen_channels()
+        if not listen_channels:
+            await ctx.send("No listen channels configured.")
+            return
+
+        lines: List[str] = []
+        for channel_id in listen_channels:
+            channel = ctx.guild.get_channel(channel_id)
+            lines.append(channel.mention if channel else f"<#{channel_id}> ({channel_id})")
+
+        message = "Listen Channels:\n" + "\n".join(f"- {line}" for line in lines)
+        for page in pagify(message, delims=["\n"], page_length=1900):
+            await ctx.send(page)
+
+    @langcore_config.command(name="mentionrespond")
+    async def toggle_mention_respond(self, ctx: commands.Context):
+        """Toggle whether the bot responds when mentioned or replied to."""
+        current = await self.config.guild(ctx.guild).mention_respond()
+        await self.config.guild(ctx.guild).mention_respond.set(not current)
+        await ctx.send(f"Mention respond set to {not current}.")
+
+    @langcore_config.command(name="minlength")
+    async def set_min_length(self, ctx: commands.Context, number: int):
+        """Set the minimum message length to process (default: 3)."""
+        if number < 1:
+            await ctx.send("Minimum length must be 1 or greater.")
+            return
+        await self.config.guild(ctx.guild).min_length.set(number)
+        await ctx.send(f"Minimum message length set to {number}.")
 
     @langcore_config.group(name="blacklist")
     async def blacklist_group(self, ctx: commands.Context):
@@ -345,6 +437,106 @@ class langcore(commands.Cog):
             status = "enabled" if not current else "disabled"
         await ctx.send(f"Function `{function_name}` has been {status}.")
 
+    @langcore_config.command(name="convostats")
+    @commands.guild_only()
+    async def convostats(self, ctx: commands.Context, user: Optional[discord.Member] = None):
+        """View conversation statistics for this channel."""
+        user = user or ctx.author
+        conversation = self.conversation_manager.get_conversation(
+            user.id,
+            ctx.channel.id,
+            ctx.guild.id,
+        )
+        config = await self.get_guild_config(ctx.guild.id)
+
+        message_count = len(conversation.messages)
+        estimated_tokens = (
+            sum(len(str(msg.get("content", ""))) for msg in conversation.messages) // 4
+            if conversation.messages
+            else 0
+        )
+        max_retention = config.get_user_max_retention(user)
+        _max_time = config.get_user_max_time(user)
+        is_expired = conversation.is_expired(config.max_retention_time)
+
+        embed = discord.Embed(
+            title="Conversation Stats",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="Channel", value=ctx.channel.mention, inline=False)
+        embed.add_field(name="Messages", value=f"{message_count}/{max_retention}", inline=True)
+        embed.add_field(name="Estimated Tokens", value=f"{estimated_tokens} (approx.)", inline=True)
+        embed.add_field(name="Expired", value=f"{is_expired}", inline=True)
+
+        if conversation.last_updated:
+            last_updated_dt = datetime.utcfromtimestamp(conversation.last_updated)
+            embed.add_field(
+                name="Last Updated",
+                value=f"<t:{int(last_updated_dt.timestamp())}:F>",
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Last Updated", value="Never", inline=False)
+
+        await ctx.send(embed=embed)
+
+        if conversation.system_prompt_override:
+            await ctx.send(
+                file=text_to_file(
+                    conversation.system_prompt_override,
+                    filename="system_prompt_override.txt",
+                )
+            )
+
+    @langcore_config.command(name="clearconvo")
+    @commands.guild_only()
+    async def clearconvo(self, ctx: commands.Context):
+        """Reset your conversation for this channel."""
+        reset = self.conversation_manager.reset_conversation(
+            ctx.author.id,
+            ctx.channel.id,
+            ctx.guild.id,
+        )
+        if reset:
+            await ctx.send("Your conversation in this channel has been reset!")
+        else:
+            await ctx.send("No conversation found")
+
+    @langcore_config.command(name="convoprompt")
+    @commands.guild_only()
+    async def convoprompt(self, ctx: commands.Context, *, prompt: Optional[str] = None):
+        """Set or clear a system prompt override for this conversation."""
+        if ctx.message.attachments:
+            attachment = ctx.message.attachments[0]
+            is_text_file = False
+            if attachment.content_type and attachment.content_type.startswith("text/"):
+                is_text_file = True
+            elif attachment.filename.lower().endswith((".txt", ".md", ".prompt")):
+                is_text_file = True
+
+            if is_text_file:
+                try:
+                    prompt = (await attachment.read()).decode()
+                except UnicodeDecodeError:
+                    await ctx.send("Could not read the attached file as text (decode error).")
+                    return
+
+        if prompt is not None and len(prompt) > 10000:
+            await ctx.send("Warning: prompt is longer than 10,000 characters.")
+
+        conversation = self.conversation_manager.get_conversation(
+            ctx.author.id,
+            ctx.channel.id,
+            ctx.guild.id,
+        )
+        conversation.system_prompt_override = prompt
+        conversation.refresh()
+
+        if prompt is not None:
+            await ctx.send("System prompt has been set for this conversation!")
+        else:
+            await ctx.send("System prompt has been removed for this conversation!")
+
     @commands.command(name="chat", aliases=["ask"])
     @commands.guild_only()
     @commands.cooldown(1, 6, commands.BucketType.user)
@@ -409,6 +601,113 @@ class langcore(commands.Cog):
                 await ctx.send(page)
 
     @commands.Cog.listener()
+    async def on_message_without_command(self, message: discord.Message):
+        if not message or not message.guild or message.author.bot:
+            return
+        if not message.content:
+            return
+
+        guild = message.guild
+        me = guild.me
+        if not me:
+            return
+        if hasattr(message.channel, "permissions_for"):
+            perms = message.channel.permissions_for(me)
+            if not perms.send_messages:
+                return
+
+        config = await self.get_guild_config(guild.id)
+        if not config.enabled:
+            return
+
+        bot_user = self.bot.user
+        if not bot_user:
+            return
+
+        content = message.content.strip()
+        ignored_prefixes = (",", ".", "+", "!", "-", "><", "?", "%", "^", "&", "*", "_")
+        if any(content.startswith(prefix) for prefix in ignored_prefixes):
+            return
+
+        if self.is_blacklisted(message, config.blacklist):
+            return
+
+        if len(content) < config.min_length:
+            return
+
+        bot_mentioned = any(u.id == bot_user.id for u in message.mentions)
+
+        if message.reference and message.reference.message_id:
+            referenced: Optional[discord.Message] = None
+            if isinstance(message.reference.resolved, discord.Message):
+                referenced = message.reference.resolved
+            else:
+                try:
+                    referenced = await message.channel.fetch_message(message.reference.message_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    referenced = None
+            if referenced and referenced.author and referenced.author.id == bot_user.id:
+                bot_mentioned = True
+
+        should_respond = False
+        if config.channel_id and message.channel.id == config.channel_id:
+            should_respond = True
+        elif message.channel.id in config.listen_channels:
+            should_respond = True
+        elif bot_mentioned and config.mention_respond:
+            should_respond = True
+
+        if not should_respond:
+            return
+
+        conversation = self.conversation_manager.get_conversation(
+            message.author.id,
+            message.channel.id,
+            guild.id,
+        )
+
+        conversation.messages.append({"role": "user", "content": message.content})
+        conversation.refresh()
+
+        provider = self.get_provider("ollama")
+        if not provider:
+            await message.reply("No AI provider is available. Please load the ollama cog.")
+            conversation.messages.pop()
+            return
+
+        async with message.channel.typing():
+            try:
+                response = await provider.chat(
+                    messages=conversation.messages,
+                    guild=guild,
+                    member=message.author,
+                )
+            except commands.UserFeedbackCheckFailure as e:
+                await message.reply(str(e))
+                conversation.messages.pop()
+                return
+            except Exception as e:  # noqa: BLE001
+                log.exception("Unexpected error during listener chat for guild %s", guild.id)
+                await message.reply(f"An unexpected error occurred: {e}")
+                conversation.messages.pop()
+                return
+
+        conversation.messages.append({"role": "assistant", "content": response})
+        conversation.refresh()
+        conversation.cleanup(config.max_retention, config.max_retention_time)
+
+        if len(response) <= 2000:
+            await message.reply(response, mention_author=False)
+            return
+        first = True
+        for page in pagify(response, delims=["\n", " "], page_length=1900):
+            if first:
+                await message.reply(page, mention_author=False)
+                first = False
+            else:
+                await message.channel.send(page)
+
+    @commands.Cog.listener()
     async def on_cog_add(self, cog: commands.Cog):
         """Notify provider cogs when langcore is available."""
         log.info("Cog added while langcore loaded: %s", cog.qualified_name)
@@ -428,3 +727,15 @@ class langcore(commands.Cog):
     async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
         # TODO: Replace this with the proper end user data removal handling.
         super().red_delete_data_for_user(requester=requester, user_id=user_id)
+
+    def is_blacklisted(self, message: discord.Message, blacklist: List[int]) -> bool:
+        """Check if message author, roles, or channel are blacklisted."""
+        if message.author.id in blacklist:
+            return True
+        if message.channel.id in blacklist:
+            return True
+        if hasattr(message.author, "roles"):
+            for role in message.author.roles:
+                if role.id in blacklist:
+                    return True
+        return False

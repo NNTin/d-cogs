@@ -75,6 +75,10 @@ class GuildConfig(BaseModel):
     blacklist: List[int] = Field(default_factory=list)
     role_overrides: Dict[int, str] = Field(default_factory=dict)
     function_statuses: Dict[str, bool] = Field(default_factory=dict)
+    channel_id: Optional[int] = None  # Dedicated assistant channel
+    listen_channels: List[int] = Field(default_factory=list)  # Additional channels to listen in
+    mention_respond: bool = True  # Respond when bot is mentioned
+    min_length: int = 3  # Minimum message length to process
 
     def get_user_max_retention(self, member: Optional[discord.Member]) -> int:
         if not member:

@@ -89,6 +89,46 @@ graph TD
     class ChainProvider,CPMInstance,CPMeInstance,CPCInstance chainProvider;
 ```
 
+```mermaid
+graph TD
+    %% PyPI package interaction graph
+
+    subgraph LangChainCore[PyPI: langchain]
+        LCChains[Chains]
+        LCLLM[LLM Abstractions / ChainProvider]
+        LCEmbeddings[Embeddings]
+        LCVectorStores[VectorStore Interface / ChainStore]
+    end
+
+    subgraph OllamaPkg[PyPI: langchain-ollama]
+        OllamaLLM[Ollama LLM Wrapper]
+        OllamaEmb[Ollama Embeddings]
+    end
+
+    subgraph QdrantPkg[PyPI: langchain-qdrant]
+        QdrantVS[Qdrant VectorStore]
+        QdrantClient[qdrant-client]
+    end
+
+    %% Relationships
+    OllamaPkg -->|extends| LangChainCore
+    QdrantPkg -->|extends| LangChainCore
+
+    OllamaLLM -->|implements| LCLLM
+    OllamaEmb -->|implements| LCEmbeddings
+
+    QdrantVS -->|implements| LCVectorStores
+    QdrantVS -->|uses| QdrantClient
+
+    %% Typical runtime flow
+    LCChains -->|calls| LCLLM
+    LCChains -->|stores/retrieves| LCVectorStores
+
+    %% Styling
+    classDef pypi fill:#ffedb3,stroke:#c88a12,stroke-width:2px,color:#000;
+    class LangChainCore,OllamaPkg,QdrantPkg pypi;
+```
+
 ## Red-DiscordBot Cogs Overview
 
 ### 1. langcore (Cog)
