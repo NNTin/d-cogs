@@ -5,6 +5,7 @@ import discord
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
+from redbot.core.utils.chat_formatting import pagify
 
 from .abc import ChainProvider
 from .conversation import ConversationManager
@@ -343,6 +344,69 @@ class langcore(commands.Cog):
             statuses[function_name] = not current
             status = "enabled" if not current else "disabled"
         await ctx.send(f"Function `{function_name}` has been {status}.")
+
+    @commands.command(name="chat", aliases=["ask"])
+    @commands.guild_only()
+    @commands.cooldown(1, 6, commands.BucketType.user)
+    async def chat(self, ctx: commands.Context, *, question: str):
+        """Chat with the AI assistant using the configured provider.
+
+        Conversations are per-user per-channel, maintaining separate context
+        for each channel you interact with the bot in.
+
+        Args:
+            question: Your message or question for the AI assistant.
+        """
+        config = await self.get_guild_config(ctx.guild.id)
+        if not config.enabled:
+            await ctx.send("LangCore is disabled for this server.")
+            return
+
+        conversation = self.conversation_manager.get_conversation(
+            ctx.author.id,
+            ctx.channel.id,
+            ctx.guild.id,
+        )
+
+        provider = self.get_provider("ollama")
+        if not provider:
+            await ctx.send("No AI provider is available. Please load the ollama cog.")
+            return
+
+        user_message = {"role": "user", "content": question}
+        conversation.messages.append(user_message)
+        conversation.refresh()
+
+        async with ctx.typing():
+            try:
+                response = await provider.chat(
+                    messages=conversation.messages,
+                    guild=ctx.guild,
+                    member=ctx.author,
+                )
+            except commands.UserFeedbackCheckFailure as e:
+                # Provider raised user-facing error
+                await ctx.send(str(e))
+                # Remove the user message since we failed
+                conversation.messages.pop()
+                return
+            except Exception as e:
+                log.exception("Unexpected error during chat for guild %s", ctx.guild.id)
+                await ctx.send(f"An unexpected error occurred: {e}")
+                conversation.messages.pop()
+                return
+
+        ai_message = {"role": "assistant", "content": response}
+        conversation.messages.append(ai_message)
+        conversation.refresh()
+
+        conversation.cleanup(config.max_retention, config.max_retention_time)
+
+        if len(response) <= 2000:
+            await ctx.send(response)
+        else:
+            for page in pagify(response, delims=["\n", " "], page_length=1900):
+                await ctx.send(page)
 
     @commands.Cog.listener()
     async def on_cog_add(self, cog: commands.Cog):
