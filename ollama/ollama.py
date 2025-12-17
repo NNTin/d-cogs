@@ -17,7 +17,24 @@ RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 log = logging.getLogger("red.tin.ollama")
 
 
-class ollama(commands.Cog, ChainProvider):
+class OllamaChainProvider(ChainProvider):
+    def __init__(self, cog: "ollama") -> None:
+        self._cog = cog
+
+    async def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        guild: discord.Guild,
+        member: Optional[discord.Member] = None,
+        **kwargs: Any,
+    ) -> str:
+        return await self._cog.chat(messages=messages, guild=guild, member=member, **kwargs)
+
+    async def embed(self, text: str, guild: discord.Guild, **kwargs: Any) -> List[float]:
+        return await self._cog.embed(text=text, guild=guild, **kwargs)
+
+
+class ollama(commands.Cog):
     """
     implements ChainProvider for langcore
     """
@@ -46,6 +63,7 @@ class ollama(commands.Cog, ChainProvider):
             config=self.ollama_config,
             endpoint=self.ollama_config.endpoint,
         )
+        self.provider = OllamaChainProvider(self)
 
     async def get_guild_config(self, guild_id: int) -> OllamaGuildConfig:
         data = await self.config.guild_from_id(guild_id).all()
@@ -101,7 +119,7 @@ class ollama(commands.Cog, ChainProvider):
             # Register with langcore if it's already loaded
             langcore_cog = self.bot.get_cog("langcore")
             if langcore_cog:
-                success = langcore_cog.register_provider(self.qualified_name, self)
+                success = langcore_cog.register_provider(self.qualified_name, self.provider)
                 if success:
                     log.info("Registered ollama with existing langcore instance")
         except Exception:  # noqa: BLE001
@@ -113,7 +131,7 @@ class ollama(commands.Cog, ChainProvider):
     @commands.Cog.listener()
     async def on_langcore_cog_add(self, langcore_cog):
         """Register this cog as a ChainProvider when langcore loads."""
-        success = langcore_cog.register_provider(self.qualified_name, self)
+        success = langcore_cog.register_provider(self.qualified_name, self.provider)
         if success:
             log.info("Registered ollama as ChainProvider with langcore")
         else:

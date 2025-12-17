@@ -8,8 +8,8 @@ from langcore.models import BaseModel
 
 
 class OllamaGuildConfig(BaseModel):
-    chat_model: str = "llama3.1"
-    embed_model: str = "nomic-embed-text"
+    chat_model: str = "gemma3"
+    embed_model: str = "qwen3-embedding"
     chat_fallback: str = "llama3.1"
     embed_fallback: str = "nomic-embed-text"
     tool_scope: str = "core"
