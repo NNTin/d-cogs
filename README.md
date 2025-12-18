@@ -19,14 +19,22 @@ graph TD
     subgraph LangCore[langcore: Cog]
         ChainHubManager[ChainHubManager]
         ConversationManager
+        ClassifierManager
         ChainStore[ChainStore Abstraction]
         ChainProvider[ChainProvider Abstraction]
     end
 
-    subgraph ConversationManager[ConversationManager]
+    subgraph ConversationManager[ConversationManager: main agent]
         langchainModule[PyPI: langchain]
         conversation[conversation.py]
         CPCInstance[langcore.get_provider]
+    end
+
+    
+    subgraph ClassifierManager[ClassifierManager: background agent]
+        langchainModule3[PyPI: langchain]
+        classifier[classifier.py]
+        CPClInstance[langcore.get_provider]
     end
 
     %% ChainHub cogs
@@ -49,8 +57,16 @@ graph TD
         end
 
         subgraph MermaidCogSub[MermaidCog: mermaid]
+            MermaidAgent[MermaidManager: sub agent]
             Mermaid[mermaid]
             CPMeInstance[langcore.get_provider]
+        end
+
+        subgraph AiDefenderCogSub[AiDefenderCog: aidefender]
+            AiDefenderAgent[AiDefenderManager: background agent]
+            AIDefender[aidefender]
+            CPAIInstance[langcore.get_provider]
+            CSAIInstance[langcore.get_store]
         end
     end
 
@@ -81,22 +97,29 @@ graph TD
     end
 
     ChainHubManager -->|for each langcore-compatible cog registers functions| ChainHubCogs
-
+    ChainHubManager <-->|langchain linked| ConversationManager
     
     %% Define styles
-    classDef PyPI fill:#ffedb3,stroke:#c88a12,stroke-width:2px,color:#000;
-    classDef chainStore fill:#e3f5ee,stroke:#2f8f6b,stroke-width:2px,color:#000;
-    classDef chainProvider fill:#eef2ff,stroke:#4c63d2,stroke-width:2px,color:#000;
-
-
+    classDef PyPI fill:#FFE08A,stroke:#B45309,stroke-width:2px,color:#1F2937;
+    classDef chainStore fill:#B7F7D8,stroke:#047857,stroke-width:2.5px,color:#064E3B;
+    classDef chainProvider fill:#C7D2FE,stroke:#3730A3,stroke-width:2.5px,color:#1E1B4B;
+    classDef agent fill:#FED7AA,stroke:#C2410C,stroke-width:4px,color:#431407;
 
     %% Apply styles
-    class langchainModule,langchainModule2,ollamaModule,qdrantModule PyPI;
+    class langchainModule,langchainModule2,langchainModule3,ollamaModule,qdrantModule PyPI;
     class ChainStore,CSMInstance chainStore;
-    class ChainProvider,CPMeInstance,CPCInstance,CPEmInstance chainProvider;
+    class ChainProvider,CPMeInstance,CPCInstance,CPEmInstance,CPClInstance chainProvider;
+    class ConversationManager,ClassifierManager,MermaidAgent,AiDefenderAgent agent;
 ```
 
-Note: ConversationManager is growing in complexity. In future worth abstracting it so the ConversationManager can be overwritten by other cogs.
+Note: ConversationManager is growing in complexity. In future worth abstracting it so the ConversationManager can be overwritten by other cogs. Same goes for ClassifierManager.
+
+*Managers are agents and don't share the same context.  
+
+Discord Users are talking with the main agent -> Conversation Manager. Conversations are are not shared between Discord Users and are unique to the Discord User.  
+A background agent, the ClassifierManager, decides if the Conversation Manager should engage in the conversation. This agent is disabled by default.  
+You can also define your own background agents in order to e.g. spot abusive behavior through AI -> AI Defender Manager.  
+Cogs may also define sub agents. They only become active through other agents. For example a Mermaid image should be created but there is a syntax error. The agent will fix the syntax error.
 
 ### LangChain PyPI Package Interaction and Extension Model
 ```mermaid
