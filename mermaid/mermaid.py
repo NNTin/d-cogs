@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 from io import BytesIO
 from pathlib import Path
@@ -48,10 +49,11 @@ class mermaid(commands.Cog):
         schema = {
             "name": "generate_mermaid",
             "description": (
-                "Generate Mermaid diagram syntax from a natural language description. "
-                "Returns the Mermaid syntax as a string that can be rendered into a diagram. "
-                "Supports flowcharts, sequence diagrams, class diagrams, state diagrams, and more. "
-                "Use this when the user asks to create, visualize, or diagram something."
+                "Generate and render Mermaid diagrams from natural language descriptions. "
+                "Returns JSON with 'syntax' (Mermaid code for reference) and 'image_data_uri' "
+                "(base64-encoded PNG for automatic display). Supports flowcharts, sequence diagrams, "
+                "class diagrams, state diagrams, and more. Use this when the user asks to create, "
+                "visualize, or diagram something."
             ),
             "parameters": {
                 "type": "object",
@@ -160,19 +162,64 @@ class mermaid(commands.Cog):
 
         return BytesIO(png_bytes)
 
-    async def generate_mermaid(self, description: str, diagram_type: str = "flowchart") -> str:
-        """Generate Mermaid diagram syntax from a natural language description.
+    async def render_mermaid_syntax(self, syntax: str) -> discord.File:
+        """
+        Render Mermaid diagram syntax into a Discord-ready PNG file.
+
+        Args:
+            syntax: Mermaid diagram syntax string (e.g., "flowchart TD; A-->B").
+
+        Returns:
+            discord.File: File containing the rendered PNG image.
+
+        Raises:
+            ValueError: If the provided syntax is empty or None.
+            TemplateError: If rendering the Mermaid HTML template fails.
+            RuntimeError: If PNG generation or other rendering steps fail.
+
+        Usage:
+            Used by langcore to auto-render AI-generated diagrams.
+        """
+        if not syntax or not syntax.strip():
+            raise ValueError("Mermaid syntax cannot be empty.")
+
+        self.logger.debug("Rendering Mermaid syntax: %s", syntax[:100])
+
+        try:
+            rendered_html = self._render_mermaid_html(syntax)
+        except TemplateError as exc:
+            self.logger.error("Failed to render Mermaid HTML: %s", exc)
+            raise TemplateError(f"Failed to render Mermaid HTML: {exc}") from exc
+        except Exception as exc:
+            self.logger.exception("Unexpected error while rendering Mermaid HTML")
+            raise RuntimeError(f"Unexpected error while rendering Mermaid HTML: {exc}") from exc
+
+        try:
+            png_bytes = await self._render_mermaid_png(rendered_html)
+        except RuntimeError as exc:
+            self.logger.error("Failed to generate PNG from Mermaid diagram: %s", exc)
+            raise RuntimeError(f"Failed to generate PNG from Mermaid diagram: {exc}") from exc
+        except Exception as exc:
+            self.logger.exception("Unexpected error while generating Mermaid PNG")
+            raise RuntimeError(f"Unexpected error while generating Mermaid PNG: {exc}") from exc
+
+        png_bytes.seek(0)
+        self.logger.debug("Successfully rendered Mermaid diagram to PNG")
+        return discord.File(fp=png_bytes, filename="mermaid.png")
+
+    async def generate_mermaid(self, description: str, diagram_type: str = "flowchart") -> dict:
+        """Generate Mermaid diagram syntax and a rendered PNG for automatic display.
 
         This function is called by the AI agent when it needs to create a diagram.
-        It returns the Mermaid syntax as a string, which is stored in the conversation.
-        Users can then render it using [p]mermaid command.
+        It returns JSON containing the Mermaid syntax (for conversation storage) and
+        a base64-encoded PNG data URI for automatic rendering.
 
         Args:
             description: Natural language description of what to diagram
             diagram_type: Type of diagram (flowchart, sequence, class, state, graph)
 
         Returns:
-            str: Mermaid diagram syntax
+            dict: JSON with 'syntax' (Mermaid code) and 'image_data_uri' (base64 PNG data URI)
         """
         # Map diagram types to Mermaid syntax prefixes
         type_mapping = {
@@ -214,7 +261,16 @@ State1 --> [*]: {description}"""
                         syntax += f"    Step{i} --> {node_id}\n"
 
         self.logger.debug("Generated mermaid syntax for type %s: %s", diagram_type, syntax[:100])
-        return syntax
+        try:
+            rendered_html = self._render_mermaid_html(syntax)
+            png_bytes = await self._render_mermaid_png(rendered_html)
+            b64 = base64.b64encode(png_bytes.getvalue()).decode()
+            data_uri = f"data:image/png;base64,{b64}"
+            self.logger.debug("Generated and rendered mermaid diagram")
+            return {"syntax": syntax, "image_data_uri": data_uri}
+        except Exception as exc:
+            self.logger.error("Failed to render Mermaid diagram: %s", exc)
+            return {"syntax": syntax, "error": "Rendering failed"}
 
     async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
         # TODO: Replace this with the proper end user data removal handling.
@@ -224,11 +280,14 @@ State1 --> [*]: {description}"""
     async def mermaid(self, ctx: commands.Context, *, content: Optional[str] = None) -> None:
         """Create a mermaid image from text.
 
-        You can provide Mermaid diagram syntax directly, or ask the AI assistant
-        to generate diagrams for you using natural language (via [p]chat or mentions).
+        The AI assistant now automatically renders diagrams when you ask it to create
+        them via [p]chat or mentions. When using the generate_mermaid tool, the AI
+        returns both the syntax and a rendered PNG image automatically.
 
-        The AI can create flowcharts, sequence diagrams, class diagrams, and more.
-        Once generated, use this command to render the syntax into an image.
+        This command is useful for:
+        - Manually rendering Mermaid syntax you've written yourself
+        - Re-rendering diagrams with modifications
+        - Rendering syntax from external sources
 
         Example:
             [p]mermaid graph TD; A-->B; B-->C;

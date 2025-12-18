@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import json
+import base64
+from io import BytesIO
 from datetime import datetime
 from typing import Dict, List, Literal, Optional, Union
 
@@ -106,6 +109,111 @@ class langcore(commands.Cog):
             Dictionary mapping provider names to ChainProvider instances
         """
         return self.providers.copy()
+
+    def _get_last_tool_content(self, messages: List[dict]) -> Optional[str]:
+        """Extract content from the most recent tool message.
+
+        Args:
+            messages: List of conversation messages in dict format.
+
+        Returns:
+            Tool message content string, or None if no tool messages exist.
+        """
+        for msg in reversed(messages):
+            if isinstance(msg, dict) and msg.get("role") == "tool":
+                return msg.get("content")
+        return None
+
+    async def _handle_rich_tool_response(
+        self,
+        tool_content: str,
+        ctx: Optional[commands.Context] = None,
+        message: Optional[discord.Message] = None,
+    ) -> bool:
+        """Process rich media responses from tool executions.
+
+        Args:
+            tool_content: Raw tool message content (potentially JSON).
+            ctx: Command context (for command invocations).
+            message: Discord message (for listener invocations).
+
+        Returns:
+            True if rich content was handled, False otherwise.
+        """
+        try:
+            tool_data = json.loads(tool_content)
+        except (json.JSONDecodeError, TypeError):
+            # Not JSON or invalid - normal tool response
+            return False
+
+        if not isinstance(tool_data, dict):
+            return False
+
+        # Determine target channel
+        channel = ctx.channel if ctx else (message.channel if message else None)
+        if not channel:
+            log.warning("No channel available for rich tool response")
+            return False
+
+        handled = False
+
+        # Handle image data URI
+        if "image_data_uri" in tool_data:
+            data_uri = tool_data["image_data_uri"]
+            if isinstance(data_uri, str) and data_uri.startswith("data:image/"):
+                try:
+                    # Parse data URI: data:image/png;base64,<data>
+                    header, base64_data = data_uri.split(",", 1)
+                    bytes_data = base64.b64decode(base64_data)
+
+                    # Extract file extension from MIME type
+                    mime_type = header.split(";")[0].split(":")[1]  # e.g., "image/png"
+                    ext = mime_type.split("/")[1]  # e.g., "png"
+
+                    file = discord.File(BytesIO(bytes_data), filename=f"generated.{ext}")
+
+                    if ctx:
+                        await ctx.send(file=file)
+                    else:
+                        await channel.send(file=file)
+
+                    log.debug("Sent image from tool response (size: %d bytes)", len(bytes_data))
+                    handled = True
+                except Exception as e:
+                    log.error("Failed to process image_data_uri: %s", e)
+
+        # Handle message deletion
+        if "delete_message_id" in tool_data:
+            try:
+                msg_id = int(tool_data["delete_message_id"])
+                msg_to_delete = await channel.fetch_message(msg_id)
+                await msg_to_delete.delete()
+                log.debug("Deleted message %d via tool response", msg_id)
+                handled = True
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, ValueError) as e:
+                log.warning("Failed to delete message %s: %s", tool_data.get("delete_message_id"), e)
+
+        # Handle message editing
+        if "edit_message_id" in tool_data:
+            try:
+                msg_id = int(tool_data["edit_message_id"])
+                msg_to_edit = await channel.fetch_message(msg_id)
+
+                edit_kwargs = {}
+                if "new_content" in tool_data:
+                    edit_kwargs["content"] = tool_data["new_content"]
+
+                if edit_kwargs:
+                    await msg_to_edit.edit(**edit_kwargs)
+                    log.debug("Edited message %d via tool response", msg_id)
+                    handled = True
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, ValueError) as e:
+                log.warning("Failed to edit message %s: %s", tool_data.get("edit_message_id"), e)
+
+        if handled:
+            log.debug("Handled rich tool response: %s", list(tool_data.keys()))
+
+        return handled
 
     async def cog_load(self) -> None:
         """Initialize langcore and discover existing providers."""
@@ -613,6 +721,16 @@ class langcore(commands.Cog):
             for page in pagify(response, delims=["\n", " "], page_length=1900):
                 await ctx.send(page)
 
+        # Handle rich media responses from tools
+        conversation = self.conversation_manager.get_conversation(
+            ctx.author.id,
+            ctx.channel.id,
+            ctx.guild.id,
+        )
+        last_tool_content = self._get_last_tool_content(conversation.messages)
+        if last_tool_content:
+            await self._handle_rich_tool_response(last_tool_content, ctx=ctx)
+
     @commands.Cog.listener()
     async def on_message_without_command(self, message: discord.Message):
         if not message or not message.guild or message.author.bot:
@@ -718,14 +836,24 @@ class langcore(commands.Cog):
 
         if len(response) <= 2000:
             await message.reply(response, mention_author=False)
-            return
-        first = True
-        for page in pagify(response, delims=["\n", " "], page_length=1900):
-            if first:
-                await message.reply(page, mention_author=False)
-                first = False
-            else:
-                await message.channel.send(page)
+        else:
+            first = True
+            for page in pagify(response, delims=["\n", " "], page_length=1900):
+                if first:
+                    await message.reply(page, mention_author=False)
+                    first = False
+                else:
+                    await message.channel.send(page)
+
+        # Handle rich media responses from tools
+        conversation = self.conversation_manager.get_conversation(
+            message.author.id,
+            message.channel.id,
+            guild.id,
+        )
+        last_tool_content = self._get_last_tool_content(conversation.messages)
+        if last_tool_content:
+            await self._handle_rich_tool_response(last_tool_content, message=message)
 
     @commands.Cog.listener()
     async def on_cog_add(self, cog: commands.Cog):
