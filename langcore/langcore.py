@@ -564,6 +564,12 @@ class langcore(commands.Cog):
             ctx.guild.id,
         )
 
+        max_retention = config.get_user_max_retention(ctx.author)
+        max_retention_time = config.get_user_max_time(ctx.author)
+        conversation.cleanup(max_retention, max_retention_time)
+        conversation.update_messages(question, "user")
+        conversation.cleanup(max_retention, max_retention_time)
+
         provider = self.get_provider("ollama")
         if not provider:
             await ctx.send("No AI provider is available. Please load the ollama cog.")
@@ -667,6 +673,12 @@ class langcore(commands.Cog):
             message.channel.id,
             guild.id,
         )
+
+        max_retention = config.get_user_max_retention(message.author)
+        max_retention_time = config.get_user_max_time(message.author)
+        conversation.cleanup(max_retention, max_retention_time)
+        conversation.update_messages(content, "user")
+        conversation.cleanup(max_retention, max_retention_time)
 
         provider = self.get_provider("ollama")
         if not provider:
