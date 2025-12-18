@@ -73,7 +73,7 @@ class mermaid(commands.Cog):
                         ),
                     },
                 },
-                "required": ["description", "diagram_type"],
+                "required": ["description"],
             },
         }
 

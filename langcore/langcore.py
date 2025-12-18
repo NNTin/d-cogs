@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 from typing import Dict, List, Literal, Optional, Union
@@ -108,19 +109,23 @@ class langcore(commands.Cog):
 
     async def cog_load(self) -> None:
         """Initialize langcore and discover existing providers."""
-        await self.bot.wait_until_red_ready()
+        import asyncio
 
-        log.info("LangCore cog_load starting provider discovery")
+        asyncio.create_task(self._init_providers())
 
-        # Discover and register existing ChainProvider cogs
+    async def _init_providers(self):
+        try:
+            await self.bot.wait_until_red_ready()
+        except asyncio.CancelledError:
+            log.info("LangCore init cancelled during shutdown")
+            return
+        # existing discovery loop
         for cog_name, cog in self.bot.cogs.items():
             if isinstance(cog, ChainProvider):
                 self.register_provider(cog_name, cog)
-                log.info("Discovered existing provider: %s", cog_name)
-
-        # Dispatch event to notify provider cogs that langcore is ready
+                log.info("Discovered provider: %s", cog_name)
         self.bot.dispatch("langcore_cog_add", self)
-        log.info("LangCore initialized with %d provider(s)", len(self.providers))
+        log.info("LangCore initialized with %d providers", len(self.providers))
 
     async def cog_unload(self) -> None:
         """Clean up when langcore is unloaded."""
