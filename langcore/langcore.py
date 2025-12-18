@@ -13,7 +13,7 @@ from redbot.core.bot import Red
 from redbot.core.config import Config
 from redbot.core.utils.chat_formatting import pagify, text_to_file
 
-from .abc import ChainProvider
+from .abc import ChainProvider, MessageHandler
 from .conversation import ConversationManager
 from .hub import ChainHub
 from .models import GuildConfig
@@ -52,6 +52,7 @@ class langcore(commands.Cog):
         self.conversation_manager = ConversationManager()
         self.hub = ChainHub(self.bot)
         self.providers: Dict[str, ChainProvider] = {}
+        self.message_handlers: Dict[str, MessageHandler] = {}
 
     def register_provider(self, name: str, provider: ChainProvider) -> bool:
         """Register a ChainProvider implementation.
@@ -110,6 +111,69 @@ class langcore(commands.Cog):
             Dictionary mapping provider names to ChainProvider instances
         """
         return self.providers.copy()
+
+    def register_message_handler(self, name: str, handler: MessageHandler) -> bool:
+        """Register a MessageHandler implementation.
+
+        Args:
+            name: Unique identifier for the handler (typically cog name).
+            handler: MessageHandler implementation instance.
+
+        Returns:
+            bool: True if registration succeeded.
+
+        Example:
+            # In an ExtensionCog's on_langcore_cog_add listener:
+            handler = MyCustomHandler(self)
+            langcore_cog.register_message_handler(self.qualified_name, handler)
+        """
+        if not isinstance(handler, MessageHandler):
+            log.warning("Handler registration failed for %s: not a MessageHandler instance", name)
+            return False
+
+        existing = self.message_handlers.get(name)
+        if existing is handler:
+            log.debug("Handler %s already registered with same instance; skipping", name)
+            return True
+
+        if existing is not None:
+            log.warning("Handler %s already registered, overwriting", name)
+
+        self.message_handlers[name] = handler
+        log.info("Registered message handler: %s", name)
+        return True
+
+    def unregister_message_handler(self, name: str) -> None:
+        """Unregister a MessageHandler implementation.
+
+        Args:
+            name: Handler identifier to remove.
+        """
+        if name not in self.message_handlers:
+            log.debug("Handler %s not in registry", name)
+            return
+
+        del self.message_handlers[name]
+        log.info("Unregistered message handler: %s", name)
+
+    def get_message_handler(self, name: str) -> Optional[MessageHandler]:
+        """Retrieve a registered message handler by name.
+
+        Args:
+            name: Handler identifier.
+
+        Returns:
+            MessageHandler instance or None if not found.
+        """
+        return self.message_handlers.get(name)
+
+    def get_message_handlers(self) -> Dict[str, MessageHandler]:
+        """Get all registered message handlers.
+
+        Returns:
+            Dictionary mapping handler names to MessageHandler instances.
+        """
+        return self.message_handlers.copy()
 
     def _get_last_tool_content(self, messages: List[dict]) -> Optional[str]:
         """Extract content from the most recent tool message.
@@ -356,6 +420,28 @@ class langcore(commands.Cog):
             embed.add_field(
                 name=name,
                 value=f"Type: `{provider_type}`\nModule: `{provider.__module__}`",
+                inline=False,
+            )
+
+        await ctx.send(embed=embed)
+
+    @langcore_config.command(name="handlers")
+    async def view_handlers(self, ctx: commands.Context):
+        """List all registered MessageHandler implementations."""
+        if not self.message_handlers:
+            await ctx.send("No message handlers registered.")
+            return
+
+        embed = discord.Embed(
+            title="Registered Message Handlers",
+            color=discord.Color.purple(),
+        )
+
+        for name, handler in self.message_handlers.items():
+            handler_type = type(handler).__name__
+            embed.add_field(
+                name=name,
+                value=f"Type: `{handler_type}`\nModule: `{handler.__module__}`",
                 inline=False,
             )
 
@@ -887,6 +973,7 @@ class langcore(commands.Cog):
         cog_name = cog.qualified_name
         self.unregister_provider(cog_name)
         self.hub.unregister_cog(cog_name)
+        self.unregister_message_handler(cog_name)
 
     async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
         # TODO: Replace this with the proper end user data removal handling.

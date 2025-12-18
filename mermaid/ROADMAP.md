@@ -31,3 +31,4 @@ Allow users (and LangCore agents) to submit either inline prompts or uploaded te
 ## Bugs
 - [ ] Generated Mermaid image may say: Syntax error in text, mermaid version x.x.x
 - [ ] Image is being reposted
+- [ ] interfaces are defined in langcore/abc.py but are not yet used. Instead we have in langcore/langcore.py a complicated _handle_rich_tool_response setup. Have to revisit this in future

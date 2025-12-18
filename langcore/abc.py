@@ -8,10 +8,19 @@ Error handling:
 - Translate provider-specific errors (OpenAI, Ollama, etc.) into standard exceptions to keep callers consistent.
 """
 
+"""
+MessageHandler Pattern:
+- ExtensionCogs implement MessageHandler to provide custom message operations.
+- Handlers are registered via langcore_cog.register_message_handler(name, handler).
+- Future: Tools can request specific handlers via JSON response fields.
+- This enables modular, cog-specific rendering and message lifecycle management.
+"""
+
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Union
 
 import discord
+from redbot.core import commands
 
 from .models import GuildConfig
 
@@ -133,5 +142,120 @@ class ChainStore(ABC):
             List of result dictionaries containing name, text, score, dimensions, and metadata keys.
         Raises:
             NotImplementedError: If the store does not implement this interface.
+        """
+        raise NotImplementedError
+
+
+class MessageHandler(ABC):
+    """Interface for custom message handling by ExtensionCogs.
+
+    ExtensionCogs can implement this interface to provide specialized message
+    handling capabilities (e.g., rendering diagrams, formatting responses,
+    managing message lifecycle). Handlers are registered with langcore and
+    can be requested by tools for custom response rendering.
+
+    Example:
+        class MermaidMessageHandler(MessageHandler):
+            def __init__(self, mermaid_cog):
+                self.cog = mermaid_cog
+
+            async def send_text(self, ctx, text):
+                return await ctx.send(text)
+
+            async def send_file(self, ctx, file):
+                return await ctx.send(file=file)
+
+        # In mermaid cog's on_langcore_cog_add:
+        handler = MermaidMessageHandler(self)
+        langcore_cog.register_message_handler(self.qualified_name, handler)
+    """
+
+    @abstractmethod
+    async def send_text(
+        self,
+        ctx: commands.Context,
+        text: str,
+        **kwargs: Any,
+    ) -> discord.Message:
+        """Send a text message to the channel.
+
+        Args:
+            ctx: Command context containing channel and guild information.
+            text: Text content to send.
+            **kwargs: Additional Discord message parameters (embed, view, etc.).
+
+        Returns:
+            The sent Discord message object.
+
+        Raises:
+            NotImplementedError: If the handler does not implement this method.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def send_file(
+        self,
+        ctx: commands.Context,
+        file: discord.File,
+        content: Optional[str] = None,
+        **kwargs: Any,
+    ) -> discord.Message:
+        """Send a file attachment to the channel.
+
+        Args:
+            ctx: Command context containing channel and guild information.
+            file: Discord file object to send.
+            content: Optional text content to accompany the file.
+            **kwargs: Additional Discord message parameters.
+
+        Returns:
+            The sent Discord message object.
+
+        Raises:
+            NotImplementedError: If the handler does not implement this method.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def delete_message(
+        self,
+        ctx: commands.Context,
+        message_id: int,
+    ) -> None:
+        """Delete a message by ID.
+
+        Args:
+            ctx: Command context containing channel and guild information.
+            message_id: Discord message ID to delete.
+
+        Raises:
+            NotImplementedError: If the handler does not implement this method.
+            discord.NotFound: If the message doesn't exist.
+            discord.Forbidden: If lacking permissions to delete.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def edit_message(
+        self,
+        ctx: commands.Context,
+        message_id: int,
+        content: Optional[str] = None,
+        file: Optional[discord.File] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Edit an existing message.
+
+        Args:
+            ctx: Command context containing channel and guild information.
+            message_id: Discord message ID to edit.
+            content: New text content (None to keep unchanged).
+            file: New file attachment (None to keep unchanged).
+            **kwargs: Additional Discord edit parameters.
+
+        Raises:
+            NotImplementedError: If the handler does not implement this method.
+            discord.NotFound: If the message doesn't exist.
+            discord.Forbidden: If lacking permissions to edit.
         """
         raise NotImplementedError
