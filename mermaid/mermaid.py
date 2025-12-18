@@ -35,6 +35,59 @@ class mermaid(commands.Cog):
         await super().cog_load()
         await self._ensure_playwright_installed()
 
+    async def cog_unload(self) -> None:
+        """Clean up when mermaid cog is unloaded."""
+        await super().cog_unload()
+
+        # ChainHub will automatically unregister via langcore's on_cog_remove listener
+        self.logger.info("Mermaid cog unloaded")
+
+    @commands.Cog.listener()
+    async def on_langcore_cog_add(self, langcore_cog):
+        """Register mermaid tool with ChainHub when langcore becomes available."""
+        schema = {
+            "name": "generate_mermaid",
+            "description": (
+                "Generate Mermaid diagram syntax from a natural language description. "
+                "Returns the Mermaid syntax as a string that can be rendered into a diagram. "
+                "Supports flowcharts, sequence diagrams, class diagrams, state diagrams, and more. "
+                "Use this when the user asks to create, visualize, or diagram something."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Natural language description of what to diagram. "
+                            "Be specific about relationships, flow, and structure."
+                        ),
+                    },
+                    "diagram_type": {
+                        "type": "string",
+                        "enum": ["flowchart", "sequence", "class", "state", "graph"],
+                        "description": (
+                            "Type of diagram to generate. Choose based on what best represents the concept: "
+                            "flowchart for processes, sequence for interactions, class for structures, "
+                            "state for state machines, graph for relationships."
+                        ),
+                    },
+                },
+                "required": ["description", "diagram_type"],
+            },
+        }
+
+        success = langcore_cog.hub.register_function(
+            cog_name=self.qualified_name,
+            schema=schema,
+            permission_level="user",
+        )
+
+        if success:
+            self.logger.info("Registered generate_mermaid tool with ChainHub")
+        else:
+            self.logger.warning("Failed to register generate_mermaid tool with ChainHub")
+
     async def _ensure_playwright_installed(self) -> None:
         """Install Playwright browsers so rendering works out of the box."""
         try:
@@ -107,13 +160,79 @@ class mermaid(commands.Cog):
 
         return BytesIO(png_bytes)
 
+    async def generate_mermaid(self, description: str, diagram_type: str = "flowchart") -> str:
+        """Generate Mermaid diagram syntax from a natural language description.
+
+        This function is called by the AI agent when it needs to create a diagram.
+        It returns the Mermaid syntax as a string, which is stored in the conversation.
+        Users can then render it using [p]mermaid command.
+
+        Args:
+            description: Natural language description of what to diagram
+            diagram_type: Type of diagram (flowchart, sequence, class, state, graph)
+
+        Returns:
+            str: Mermaid diagram syntax
+        """
+        # Map diagram types to Mermaid syntax prefixes
+        type_mapping = {
+            "flowchart": "flowchart TD",
+            "sequence": "sequenceDiagram",
+            "class": "classDiagram",
+            "state": "stateDiagram-v2",
+            "graph": "graph TD",
+        }
+
+        diagram_prefix = type_mapping.get(diagram_type, "flowchart TD")
+
+        # For now, create a simple template-based diagram
+        # In the future, this could use an LLM to generate more sophisticated diagrams
+        if diagram_type == "sequence":
+            syntax = f"""{diagram_prefix}
+participant User
+participant System
+User->>System: {description}
+System-->>User: Response"""
+        elif diagram_type == "class":
+            syntax = f"""{diagram_prefix}
+class Entity {{
+    +description: {description}
+}}"""
+        elif diagram_type == "state":
+            syntax = f"""{diagram_prefix}
+[*] --> State1
+State1 --> [*]: {description}"""
+        else:  # flowchart or graph
+            # Create a simple flowchart
+            lines = description.split(".")
+            syntax = f"{diagram_prefix}\n"
+            for i, line in enumerate(lines[:5]):  # Limit to 5 steps
+                if line.strip():
+                    node_id = f"Step{i+1}"
+                    syntax += f"    {node_id}[{line.strip()}]\n"
+                    if i > 0:
+                        syntax += f"    Step{i} --> {node_id}\n"
+
+        self.logger.debug("Generated mermaid syntax for type %s: %s", diagram_type, syntax[:100])
+        return syntax
+
     async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
         # TODO: Replace this with the proper end user data removal handling.
         super().red_delete_data_for_user(requester=requester, user_id=user_id)
 
     @commands.command()
     async def mermaid(self, ctx: commands.Context, *, content: Optional[str] = None) -> None:
-        """Create a mermaid image from text."""
+        """Create a mermaid image from text.
+
+        You can provide Mermaid diagram syntax directly, or ask the AI assistant
+        to generate diagrams for you using natural language (via [p]chat or mentions).
+
+        The AI can create flowcharts, sequence diagrams, class diagrams, and more.
+        Once generated, use this command to render the syntax into an image.
+
+        Example:
+            [p]mermaid graph TD; A-->B; B-->C;
+        """
         if not content or not content.strip():
             await ctx.send("Please provide the mermaid diagram content. Usage: `[p]mermaid <content>`")
             return
