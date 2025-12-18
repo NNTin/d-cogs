@@ -79,6 +79,8 @@ class GuildConfig(BaseModel):
     listen_channels: List[int] = Field(default_factory=list)  # Additional channels to listen in
     mention_respond: bool = True  # Respond when bot is mentioned
     min_length: int = 3  # Minimum message length to process
+    use_classifier: bool = False  # Enable/disable classifier for auto-reply gating
+    classifier_model: str = "llama3.2:1b"  # Lightweight model for classification
 
     def get_user_max_retention(self, member: Optional[discord.Member]) -> int:
         if not member:

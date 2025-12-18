@@ -93,12 +93,14 @@ class ollama(commands.Cog):
                 self,
                 guild_id: int,
                 member_id: Optional[int] = None,
+                model: Optional[str] = None,
             ) -> ChatOllama:
                 """Get a configured ChatOllama instance for tool binding and agentic workflows.
 
                 Args:
                     guild_id: Guild identifier for configuration lookup.
                     member_id: Optional member ID for role-based model overrides.
+                    model: Optional model name to override guild/role configuration.
 
                 Returns:
                     ChatOllama instance configured with the appropriate model for the guild/member.
@@ -106,7 +108,7 @@ class ollama(commands.Cog):
                 Raises:
                     commands.UserFeedbackCheckFailure: If configuration is invalid or model unavailable.
                 """
-                return await cog.get_chat_llm(guild_id=guild_id, member_id=member_id)
+                return await cog.get_chat_llm(guild_id=guild_id, member_id=member_id, model=model)
 
         return _OllamaChainProvider()
 
@@ -426,6 +428,7 @@ class ollama(commands.Cog):
         self,
         guild_id: int,
         member_id: Optional[int] = None,
+        model: Optional[str] = None,
     ) -> ChatOllama:
         """Get a configured ChatOllama instance for the specified guild and member.
 
@@ -438,6 +441,8 @@ class ollama(commands.Cog):
         Args:
             guild_id: Guild identifier for configuration lookup.
             member_id: Optional member ID for role-based model overrides.
+            model: Optional model name to override guild/role configuration. When provided,
+                skips selection logic and uses this model directly.
 
         Returns:
             ChatOllama instance ready for tool binding and invocation.
@@ -445,6 +450,20 @@ class ollama(commands.Cog):
         Raises:
             commands.UserFeedbackCheckFailure: If model selection fails or endpoint unavailable.
         """
+        # If explicit model provided, use it directly (e.g., for classifier)
+        if model:
+            log.debug("Using explicit model override '%s' for guild %s", model, guild_id)
+            try:
+                return ChatOllama(
+                    base_url=self.ollama_config.endpoint,
+                    model=model,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error("Failed to create ChatOllama with explicit model '%s': %s", model, exc)
+                raise commands.UserFeedbackCheckFailure(
+                    f"Failed to initialize chat model '{model}': {exc}"
+                ) from exc
+
         guild_config = await self.get_guild_config(guild_id)
         available_models = self.ollama_config.available_models
 

@@ -70,6 +70,7 @@ class ChainProvider(ABC):
         self,
         guild_id: int,
         member_id: Optional[int] = None,
+        model: Optional[str] = None,
     ) -> Any:
         """Get a bindable LangChain chat model instance for advanced workflows.
 
@@ -79,6 +80,8 @@ class ChainProvider(ABC):
         Args:
             guild_id: Guild identifier for configuration lookup.
             member_id: Optional member ID for role-based model overrides.
+            model: Optional model name to use, overriding guild/role configuration.
+                If None, uses standard selection logic.
 
         Returns:
             A LangChain chat model instance (e.g., ChatOllama, ChatOpenAI) that
@@ -92,6 +95,11 @@ class ChainProvider(ABC):
             >>> llm = await provider.get_chat_llm(guild_id=123, member_id=456)
             >>> bound_llm = llm.bind_tools(tool_schemas)
             >>> response = await bound_llm.ainvoke(messages)
+            >>> override_llm = await provider.get_chat_llm(
+            ...     guild_id=123,
+            ...     member_id=456,
+            ...     model="llama3.2:1b",
+            ... )
         """
         raise NotImplementedError
 

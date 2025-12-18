@@ -47,6 +47,8 @@ class langcore(commands.Cog):
             listen_channels=default_guild["listen_channels"],
             mention_respond=default_guild["mention_respond"],
             min_length=default_guild["min_length"],
+            use_classifier=default_guild["use_classifier"],
+            classifier_model=default_guild["classifier_model"],
         )
 
         self.conversation_manager = ConversationManager()
@@ -400,6 +402,14 @@ class langcore(commands.Cog):
             ),
             inline=False,
         )
+        embed.add_field(
+            name="Classifier",
+            value=(
+                f"Enabled: {config.use_classifier}\n"
+                f"Model: `{config.classifier_model}`"
+            ),
+            inline=False,
+        )
 
         await ctx.send(embed=embed)
 
@@ -650,6 +660,59 @@ class langcore(commands.Cog):
             statuses[function_name] = not current
             status = "enabled" if not current else "disabled"
         await ctx.send(f"Function `{function_name}` has been {status}.")
+
+    @langcore_config.group(name="classifier")
+    async def classifier_group(self, ctx: commands.Context):
+        """Manage classifier settings for auto-reply gating."""
+        pass
+
+    @classifier_group.command(name="toggle")
+    async def classifier_toggle(self, ctx: commands.Context):
+        """Enable or disable the classifier for auto-reply gating."""
+        current = await self.config.guild(ctx.guild).use_classifier()
+        await self.config.guild(ctx.guild).use_classifier.set(not current)
+        status = "enabled" if not current else "disabled"
+        await ctx.send(f"Classifier has been {status} for this server.")
+
+    @classifier_group.command(name="model")
+    async def classifier_model_set(self, ctx: commands.Context, model_name: str):
+        """Set the classifier model (e.g., llama3.2:1b, gemma3).
+
+        Args:
+            model_name: Name of the model to use for classification decisions.
+        """
+        await self.config.guild(ctx.guild).classifier_model.set(model_name)
+        await ctx.send(f"Classifier model set to `{model_name}`.")
+
+    @classifier_group.command(name="settings")
+    async def classifier_settings(self, ctx: commands.Context):
+        """View current classifier configuration."""
+        config = await self.get_guild_config(ctx.guild.id)
+
+        embed = discord.Embed(
+            title="Classifier Configuration",
+            color=discord.Color.purple(),
+        )
+        embed.add_field(
+            name="Status",
+            value=f"Enabled: {config.use_classifier}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Model",
+            value=f"`{config.classifier_model}`",
+            inline=False,
+        )
+        embed.add_field(
+            name="Description",
+            value=(
+                "The classifier gates auto-replies in the assistant channel. "
+                "It decides whether to RESPOND, IGNORE, or END conversations."
+            ),
+            inline=False,
+        )
+
+        await ctx.send(embed=embed)
 
     @langcore_config.command(name="convostats")
     @commands.guild_only()
