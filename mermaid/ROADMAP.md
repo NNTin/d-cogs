@@ -27,3 +27,7 @@ Allow users (and LangCore agents) to submit either inline prompts or uploaded te
 - [ ] **Editing Flow**: Provide a follow-up command (e.g., `[p]mermaid edit <message-link> <new-prompt-or-file>`) that reuses stored metadata to update diagrams quickly.
 - [ ] **Error Recovery**: Detect common Mermaid syntax issues, highlight offending lines, and guide the user to fix them without losing context.
 - [ ] **ChainHub Hooks**: Expose helper functions ("render_mermaid", "list_mermaid_assets") so other cogs/agents can request diagrams programmatically using the same metadata conventions.
+
+## Bugs
+- [ ] Generated Mermaid image may say: Syntax error in text, mermaid version x.x.x
+- [ ] Image is being reposted

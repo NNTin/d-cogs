@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import json
+import ast
 import base64
 from io import BytesIO
 from datetime import datetime
@@ -140,9 +141,23 @@ class langcore(commands.Cog):
         Returns:
             True if rich content was handled, False otherwise.
         """
-        try:
-            tool_data = json.loads(tool_content)
-        except (json.JSONDecodeError, TypeError):
+        tool_data = None
+
+        if isinstance(tool_content, dict):
+            tool_data = tool_content
+        else:
+            try:
+                tool_data = json.loads(tool_content)
+            except (json.JSONDecodeError, TypeError):
+                # Some providers may return a Python repr string rather than JSON
+                try:
+                    parsed = ast.literal_eval(tool_content)
+                    if isinstance(parsed, dict):
+                        tool_data = parsed
+                except (ValueError, SyntaxError, TypeError):
+                    tool_data = None
+
+        if tool_data is None:
             # Not JSON or invalid - normal tool response
             return False
 
@@ -728,6 +743,7 @@ class langcore(commands.Cog):
             ctx.guild.id,
         )
         last_tool_content = self._get_last_tool_content(conversation.messages)
+
         if last_tool_content:
             await self._handle_rich_tool_response(last_tool_content, ctx=ctx)
 
