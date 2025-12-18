@@ -455,6 +455,9 @@ class langcore(commands.Cog):
             if conversation.messages
             else 0
         )
+        tool_usage_count = sum(
+            1 for msg in conversation.messages if isinstance(msg, dict) and msg.get("role") == "tool"
+        )
         max_retention = config.get_user_max_retention(user)
         _max_time = config.get_user_max_time(user)
         is_expired = conversation.is_expired(config.max_retention_time)
@@ -466,6 +469,7 @@ class langcore(commands.Cog):
         embed.add_field(name="Channel", value=ctx.channel.mention, inline=False)
         embed.add_field(name="Messages", value=f"{message_count}/{max_retention}", inline=True)
         embed.add_field(name="Estimated Tokens", value=f"{estimated_tokens} (approx.)", inline=True)
+        embed.add_field(name="Tool Calls", value=f"{tool_usage_count}", inline=True)
         embed.add_field(name="Expired", value=f"{is_expired}", inline=True)
 
         if conversation.last_updated:
@@ -565,34 +569,32 @@ class langcore(commands.Cog):
             await ctx.send("No AI provider is available. Please load the ollama cog.")
             return
 
-        user_message = {"role": "user", "content": question}
-        conversation.messages.append(user_message)
-        conversation.refresh()
+        functions, callbacks = await self.hub.get_functions(
+            guild_id=ctx.guild.id,
+            guild_config=config,
+            member=ctx.author,
+            permission_filter=True,
+        )
 
         async with ctx.typing():
             try:
-                response = await provider.chat(
-                    messages=conversation.messages,
-                    guild=ctx.guild,
-                    member=ctx.author,
+                response = await self.conversation_manager.agent_chat(
+                    key=(ctx.author.id, ctx.channel.id, ctx.guild.id),
+                    provider=provider,
+                    functions=functions,
+                    callbacks=callbacks,
+                    guild_id=ctx.guild.id,
+                    member_id=ctx.author.id,
+                    config=config,
                 )
             except commands.UserFeedbackCheckFailure as e:
                 # Provider raised user-facing error
                 await ctx.send(str(e))
-                # Remove the user message since we failed
-                conversation.messages.pop()
                 return
             except Exception as e:
                 log.exception("Unexpected error during chat for guild %s", ctx.guild.id)
                 await ctx.send(f"An unexpected error occurred: {e}")
-                conversation.messages.pop()
                 return
-
-        ai_message = {"role": "assistant", "content": response}
-        conversation.messages.append(ai_message)
-        conversation.refresh()
-
-        conversation.cleanup(config.max_retention, config.max_retention_time)
 
         if len(response) <= 2000:
             await ctx.send(response)
@@ -666,35 +668,36 @@ class langcore(commands.Cog):
             guild.id,
         )
 
-        conversation.messages.append({"role": "user", "content": message.content})
-        conversation.refresh()
-
         provider = self.get_provider("ollama")
         if not provider:
             await message.reply("No AI provider is available. Please load the ollama cog.")
-            conversation.messages.pop()
             return
+
+        functions, callbacks = await self.hub.get_functions(
+            guild_id=guild.id,
+            guild_config=config,
+            member=message.author,
+            permission_filter=True,
+        )
 
         async with message.channel.typing():
             try:
-                response = await provider.chat(
-                    messages=conversation.messages,
-                    guild=guild,
-                    member=message.author,
+                response = await self.conversation_manager.agent_chat(
+                    key=(message.author.id, message.channel.id, guild.id),
+                    provider=provider,
+                    functions=functions,
+                    callbacks=callbacks,
+                    guild_id=guild.id,
+                    member_id=message.author.id,
+                    config=config,
                 )
             except commands.UserFeedbackCheckFailure as e:
                 await message.reply(str(e))
-                conversation.messages.pop()
                 return
             except Exception as e:  # noqa: BLE001
                 log.exception("Unexpected error during listener chat for guild %s", guild.id)
                 await message.reply(f"An unexpected error occurred: {e}")
-                conversation.messages.pop()
                 return
-
-        conversation.messages.append({"role": "assistant", "content": response})
-        conversation.refresh()
-        conversation.cleanup(config.max_retention, config.max_retention_time)
 
         if len(response) <= 2000:
             await message.reply(response, mention_author=False)
