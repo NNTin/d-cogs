@@ -14,6 +14,7 @@ from redbot.core.config import Config
 from redbot.core.utils.chat_formatting import pagify, text_to_file
 
 from .abc import ChainProvider, MessageHandler
+from .classifier import ClassifierManager
 from .conversation import ConversationManager
 from .hub import ChainHub
 from .models import GuildConfig
@@ -52,6 +53,7 @@ class langcore(commands.Cog):
         )
 
         self.conversation_manager = ConversationManager()
+        self.classifier_manager = ClassifierManager()
         self.hub = ChainHub(self.bot)
         self.providers: Dict[str, ChainProvider] = {}
         self.message_handlers: Dict[str, MessageHandler] = {}
