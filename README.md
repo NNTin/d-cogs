@@ -16,7 +16,7 @@ graph TD
     end
 
     %% Core framework
-    subgraph LangCore[langcore: Cog uses LangChain Framework]
+    subgraph LangCore[langcore: Cog]
         ChainHubManager[ChainHubManager]
         ConversationManager
         ChainStore[ChainStore Abstraction]
@@ -31,10 +31,15 @@ graph TD
 
     %% ChainHub cogs
     subgraph ChainHubCogs[ExtensionCogs for tools/functions]
-        subgraph RagCogSub[RagCog: ragutils]
-            Rag[ragutils]
-            CPRInstance[langcore.get_provider]
-            CSRInstance[langcore.get_store]
+        subgraph SpoilarrCogSub[SpoilarrCog: spoilarr]
+            Spoilarr[spoilarr]
+            SpoilarrNote[Note: only does API calls]
+        end
+
+        
+        subgraph EmbedCogSub[EmbedCog: embed]
+            Embed[embed]
+            CPEmInstance[langcore.get_provider]
         end
 
         subgraph MemoryCogSub[MemoryCog: memory]
@@ -61,6 +66,7 @@ graph TD
         QDrant[qdrant]
         backendQdrant[localhost:6333]
         qdrantModule[PyPI: langchain-qdrant]
+        ragPipeline[RAG pipeline, formerely inside ragutils cog]
     end
 
     %% Connections
@@ -86,9 +92,11 @@ graph TD
 
     %% Apply styles
     class langchainModule,langchainModule2,ollamaModule,qdrantModule PyPI;
-    class ChainStore,CSRInstance,CSMInstance chainStore;
-    class ChainProvider,CPMInstance,CPMeInstance,CPCInstance chainProvider;
+    class ChainStore,CSMInstance chainStore;
+    class ChainProvider,CPMeInstance,CPCInstance,CPEmInstance chainProvider;
 ```
+
+Note: ConversationManager is growing in complexity. In future worth abstracting it so the ConversationManager can be overwritten by other cogs.
 
 ### LangChain PyPI Package Interaction and Extension Model
 ```mermaid

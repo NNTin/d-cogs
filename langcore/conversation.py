@@ -93,7 +93,8 @@ class ConversationManager:
                 log.error("Failed to get chat LLM from provider: %s", e)
                 raise
 
-            max_iterations = 5
+            # todo: Make max_iterations configurable
+            max_iterations = 50
             iteration = 0
 
             while iteration < max_iterations:

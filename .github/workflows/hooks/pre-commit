@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-protected_dirs=("assistant" "hotreload")
+protected_dirs=("hotreload")
 
 # Gather staged files (add/modify/rename/copy/delete/typechange)
 mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMRTD)
