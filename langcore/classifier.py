@@ -78,12 +78,37 @@ class ClassifierManager:
 
         context = self._format_buffer_context(buffer)
         prompt = (
-            "You are a conversation classifier. Analyze the recent messages and decide:\n"
-            "- RESPOND: The bot should engage in this conversation\n"
-            "- IGNORE: The bot should stay silent and continue buffering\n"
-            "- END: The conversation is finished, clear history\n\n"
-            f"Recent messages:\n{context}\n\n"
-            "Reply with exactly one word: RESPOND, IGNORE, or END."
+            """
+            You are an activation classifier for a background AI agent.
+
+            Respond with exactly one word:
+            RESPOND, IGNORE or END
+
+            RESPOND if:
+            The message asks a question
+            The message requests information or an action
+            The message explicitly addresses the agent
+            The agent can reasonably help
+
+            END if:
+            The message expresses thanks, appreciation, or satisfaction
+            The message says goodbye or indicates the conversation is finished
+            The user confirms completion (e.g. "that's all", "we're done", "solved")
+
+            IGNORE if:
+            The message is casual chatter between humans
+            The message is not directed at the agent
+            The message does not require a reply
+
+            Do not explain your choice.
+            Return only the single word.
+            """
+            # "You are a conversation classifier. Analyze the recent messages and decide:\n"
+            # "- RESPOND: The bot should engage in this conversation\n"
+            # "- IGNORE: The bot should stay silent and continue buffering\n"
+            # "- END: The conversation is finished, clear history\n\n"
+            # f"Recent messages:\n{context}\n\n"
+            # "Reply with exactly one word: RESPOND, IGNORE, or END."
         )
 
         decision = "IGNORE"

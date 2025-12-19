@@ -98,6 +98,7 @@ graph TD
 
     ChainHubManager -->|for each langcore-compatible cog registers functions| ChainHubCogs
     ChainHubManager <-->|langchain linked| ConversationManager
+    ConversationManager <-->|When enabled Classifier Agent controls Conversation Agent engagement| ClassifierManager
     
     %% Define styles
     classDef PyPI fill:#FFE08A,stroke:#B45309,stroke-width:2px,color:#1F2937;
