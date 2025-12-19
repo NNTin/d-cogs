@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import logging
+from importlib import import_module
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal, Optional, Tuple
@@ -13,7 +14,6 @@ from playwright.async_api import async_playwright
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
-from langcore.abc import MessageHandler
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
@@ -129,61 +129,6 @@ class MermaidManager:
         raise RuntimeError(f"Failed to create diagram after {self.max_retries} attempts")
 
 
-class MermaidMessageHandler(MessageHandler):
-    """Message handler for sending Mermaid diagram content."""
-
-    def __init__(self, mermaid_cog: "mermaid") -> None:
-        self.cog = mermaid_cog
-
-    async def send_text(self, ctx: commands.Context, text: str, **kwargs: Any) -> discord.Message:
-        return await ctx.send(text, **kwargs)
-
-    async def send_file(
-        self,
-        ctx: commands.Context,
-        file: discord.File,
-        content: Optional[str] = None,
-        **kwargs: Any,
-    ) -> discord.Message:
-        if not isinstance(file, discord.File):
-            raise TypeError("MermaidMessageHandler.send_file requires a discord.File.")
-
-        filename = (file.filename or "").lower()
-        if not filename.endswith(".png"):
-            raise commands.UserFeedbackCheckFailure("MermaidMessageHandler only supports sending PNG diagram files.")
-
-        return await ctx.send(content=content, file=file, **kwargs)
-
-    async def delete_message(self, ctx: commands.Context, message_id: int) -> None:
-        message = await ctx.channel.fetch_message(message_id)
-        await message.delete()
-
-    async def edit_message(
-        self,
-        ctx: commands.Context,
-        message_id: int,
-        content: Optional[str] = None,
-        file: Optional[discord.File] = None,
-        **kwargs: Any,
-    ) -> None:
-        message = await ctx.channel.fetch_message(message_id)
-
-        edit_kwargs: dict[str, Any] = dict(kwargs)
-        if content is not None:
-            edit_kwargs["content"] = content
-        if file is not None:
-            if not isinstance(file, discord.File):
-                raise TypeError("edit_message expects a discord.File when updating attachments.")
-            filename = (file.filename or "").lower()
-            if not filename.endswith(".png"):
-                raise commands.UserFeedbackCheckFailure(
-                    "MermaidMessageHandler can only attach PNG diagram files when editing."
-                )
-            edit_kwargs["attachments"] = [file]
-
-        await message.edit(**edit_kwargs)
-
-
 class mermaid(commands.Cog):
     """
     Create mermaid images from text
@@ -199,7 +144,74 @@ class mermaid(commands.Cog):
             force_registration=True,
         )
         self.manager: Optional[MermaidManager] = None
-        self.message_handler: Optional[MermaidMessageHandler] = None
+        self.message_handler: Optional[Any] = None
+
+    def _build_message_handler(self) -> Any:
+        """
+        Build a MessageHandler instance compatible with the current langcore definition.
+
+        This mirrors ollama's dynamic provider construction to tolerate langcore reloads.
+        """
+        try:
+            MessageHandler = getattr(import_module("langcore.abc"), "MessageHandler")
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("Unable to import langcore.abc.MessageHandler: %s", exc)
+            MessageHandler = object  # type: ignore[assignment]
+
+        class _MermaidMessageHandler(MessageHandler):  # type: ignore[misc,valid-type]
+            """Message handler for sending Mermaid diagram content."""
+
+            async def send_text(self, ctx: commands.Context, text: str, **kwargs: Any) -> discord.Message:
+                return await ctx.send(text, **kwargs)
+
+            async def send_file(
+                self,
+                ctx: commands.Context,
+                file: discord.File,
+                content: Optional[str] = None,
+                **kwargs: Any,
+            ) -> discord.Message:
+                if not isinstance(file, discord.File):
+                    raise TypeError("MermaidMessageHandler.send_file requires a discord.File.")
+
+                filename = (file.filename or "").lower()
+                if not filename.endswith(".png"):
+                    raise commands.UserFeedbackCheckFailure(
+                        "MermaidMessageHandler only supports sending PNG diagram files."
+                    )
+
+                return await ctx.send(content=content, file=file, **kwargs)
+
+            async def delete_message(self, ctx: commands.Context, message_id: int) -> None:
+                message = await ctx.channel.fetch_message(message_id)
+                await message.delete()
+
+            async def edit_message(
+                self,
+                ctx: commands.Context,
+                message_id: int,
+                content: Optional[str] = None,
+                file: Optional[discord.File] = None,
+                **kwargs: Any,
+            ) -> None:
+                message = await ctx.channel.fetch_message(message_id)
+
+                edit_kwargs: dict[str, Any] = dict(kwargs)
+                if content is not None:
+                    edit_kwargs["content"] = content
+                if file is not None:
+                    if not isinstance(file, discord.File):
+                        raise TypeError("edit_message expects a discord.File when updating attachments.")
+                    filename = (file.filename or "").lower()
+                    if not filename.endswith(".png"):
+                        raise commands.UserFeedbackCheckFailure(
+                            "MermaidMessageHandler can only attach PNG diagram files when editing."
+                        )
+                    edit_kwargs["attachments"] = [file]
+
+                await message.edit(**edit_kwargs)
+
+        return _MermaidMessageHandler()
 
     async def cog_load(self) -> None:
         """Ensure Playwright is ready before the cog is used."""
@@ -265,7 +277,7 @@ class mermaid(commands.Cog):
         self.manager = MermaidManager(mermaid_cog=self, langcore_cog=langcore_cog)
         self.logger.info("MermaidManager initialized as sub-agent")
 
-        self.message_handler = MermaidMessageHandler(self)
+        self.message_handler = self._build_message_handler()
         if langcore_cog.register_message_handler(self.qualified_name, self.message_handler):
             self.logger.info("Registered MermaidMessageHandler with langcore")
         else:
