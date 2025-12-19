@@ -278,6 +278,8 @@ class ConversationManager:
                     if tool_name not in callbacks:
                         log.warning("No callback found for tool %s", tool_name)
 
+                    log.debug("Executing tool %s with args %s", tool_name, tool_args)
+
                     # Execute callback
                     try:
                         result = (

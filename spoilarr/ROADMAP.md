@@ -25,3 +25,14 @@ When spoiler mode is disabled add_assistant_message() from langcore/models.py is
 
 Use toon (https://github.com/toon-format/toon) to convert from json to toon.  
 When the Spoilarr Cog uses add_tool_message the payload is sent in toon format.
+
+---
+
+Next step:  
+We'll delegate it to a sub agent. 
+
+---
+
+TODOs:
+- toon formatting does not work
+- we have to refine the system prompt, also inject system prompts when spoilarr and mermaid is loaded, Conversation Agent should only say verifiable things
