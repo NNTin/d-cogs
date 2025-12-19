@@ -1,0 +1,14 @@
+{
+    "name": "spoilarr",
+    "short": "TMDb API integration for movie/TV information",
+    "description": "Provides tools for searching movies/TV shows and retrieving details, cast, and crew information from The Movie Database (TMDb). Supports spoiler censoring mode.",
+    "install_msg": "Thanks for installing Spoilarr! Configure your TMDb API key with `[p]spoilarr apikey <key>`. Get your API key at https://www.themoviedb.org/settings/api",
+    "author": ["nntin"],
+    "required_cogs": ["langcore"],
+    "requirements": ["aiohttp", "toon-format"],
+    "tags": ["tmdb", "movies", "tv", "api", "langcore"],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}
