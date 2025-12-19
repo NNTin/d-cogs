@@ -19,10 +19,71 @@ log = logging.getLogger("red.tin.langcore.conversation")
 
 
 class ConversationManager:
-    """Manages conversation lifecycle including creation, retrieval, cleanup, and reset operations."""
+    """
+    Manages conversation lifecycle including creation, retrieval, cleanup, and reset operations.
+
+    Sub-Agent Interface:
+    -------------------
+    Sub-agents (e.g., MermaidManager) can access and modify conversations using this pattern:
+
+    1. Get the conversation instance:
+       conversation = conversation_manager.get_conversation(member_id, channel_id, guild_id)
+
+    2. Acquire the conversation lock for thread-safety:
+       async with conversation_manager._get_lock(f"{member_id}-{channel_id}-{guild_id}"):
+           # Read conversation history
+           messages = conversation.get_messages()
+
+           # Add sub-agent's response
+           conversation.add_assistant_message("Generated content here")
+
+           # Optionally add tool messages
+           conversation.add_tool_message(
+               content="Tool result",
+               tool_call_id="call_123",
+               name="tool_name",
+           )
+
+    3. Upload files via MessageHandler (outside the lock):
+       handler = langcore_cog.get_message_handler("mermaid")
+       await handler.send_file(ctx, discord_file)
+
+    Important:
+    - Always acquire the lock before modifying conversation state
+    - Keep lock duration minimal (don't hold during LLM calls or file uploads)
+    - Use add_assistant_message() for content the ConversationManager should see
+    - Use MessageHandler for content the Discord user should see
+
+    Example: MermaidManager adding diagram syntax to conversation
+    async def create_diagram(self, ctx, description, diagram_type, conversation_manager):
+        # Generate diagram
+        syntax, file = await self.generate_and_render(description, diagram_type)
+
+        # Get conversation and lock
+        conversation = conversation_manager.get_conversation(
+            ctx.author.id, ctx.channel.id, ctx.guild.id
+        )
+        lock = conversation_manager.get_conversation_lock(
+            ctx.author.id, ctx.channel.id, ctx.guild.id
+        )
+
+        # Add syntax to conversation (what ConversationManager sees)
+        async with lock:
+            conversation.add_assistant_message(f"```mermaid\\n{syntax}\\n```")
+
+        # Upload file to Discord (what user sees)
+        handler = self.langcore_cog.get_message_handler("mermaid")
+        await handler.send_file(ctx, file, content="Here's your diagram!")
+    """
 
     def __init__(self) -> None:
         self._conversations: Dict[str, Conversation] = {}
+        self._locks: Dict[str, asyncio.Lock] = {}
+
+    def _get_lock(self, key: str) -> asyncio.Lock:
+        if key not in self._locks:
+            self._locks[key] = asyncio.Lock()
+        return self._locks[key]
 
     def get_conversation(self, member_id: int, channel_id: int, guild_id: int) -> Conversation:
         """Retrieve a conversation, creating it if it does not yet exist.
@@ -43,6 +104,27 @@ class ConversationManager:
         if key not in self._conversations:
             log.debug("Created new conversation for member %s in channel %s (guild %s)", member_id, channel_id, guild_id)
         return self._conversations.setdefault(key, Conversation())
+
+    def get_conversation_lock(self, member_id: int, channel_id: int, guild_id: int) -> asyncio.Lock:
+        """Get the lock for a specific conversation to ensure thread-safe access.
+
+        Sub-agents should acquire this lock before modifying conversation state.
+
+        Args:
+            member_id: Discord member identifier
+            channel_id: Channel identifier
+            guild_id: Guild identifier
+
+        Returns:
+            asyncio.Lock for the conversation
+
+        Example:
+            lock = manager.get_conversation_lock(member_id, channel_id, guild_id)
+            async with lock:
+                conversation.add_assistant_message("content")
+        """
+        key = f"{member_id}-{channel_id}-{guild_id}"
+        return self._get_lock(key)
 
     async def agent_chat(
         self,
@@ -74,17 +156,20 @@ class ConversationManager:
         try:
             # Get conversation
             conversation_key = f"{key[0]}-{key[1]}-{key[2]}"
-            conversation = self._conversations.get(conversation_key)
-            if not conversation:
-                log.warning("No conversation found for key %s", conversation_key)
-                return "No conversation context available."
+            lock = self._get_lock(conversation_key)
+            conversation: Optional[Conversation]
+            async with lock:
+                conversation = self._conversations.get(conversation_key)
+                if not conversation:
+                    log.warning("No conversation found for key %s", conversation_key)
+                    return "No conversation context available."
 
-            # Convert dict messages to LangChain BaseMessage objects
-            try:
-                messages: List[BaseMessage] = convert_to_messages(conversation.messages)
-            except Exception as e:
-                log.error("Failed to convert messages to BaseMessage format: %s", e)
-                raise
+                # Convert dict messages to LangChain BaseMessage objects
+                try:
+                    messages: List[BaseMessage] = convert_to_messages(conversation.messages)
+                except Exception as e:
+                    log.error("Failed to convert messages to BaseMessage format: %s", e)
+                    raise
 
             # Get LLM instance from provider
             try:
@@ -115,7 +200,8 @@ class ConversationManager:
                     raise
 
                 # Append AI message to conversation
-                messages.append(ai_msg)
+                async with lock:
+                    messages.append(ai_msg)
 
                 # Check for tool calls
                 if not ai_msg.tool_calls:
@@ -186,25 +272,27 @@ class ConversationManager:
                             tool_result = f"Error executing {tool_name}: {str(e)}"
 
                     # Append ToolMessage
-                    messages.append(ToolMessage(content=tool_result, tool_call_id=tool_id))
+                    async with lock:
+                        messages.append(ToolMessage(content=tool_result, tool_call_id=tool_id))
 
             # Check if we hit max iterations
             if iteration >= max_iterations:
                 log.warning("Agent loop reached max iterations (%d)", max_iterations)
 
             # Convert BaseMessage list back to OpenAI dict format
-            try:
-                updated_messages = convert_to_openai_messages(messages)
-            except Exception as e:
-                log.error("Failed to convert messages back to dict format: %s", e)
-                raise
+            async with lock:
+                try:
+                    updated_messages = convert_to_openai_messages(messages)
+                except Exception as e:
+                    log.error("Failed to convert messages back to dict format: %s", e)
+                    raise
 
-            # Update conversation with new messages
-            conversation.messages = updated_messages
-            conversation.refresh()
+                # Update conversation with new messages
+                conversation.messages = updated_messages
+                conversation.refresh()
 
-            # Apply retention policies
-            conversation.cleanup(config.max_retention, config.max_retention_time)
+                # Apply retention policies
+                conversation.cleanup(config.max_retention, config.max_retention_time)
 
             # Get the last AI message content
             final_response = ""

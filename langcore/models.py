@@ -56,6 +56,60 @@ class Conversation(BaseModel):
         self.messages.append(payload)
         self.refresh()
 
+    def add_assistant_message(self, content: str) -> None:
+        """Add an assistant message to the conversation.
+
+        Used by sub-agents to inject their responses into the conversation history.
+        The ConversationManager will see this message in the conversation context.
+
+        Args:
+            content: The assistant's response text (e.g., mermaid syntax)
+
+        Example:
+            conversation.add_assistant_message("sequenceDiagram\\nAlice->>Bob: Hello")
+        """
+        self.messages.append({"role": "assistant", "content": content})
+        self.refresh()
+
+    def add_tool_message(self, content: str, tool_call_id: str, name: Optional[str] = None) -> None:
+        """Add a tool execution result to the conversation.
+
+        Used by sub-agents to record tool execution results in the conversation history.
+
+        Args:
+            content: The tool's output or result
+            tool_call_id: Unique identifier linking this result to a tool call
+            name: Optional tool name for clarity
+
+        Example:
+            conversation.add_tool_message(
+                content="Diagram created successfully",
+                tool_call_id="call_abc123",
+                name="generate_mermaid",
+            )
+        """
+        payload: Dict[str, Any] = {"role": "tool", "content": content, "tool_call_id": tool_call_id}
+        if name:
+            payload["name"] = name
+        self.messages.append(payload)
+        self.refresh()
+
+    def get_messages(self) -> List[Dict[str, Any]]:
+        """Get a read-only copy of conversation messages.
+
+        Returns a shallow copy to prevent external modification of the internal state.
+        Sub-agents should use this to inspect conversation history.
+
+        Returns:
+            List of message dictionaries in OpenAI format
+
+        Example:
+            messages = conversation.get_messages()
+            for msg in messages:
+                print(f"{msg['role']}: {msg['content']}")
+        """
+        return self.messages.copy()
+
     def prepare_chat(self, user_message: str, system_prompt: str, initial_prompt: str) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
         prompt = self.system_prompt_override or system_prompt
