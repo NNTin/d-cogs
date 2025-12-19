@@ -107,8 +107,8 @@ graph TD
 
     %% Apply styles
     class langchainModule,langchainModule2,langchainModule3,ollamaModule,qdrantModule PyPI;
-    class ChainStore,CSMInstance chainStore;
-    class ChainProvider,CPMeInstance,CPCInstance,CPEmInstance,CPClInstance chainProvider;
+    class ChainStore,CSMInstance,CSAIInstance chainStore;
+    class ChainProvider,CPMeInstance,CPCInstance,CPEmInstance,CPClInstance,CPAIInstance chainProvider;
     class ConversationManager,ClassifierManager,MermaidAgent,AiDefenderAgent agent;
 ```
 

@@ -316,3 +316,35 @@ class ConversationManager:
             removed += 1
         log.info("Cleared %s conversations for guild %s", removed, guild_id)
         return removed
+
+    def reset_channel_conversations(self, channel_id: int, guild_id: int) -> int:
+        """Reset all conversations in a specific channel within a guild.
+
+        Args:
+            channel_id (int): Channel identifier to filter conversations.
+            guild_id (int): Guild identifier to filter conversations.
+
+        Returns:
+            int: Number of conversations reset.
+
+        Example:
+            >>> manager.reset_channel_conversations(456, 123)
+            3
+        """
+        reset_count = 0
+        for key, _ in self._conversations.copy().items():
+            key_parts: Tuple[str, str, str] = tuple(key.split("-"))
+            if len(key_parts) != 3:
+                continue
+            try:
+                member_id_str, channel_id_str, guild_id_str = key_parts
+                parsed_channel_id = int(channel_id_str)
+                parsed_guild_id = int(guild_id_str)
+            except ValueError:
+                continue
+            if parsed_channel_id != channel_id or parsed_guild_id != guild_id:
+                continue
+            if self.reset_conversation(int(member_id_str), parsed_channel_id, parsed_guild_id):
+                reset_count += 1
+        log.info("Reset %d conversations for channel %s in guild %s", reset_count, channel_id, guild_id)
+        return reset_count

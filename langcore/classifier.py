@@ -120,4 +120,5 @@ class ClassifierManager:
             channel_id,
             decision,
         )
+        self.update_state(channel_id, "IGNORE")
         return "IGNORE"
