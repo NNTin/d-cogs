@@ -230,6 +230,13 @@ graph TD
 
 All other cogs connect to `langcore` either by implementing its abstractions or registering functionality via ChainHub.
 
+In future `langcore.get_provider()` may be interesting when some LLM providers are unreliable -> return fallback providers.  
+Or when you want to do load balancing accross your LLM providers.  
+
+For BYOK users the ChainProvider implementation is easy, a simple endpoint with API key.  
+For self-host hardware users you may want to define multiple endpoints.  
+Or even combine both setup.
+
 ---
 
 ### 2. ollama (Cog)
@@ -238,7 +245,7 @@ All other cogs connect to `langcore` either by implementing its abstractions or 
 
 - Acts as the LLM backend for AI agents.  
 - Implements the `ChainProvider` abstraction from `langcore`, enabling agents to query large language models.  
-- Connects to an LLM service, e.g., `localhost:11434`.  
+- Connects to an LLM service, e.g., `localhost:11434`.
 
 This cog allows agents to generate natural language responses and perform model-based reasoning.
 
@@ -252,24 +259,20 @@ This cog allows agents to generate natural language responses and perform model-
 
 This cog serves as the AI agents’ long-term memory backend.
 
----
-
-### 4. ragutils (Cog)
-`rag` is a **retrieval-augmented generation (RAG) cog**:  
-
-- Registers functions via `ChainHub` like `memory`.  
-- Uses `ChainProvider` and `ChainStore` instances to enable agents to perform **retrieval-augmented reasoning**.  
-- Combines vector-based memory search with LLM responses, enhancing answer accuracy and relevance by grounding generation in stored knowledge.
+Add RAG pipeline. Fomerely implemented as a cog ragutils for assistant cog. This will move directly into qdrant to be a part of it.
 
 ---
 
 ## Synced Cogs Notice
 
-This repository mirrors two cogs that were authored elsewhere. **Please install them directly from their source repositories instead of from this mirror**.
+This repository mirrors cogs that were authored elsewhere. **Please install them directly from their source repositories instead of from this mirror**.
 
-- `assistant` — sourced from [`vertyco/vrt-cogs`](https://github.com/vertyco/vrt-cogs) (branch `main`). 
 - `hotreload` — sourced from [`cswimr/SeaCogs`](https://c.csw.im/cswimr/SeaCogs) (branch `main`). 
 
 These copies are synced for convenience and are not my creations. Please support and credit the original authors when using their cogs.
+
+- `assistant` — sourced from [`vertyco/vrt-cogs`](https://github.com/vertyco/vrt-cogs) (branch `main`). 
+
+Used to be mirroed but is replaced by the cogs `langcore`, `ollama` and `qdrant`.
 
 Huge thanks to [cswimr](https://c.csw.im/cswimr) and [vertyco](https://github.com/vertyco) for allowing me to mirror their work!
