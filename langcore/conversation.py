@@ -182,6 +182,26 @@ class ConversationManager:
             max_iterations = 50
             iteration = 0
 
+            wrapped_callbacks: Dict[str, Callable[..., Any]] = {}
+
+            def build_wrapper(cb: Callable) -> Callable[..., Any]:
+                async def wrapper(**tool_args):
+                    try:
+                        kw = dict(guild_id=guild_id, channel_id=key[1], member_id=key[0], **tool_args)
+                        if asyncio.iscoroutinefunction(cb):
+                            return await cb(**kw)
+                        return cb(**kw)
+                    except TypeError:
+                        # Fallback when the callback does not accept extra context arguments
+                        if asyncio.iscoroutinefunction(cb):
+                            return await cb(**tool_args)
+                        return cb(**tool_args)
+
+                return wrapper
+
+            for tool_name, callback in callbacks.items():
+                wrapped_callbacks[tool_name] = build_wrapper(callback)
+
             while iteration < max_iterations:
                 iteration += 1
                 log.debug("Agent iteration %d/%d", iteration, max_iterations)
@@ -253,23 +273,23 @@ class ConversationManager:
                         tool_id = f"tool_call_{iteration}_{tool_index}"
 
                     # Get callback function
-                    callback = callbacks.get(tool_name)
-                    if not callback:
+                    callback = wrapped_callbacks.get(tool_name, callbacks.get(tool_name, lambda **kw: "Tool not found"))
+
+                    if tool_name not in callbacks:
                         log.warning("No callback found for tool %s", tool_name)
-                        tool_result = f"Error: Tool '{tool_name}' not found"
-                    else:
-                        # Execute callback
-                        try:
-                            result = (
-                                await callback(**tool_args)
-                                if asyncio.iscoroutinefunction(callback)
-                                else callback(**tool_args)
-                            )
-                            # Convert result to string for conversation storage
-                            tool_result = str(result)
-                        except Exception as e:
-                            log.error("Tool %s execution failed: %s", tool_name, e)
-                            tool_result = f"Error executing {tool_name}: {str(e)}"
+
+                    # Execute callback
+                    try:
+                        result = (
+                            await callback(**tool_args)
+                            if asyncio.iscoroutinefunction(callback)
+                            else callback(**tool_args)
+                        )
+                        # Convert result to string for conversation storage
+                        tool_result = str(result)
+                    except Exception as e:
+                        log.error("Tool %s execution failed: %s", tool_name, e)
+                        tool_result = f"Error executing {tool_name}: {str(e)}"
 
                     # Append ToolMessage
                     async with lock:

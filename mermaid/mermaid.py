@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import logging
 from importlib import import_module
 from io import BytesIO
@@ -233,11 +232,10 @@ class mermaid(commands.Cog):
         schema = {
             "name": "generate_mermaid",
             "description": (
-                "Generate and render Mermaid diagrams from natural language descriptions. "
-                "Returns JSON with 'syntax' (Mermaid code for reference) and 'image_data_uri' "
-                "(base64-encoded PNG for automatic display). Supports flowcharts, sequence diagrams, "
-                "class diagrams, state diagrams, and more. Use this when the user asks to create, "
-                "visualize, or diagram something."
+                "Use LLM to generate Mermaid diagrams from natural language. "
+                "Automatically uploads PNG image to Discord channel and injects syntax into conversation for reference. "
+                "Ideal for sequence diagrams, flowcharts, class diagrams, state diagrams, and more. "
+                "Use this when the user asks to create, visualize, or diagram something."
             ),
             "parameters": {
                 "type": "object",
@@ -400,70 +398,51 @@ class mermaid(commands.Cog):
         self.logger.debug("Successfully rendered Mermaid diagram to PNG")
         return discord.File(fp=png_bytes, filename="mermaid.png")
 
-    async def generate_mermaid(self, description: str, diagram_type: str = "flowchart") -> dict:
-        """Generate Mermaid diagram syntax and a rendered PNG for automatic display.
+    async def generate_mermaid(
+        self,
+        description: str,
+        diagram_type: str = "flowchart",
+        guild_id: Optional[int] = None,
+        channel_id: Optional[int] = None,
+        member_id: Optional[int] = None,
+    ) -> str:
+        """Generate a Mermaid diagram via the MermaidManager sub-agent and upload it."""
+        if guild_id is None or channel_id is None or member_id is None:
+            return "Missing context parameters (guild_id, channel_id, member_id). Cannot generate diagram."
 
-        This function is called by the AI agent when it needs to create a diagram.
-        It returns JSON containing the Mermaid syntax (for conversation storage) and
-        a base64-encoded PNG data URI for automatic rendering.
-
-        Args:
-            description: Natural language description of what to diagram
-            diagram_type: Type of diagram (flowchart, sequence, class, state, graph)
-
-        Returns:
-            dict: JSON with 'syntax' (Mermaid code) and 'image_data_uri' (base64 PNG data URI)
-        """
-        # Map diagram types to Mermaid syntax prefixes
-        type_mapping = {
-            "flowchart": "flowchart TD",
-            "sequence": "sequenceDiagram",
-            "class": "classDiagram",
-            "state": "stateDiagram-v2",
-            "graph": "graph TD",
-        }
-
-        diagram_prefix = type_mapping.get(diagram_type, "flowchart TD")
-
-        # For now, create a simple template-based diagram
-        # In the future, this could use an LLM to generate more sophisticated diagrams
-        if diagram_type == "sequence":
-            syntax = f"""{diagram_prefix}
-participant User
-participant System
-User->>System: {description}
-System-->>User: Response"""
-        elif diagram_type == "class":
-            syntax = f"""{diagram_prefix}
-class Entity {{
-    +description: {description}
-}}"""
-        elif diagram_type == "state":
-            syntax = f"""{diagram_prefix}
-[*] --> State1
-State1 --> [*]: {description}"""
-        else:  # flowchart or graph
-            # Create a simple flowchart
-            lines = description.split(".")
-            syntax = f"{diagram_prefix}\n"
-            for i, line in enumerate(lines[:5]):  # Limit to 5 steps
-                if line.strip():
-                    node_id = f"Step{i+1}"
-                    syntax += f"    {node_id}[{line.strip()}]\n"
-                    if i > 0:
-                        syntax += f"    Step{i} --> {node_id}\n"
-
-        self.logger.debug("Generated mermaid syntax for type %s: %s", diagram_type, syntax[:100])
         try:
-            rendered_html = self._render_mermaid_html(syntax)
-            png_bytes = await self._render_mermaid_png(rendered_html)
-            b64 = base64.b64encode(png_bytes.getvalue()).decode()
-            data_uri = f"data:image/png;base64,{b64}"
-            self.logger.debug("Generated and rendered mermaid diagram")
-            return {"syntax": syntax, "image_data_uri": data_uri}
-        except Exception as exc:
-            self.logger.error("Failed to render Mermaid diagram: %s", exc)
-            return {"syntax": syntax, "error": "Rendering failed"}
+            syntax, file = await self.manager.create_diagram(description, diagram_type, guild_id)
+        except Exception as e:
+            self.logger.error("MermaidManager failed to create diagram: %s", e)
+            return f"Failed to generate diagram: {str(e)}"
+
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
+            return f"Guild {guild_id} not found. Cannot upload diagram."
+
+        channel = guild.get_channel(channel_id)
+        if not channel:
+            return f"Channel {channel_id} not found in guild {guild.name}. Cannot upload diagram."
+
+        try:
+            msg = await channel.send("Here's your Mermaid diagram:", file=file)
+        except discord.HTTPException as e:
+            self.logger.error("Failed to upload diagram to channel %s: %s", channel_id, e)
+            return f"Failed to upload diagram: {str(e)}"
+
+        langcore_cog = self.bot.get_cog("langcore")
+        if not langcore_cog:
+            self.logger.warning("langcore cog not found, cannot inject syntax into conversation")
+            return f"✅ Diagram uploaded: {msg.jump_url} (Warning: syntax not added to conversation context)"
+
+        conv_manager = langcore_cog.conversation_manager
+        conversation = conv_manager.get_conversation(member_id, channel_id, guild_id)
+        lock = conv_manager.get_conversation_lock(member_id, channel_id, guild_id)
+
+        async with lock:
+            conversation.add_assistant_message(f"```mermaid\n{syntax}\n```")
+
+        return f"✅ Diagram uploaded: {msg.jump_url}\nMermaid syntax added to conversation context."
 
     async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
         # TODO: Replace this with the proper end user data removal handling.
