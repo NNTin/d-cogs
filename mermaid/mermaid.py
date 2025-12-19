@@ -3,10 +3,11 @@ import base64
 import logging
 from io import BytesIO
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, Tuple
 
 import discord
 from jinja2 import Environment, FileSystemLoader, TemplateError, select_autoescape
+from langchain_core.messages import convert_to_messages
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
 from redbot.core import commands
@@ -14,6 +15,117 @@ from redbot.core.bot import Red
 from redbot.core.config import Config
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
+
+
+class MermaidManager:
+    """Sub-agent responsible for generating and repairing Mermaid syntax."""
+
+    SYNTAX_GENERATION_PROMPT = (
+        "You are a Mermaid diagram syntax expert. Generate ONLY valid Mermaid syntax based on the user's description.\n\n"
+        "Rules:\n"
+        "- Return ONLY the mermaid syntax, no explanations or markdown code blocks\n"
+        "- Use the specified diagram type: {diagram_type}\n"
+        "- Follow Mermaid.js syntax strictly\n"
+        "- For sequence diagrams: use participant declarations and proper arrow syntax\n"
+        "- For flowcharts: use proper node shapes and connection syntax\n"
+        "- For class diagrams: use proper class declaration and relationship syntax\n"
+        "- For state diagrams: use stateDiagram-v2 syntax\n"
+        "- Ensure all node IDs are valid (no spaces, special characters)\n\n"
+        "User description: {description}\n"
+        "Diagram type: {diagram_type}\n\n"
+        "Generate the mermaid syntax now:"
+    )
+
+    ERROR_FIXING_PROMPT = (
+        "You are a Mermaid syntax debugger. The following Mermaid syntax produced a rendering error.\n\n"
+        "Original syntax:\n"
+        "{syntax}\n\n"
+        "Error context:\n"
+        "{error_message}\n\n"
+        "Fix the syntax and return ONLY the corrected Mermaid code. No explanations, no markdown blocks.\n"
+        "Common issues to check:\n"
+        "- Invalid node IDs (spaces, special characters)\n"
+        "- Missing semicolons or proper line breaks\n"
+        "- Incorrect arrow syntax\n"
+        "- Malformed participant/class/state declarations\n"
+        "- Unclosed quotes or brackets\n\n"
+        "Return the fixed syntax now:"
+    )
+
+    def __init__(self, mermaid_cog, langcore_cog) -> None:
+        self.mermaid_cog = mermaid_cog
+        self.langcore_cog = langcore_cog
+        self.logger = logging.getLogger("red.d_cogs.mermaid.manager")
+        self.max_retries = 3
+
+    async def generate_syntax(self, description: str, diagram_type: str, guild_id: int) -> str:
+        """Generate Mermaid syntax using the LLM provider."""
+        try:
+            provider = self.langcore_cog.get_provider("ollama")
+            if not provider:
+                raise RuntimeError("MermaidManager could not find the ollama provider")
+
+            prompt = self.SYNTAX_GENERATION_PROMPT.format(description=description, diagram_type=diagram_type)
+            llm = await provider.get_chat_llm(guild_id=guild_id)
+            messages = convert_to_messages([{"role": "user", "content": prompt}])
+            response = await llm.ainvoke(messages)
+            syntax = str(response.content).strip()
+
+            if syntax.startswith("```"):
+                syntax = syntax.strip("`")
+                if syntax.lower().startswith("mermaid"):
+                    syntax = syntax[len("mermaid") :].strip()
+
+            self.logger.debug("Generated Mermaid syntax: %s", syntax[:100])
+            return syntax
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("LLM timeout during syntax generation") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Failed to generate syntax: {exc}") from exc
+
+    async def fix_syntax_error(self, syntax: str, error_message: str, guild_id: int) -> str:
+        """Attempt to fix Mermaid syntax using the LLM based on an error message."""
+        try:
+            provider = self.langcore_cog.get_provider("ollama")
+            if not provider:
+                raise RuntimeError("MermaidManager could not find the ollama provider")
+
+            prompt = self.ERROR_FIXING_PROMPT.format(syntax=syntax, error_message=error_message)
+            llm = await provider.get_chat_llm(guild_id=guild_id)
+            messages = convert_to_messages([{"role": "user", "content": prompt}])
+            response = await llm.ainvoke(messages)
+            fixed_syntax = str(response.content).strip()
+
+            if fixed_syntax.startswith("```"):
+                fixed_syntax = fixed_syntax.strip("`")
+                if fixed_syntax.lower().startswith("mermaid"):
+                    fixed_syntax = fixed_syntax[len("mermaid") :].strip()
+
+            self.logger.debug("Fixed Mermaid syntax: %s", fixed_syntax[:100])
+            return fixed_syntax
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("LLM timeout during syntax fixing") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fix syntax: {exc}") from exc
+
+    async def create_diagram(self, description: str, diagram_type: str, guild_id: int) -> Tuple[str, discord.File]:
+        """Generate, render, and repair Mermaid syntax with retries."""
+        syntax = await self.generate_syntax(description=description, diagram_type=diagram_type, guild_id=guild_id)
+
+        for attempt in range(self.max_retries):
+            try:
+                file = await self.mermaid_cog.render_mermaid_syntax(syntax)
+                return syntax, file
+            except ValueError:
+                raise
+            except TemplateError as exc:
+                self.logger.warning("Template error on attempt %s: %s", attempt + 1, exc)
+                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), guild_id=guild_id)
+            except RuntimeError as exc:
+                self.logger.warning("Rendering error on attempt %s: %s", attempt + 1, exc)
+                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), guild_id=guild_id)
+
+        raise RuntimeError(f"Failed to create diagram after {self.max_retries} attempts")
 
 
 class mermaid(commands.Cog):
@@ -30,6 +142,7 @@ class mermaid(commands.Cog):
             identifier=257263088,
             force_registration=True,
         )
+        self.manager: Optional[MermaidManager] = None
 
     async def cog_load(self) -> None:
         """Ensure Playwright is ready before the cog is used."""
@@ -42,6 +155,7 @@ class mermaid(commands.Cog):
 
         # ChainHub will automatically unregister via langcore's on_cog_remove listener
         self.logger.info("Mermaid cog unloaded")
+        self.manager = None
 
     @commands.Cog.listener()
     async def on_langcore_cog_add(self, langcore_cog):
@@ -89,6 +203,9 @@ class mermaid(commands.Cog):
             self.logger.info("Registered generate_mermaid tool with ChainHub")
         else:
             self.logger.warning("Failed to register generate_mermaid tool with ChainHub")
+
+        self.manager = MermaidManager(mermaid_cog=self, langcore_cog=langcore_cog)
+        self.logger.info("MermaidManager initialized as sub-agent")
 
     async def _ensure_playwright_installed(self) -> None:
         """Install Playwright browsers so rendering works out of the box."""
