@@ -958,6 +958,64 @@ class langcore(commands.Cog):
         if not should_respond:
             return
 
+        provider = self.get_provider("ollama")
+        if not provider:
+            await message.reply("No AI provider is available. Please load the ollama cog.")
+            return
+
+        # Classifier gatekeeper for assistant channel
+        if config.use_classifier and message.channel.id == config.channel_id:
+            log.debug(
+                "Classifier enabled for channel %d, invoking decision logic",
+                message.channel.id
+            )
+
+            decision = await self.classifier_manager.classify(
+                channel_id=message.channel.id,
+                message=message,
+                provider=provider,
+                config=config,
+                guild_id=guild.id,
+            )
+
+            if decision == "IGNORE":
+                log.debug(
+                    "Classifier decision: IGNORE (channel %d, author %s)",
+                    message.channel.id,
+                    message.author.name
+                )
+                return
+
+            elif decision == "END":
+                reset_count = self.conversation_manager.reset_channel_conversations(
+                    channel_id=message.channel.id,
+                    guild_id=guild.id,
+                )
+                self.classifier_manager.clear_buffer(message.channel.id)
+                log.info(
+                    "Classifier decision: END (channel %d, reset %d conversations, cleared buffer)",
+                    message.channel.id,
+                    reset_count
+                )
+                return
+
+            elif decision == "RESPOND":
+                # Inject buffer context into message content
+                buffer = self.classifier_manager.get_buffer(message.channel.id)
+                if buffer and len(buffer) > 1:  # More than just current message
+                    buffer_context = self.classifier_manager._format_buffer_context(buffer)
+                    content = f"[Recent conversation context:\n{buffer_context}]\n\nCurrent message: {content}"
+                    log.debug(
+                        "Classifier decision: RESPOND (channel %d, injected %d buffered messages)",
+                        message.channel.id,
+                        len(buffer) - 1  # Exclude current message
+                    )
+                else:
+                    log.debug(
+                        "Classifier decision: RESPOND (channel %d, no buffer context to inject)",
+                        message.channel.id
+                    )
+
         conversation = self.conversation_manager.get_conversation(
             message.author.id,
             message.channel.id,
@@ -969,11 +1027,6 @@ class langcore(commands.Cog):
         conversation.cleanup(max_retention, max_retention_time)
         conversation.update_messages(content, "user")
         conversation.cleanup(max_retention, max_retention_time)
-
-        provider = self.get_provider("ollama")
-        if not provider:
-            await message.reply("No AI provider is available. Please load the ollama cog.")
-            return
 
         functions, callbacks = await self.hub.get_functions(
             guild_id=guild.id,
