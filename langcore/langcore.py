@@ -1026,6 +1026,7 @@ class langcore(commands.Cog):
         cog_name = cog.qualified_name
         self.unregister_provider(cog_name)
         self.hub.unregister_cog(cog_name)
+        self.conversation_manager.unregister_cog_system_prompt(cog_name)
         self.unregister_message_handler(cog_name)
         if isinstance(cog, ChainStore):
             self.unregister_chain_store()

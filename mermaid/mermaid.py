@@ -291,6 +291,12 @@ class mermaid(commands.Cog):
         await super().cog_unload()
 
         # ChainHub will automatically unregister via langcore's on_cog_remove listener
+        langcore_cog = self.bot.get_cog("langcore")
+        if getattr(langcore_cog, "conversation_manager", None):
+            try:
+                langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
+            except Exception as exc:
+                self.logger.debug("Failed to unregister Mermaid system prompt on unload: %s", exc)
         self.logger.info("Mermaid cog unloaded")
         self.manager = None
         self.message_handler = None
@@ -341,6 +347,17 @@ class mermaid(commands.Cog):
         else:
             self.logger.warning("Failed to register generate_mermaid tool with ChainHub")
 
+        if hasattr(langcore_cog, "conversation_manager"):
+            prompt = (
+                "You can render diagrams by calling the `generate_mermaid` tool. "
+                "Use it when the user asks to visualize, draw a flow/sequence/state/class/graph, or requests a chart or diagram."
+            )
+            try:
+                langcore_cog.conversation_manager.register_cog_system_prompt(self.qualified_name, prompt)
+                self.logger.info("Registered Mermaid system prompt with conversation manager")
+            except Exception as exc:
+                self.logger.warning("Failed to register Mermaid system prompt: %s", exc)
+
         self.manager = MermaidManager(mermaid_cog=self, langcore_cog=langcore_cog)
         self.logger.info("MermaidManager initialized as sub-agent")
 
@@ -349,6 +366,17 @@ class mermaid(commands.Cog):
             self.logger.info("Registered MermaidMessageHandler with langcore")
         else:
             self.logger.warning("Failed to register MermaidMessageHandler with langcore")
+
+    @commands.Cog.listener()
+    async def on_langcore_cog_remove(self, langcore_cog=None):
+        """Ensure the system prompt is removed when langcore unloads."""
+        langcore_cog = langcore_cog or self.bot.get_cog("langcore")
+        if getattr(langcore_cog, "conversation_manager", None):
+            try:
+                langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
+                self.logger.info("Unregistered Mermaid system prompt after langcore removal")
+            except Exception as exc:
+                self.logger.debug("Failed to unregister Mermaid system prompt after langcore removal: %s", exc)
 
     async def _ensure_playwright_installed(self) -> None:
         """Install Playwright browsers so rendering works out of the box."""

@@ -62,6 +62,17 @@ class spoilarr(commands.Cog):
         except Exception as exc:  # pragma: no cover - logging only
             self.logger.error("Failed to register spoilarr tool %s: %s", schema["name"], exc)
 
+        if hasattr(langcore_cog, "conversation_manager"):
+            prompt = (
+                "Handle movie and TV questions by calling the `query_spoilarr` tool. "
+                "Stick strictly to Spoilarr-provided data as the source of truth; do not add plot details or facts unless the tool returned them."
+            )
+            try:
+                langcore_cog.conversation_manager.register_cog_system_prompt(self.qualified_name, prompt)
+                self.logger.info("Registered Spoilarr system prompt with conversation manager")
+            except Exception as exc:
+                self.logger.warning("Failed to register Spoilarr system prompt: %s", exc)
+
         self.manager = SpoilarrManager(self, langcore_cog)
 
     async def _ensure_context(self, guild_id: Optional[int]) -> bool:
@@ -188,8 +199,25 @@ class spoilarr(commands.Cog):
 
     async def cog_unload(self) -> None:
         await super().cog_unload()
+        langcore_cog = self.bot.get_cog("langcore")
+        if getattr(langcore_cog, "conversation_manager", None):
+            try:
+                langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
+            except Exception as exc:
+                self.logger.debug("Failed to unregister Spoilarr system prompt on unload: %s", exc)
         self._client_cache.clear()
         self.logger.info("Spoilarr cog unloaded")
+
+    @commands.Cog.listener()
+    async def on_langcore_cog_remove(self, langcore_cog=None) -> None:
+        """Remove the Spoilarr system prompt if langcore unloads."""
+        langcore_cog = langcore_cog or self.bot.get_cog("langcore")
+        if getattr(langcore_cog, "conversation_manager", None):
+            try:
+                langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
+                self.logger.info("Unregistered Spoilarr system prompt after langcore removal")
+            except Exception as exc:
+                self.logger.debug("Failed to unregister Spoilarr system prompt after langcore removal: %s", exc)
 
     async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
         """Handle user data deletion requests (GDPR compliance)."""
