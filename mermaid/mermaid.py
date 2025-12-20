@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import logging
 from importlib import import_module
 from io import BytesIO
@@ -99,6 +100,17 @@ class MermaidManager:
                 fixed_syntax = fixed_syntax.strip("`")
                 if fixed_syntax.lower().startswith("mermaid"):
                     fixed_syntax = fixed_syntax[len("mermaid") :].strip()
+
+            diff_lines = list(
+                difflib.unified_diff(
+                    syntax.splitlines(keepends=True),
+                    fixed_syntax.splitlines(keepends=True),
+                    fromfile="original",
+                    tofile="fixed",
+                )
+            )
+            if diff_lines:
+                self.logger.warning("Mermaid syntax auto-fixed:\n%s", "".join(diff_lines))
 
             self.logger.debug("Fixed Mermaid syntax: %s", fixed_syntax[:100])
             return fixed_syntax
