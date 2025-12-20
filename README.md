@@ -22,6 +22,7 @@ graph TD
         ClassifierManager
         ChainStore[ChainStore Abstraction]
         ChainProvider[ChainProvider Abstraction]
+        MessageHandler[MessageHandler Abstraction]
     end
 
     subgraph ConversationManager[ConversationManager: main agent]
@@ -40,8 +41,10 @@ graph TD
     %% ChainHub cogs
     subgraph ChainHubCogs[ExtensionCogs for tools/functions]
         subgraph SpoilarrCogSub[SpoilarrCog: spoilarr]
+            SpoilarrAgent[SpoilarrManager: sub agent]
             Spoilarr[spoilarr]
-            SpoilarrNote[Note: only does API calls]
+            CPSpInstance[langcore.get_provider]
+            CSSpInstance[langcore.get_store]
         end
 
         
@@ -59,6 +62,7 @@ graph TD
         subgraph MermaidCogSub[MermaidCog: mermaid]
             MermaidAgent[MermaidManager: sub agent]
             Mermaid[mermaid]
+            MermaidMessageHandler[MessageHandler: send image as sub agent]
             CPMeInstance[langcore.get_provider]
         end
 
@@ -88,8 +92,9 @@ graph TD
     %% Connections
     LangCore -->|implements abstraction| ChainStore
     LangCore -->|implements abstraction| ChainProvider
-    ChainProvider -->|implemented by| ProviderCog
-    ChainStore -->|implemented by| StorageCog
+    LangCore -->|implements abstraction| MessageHandler
+    ChainProvider -->|1:n implemented by| ProviderCog
+    ChainStore -->|0:1 implemented by| StorageCog
 
     subgraph ChainHubManager
         hub.py
@@ -105,12 +110,14 @@ graph TD
     classDef chainStore fill:#B7F7D8,stroke:#047857,stroke-width:2.5px,color:#064E3B;
     classDef chainProvider fill:#C7D2FE,stroke:#3730A3,stroke-width:2.5px,color:#1E1B4B;
     classDef agent fill:#FED7AA,stroke:#C2410C,stroke-width:4px,color:#431407;
+    classDef messageHandler fill:#FEE2E2,stroke:#F87171,stroke-width:2px,color:#7F1D1D;
 
     %% Apply styles
     class langchainModule,langchainModule2,langchainModule3,ollamaModule,qdrantModule PyPI;
-    class ChainStore,CSMInstance,CSAIInstance chainStore;
-    class ChainProvider,CPMeInstance,CPCInstance,CPEmInstance,CPClInstance,CPAIInstance chainProvider;
-    class ConversationManager,ClassifierManager,MermaidAgent,AiDefenderAgent agent;
+    class ChainStore,CSMInstance,CSAIInstance,CSSpInstance chainStore;
+    class ChainProvider,CPMeInstance,CPCInstance,CPEmInstance,CPClInstance,CPAIInstance,CPSpInstance chainProvider;
+    class ConversationManager,ClassifierManager,MermaidAgent,AiDefenderAgent,SpoilarrAgent agent;
+    class MessageHandler,MermaidMessageHandler messageHandler;
 ```
 
 Note: ConversationManager is growing in complexity. In future worth abstracting it so the ConversationManager can be overwritten by other cogs. Same goes for ClassifierManager.

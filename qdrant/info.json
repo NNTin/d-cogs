@@ -2,14 +2,16 @@
     "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog.schema.json",
     "name": "qdrant",
     "short": "implements the ChainStore abstraction from langcore",
-    "description": "Provides persistent vector storage for embeddings using qdrant.",
-    "end_user_data_statement": "Work in Progress",
-    "install_msg": "Work in Progress",
+    "description": "Provides persistent vector storage for embeddings using qdrant as a ChainStore backend.",
+    "end_user_data_statement": "This cog stores vector embeddings in Qdrant for RAG and semantic search. Data is scoped per guild and collection.",
+    "install_msg": "Configure Qdrant endpoint via [p]qdrant endpoint <url>. Requires qdrant-client: pip install qdrant-client",
     "author": [
         "Tin Nguyen"
     ],
     "required_cogs": {},
-    "requirements": [],
+    "requirements": [
+        "qdrant-client"
+    ],
     "tags": [
         "vectordb",
         "vector",

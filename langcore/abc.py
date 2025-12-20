@@ -105,12 +105,18 @@ class ChainProvider(ABC):
 
 
 class ChainStore(ABC):
-    """Interface for vector storage backends (e.g., Qdrant)."""
+    """Interface for vector storage backends (e.g., Qdrant).
+
+    Implementations may optionally provide a retrieve_texts(guild, collection, query_text,
+    top_n, min_score, provider) convenience method that combines embedding generation
+    with similarity search. See qdrant cog for reference implementation.
+    """
 
     @abstractmethod
     async def add_embedding(
         self,
         guild: discord.Guild,
+        collection: str,
         name: str,
         text: str,
         embedding: List[float],
@@ -120,6 +126,7 @@ class ChainStore(ABC):
 
         Args:
             guild: Guild context for multi-tenant storage isolation.
+            collection: Collection name for namespace isolation (typically cog name).
             name: Unique identifier for the embedding entry.
             text: Original text content associated with the embedding.
             embedding: Vector representation of the text.
@@ -135,6 +142,7 @@ class ChainStore(ABC):
     async def query(
         self,
         guild: discord.Guild,
+        collection: str,
         query_embedding: List[float],
         top_n: int = 3,
         min_score: Optional[float] = None,
@@ -143,11 +151,12 @@ class ChainStore(ABC):
 
         Args:
             guild: Guild context for multi-tenant storage isolation.
+            collection: Collection name for namespace isolation (typically cog name).
             query_embedding: Vector representation to compare against stored embeddings.
             top_n: Maximum number of results to return.
             min_score: Optional minimum similarity score threshold for filtering.
         Returns:
-            List of result dictionaries containing name, text, score, dimensions, and metadata keys.
+            List of collection-scoped result dictionaries containing name, text, score, dimensions, and metadata keys.
         Raises:
             NotImplementedError: If the store does not implement this interface.
         """

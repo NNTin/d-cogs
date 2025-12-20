@@ -13,7 +13,7 @@ from redbot.core.bot import Red
 from redbot.core.config import Config
 from redbot.core.utils.chat_formatting import pagify, text_to_file
 
-from .abc import ChainProvider, MessageHandler
+from .abc import ChainProvider, ChainStore, MessageHandler
 from .classifier import ClassifierManager
 from .conversation import ConversationManager
 from .hub import ChainHub
@@ -57,6 +57,7 @@ class langcore(commands.Cog):
         self.hub = ChainHub(self.bot)
         self.providers: Dict[str, ChainProvider] = {}
         self.message_handlers: Dict[str, MessageHandler] = {}
+        self.chain_store: Optional[ChainStore] = None
 
     def register_provider(self, name: str, provider: ChainProvider) -> bool:
         """Register a ChainProvider implementation.
@@ -179,6 +180,40 @@ class langcore(commands.Cog):
         """
         return self.message_handlers.copy()
 
+    def register_chain_store(self, store: ChainStore) -> bool:
+        """Register a ChainStore implementation."""
+        if not isinstance(store, ChainStore):
+            log.warning("Chain store registration failed: not a ChainStore instance")
+            return False
+
+        if self.chain_store is store:
+            log.debug("Chain store already registered with same instance; skipping")
+            return True
+
+        if self.chain_store is not None:
+            log.warning("Chain store already registered, overwriting existing store")
+
+        self.chain_store = store
+        log.info("Registered chain store: %s", type(store).__name__)
+        return True
+
+    def unregister_chain_store(self) -> None:
+        """Unregister the current ChainStore implementation."""
+        if self.chain_store is None:
+            log.debug("No chain store registered; skipping unregister")
+            return
+
+        log.info("Unregistered chain store: %s", type(self.chain_store).__name__)
+        self.chain_store = None
+
+    def get_store(self) -> ChainStore:
+        """Get the registered ChainStore or raise if missing."""
+        if self.chain_store is None:
+            raise RuntimeError(
+                "No ChainStore registered. Load the qdrant cog or another store implementation."
+            )
+        return self.chain_store
+
     async def cog_load(self) -> None:
         """Initialize langcore and discover existing providers."""
         import asyncio
@@ -196,6 +231,9 @@ class langcore(commands.Cog):
             if isinstance(cog, ChainProvider):
                 self.register_provider(cog_name, cog)
                 log.info("Discovered provider: %s", cog_name)
+            if isinstance(cog, ChainStore):
+                self.register_chain_store(cog)
+                log.info("Discovered chain store: %s", cog_name)
         self.bot.dispatch("langcore_cog_add", self)
         log.info("LangCore initialized with %d providers", len(self.providers))
 
@@ -337,6 +375,29 @@ class langcore(commands.Cog):
                 value=f"Type: `{handler_type}`\nModule: `{handler.__module__}`",
                 inline=False,
             )
+
+        await ctx.send(embed=embed)
+
+    @langcore_config.command(name="store")
+    async def view_store(self, ctx: commands.Context):
+        """Show the registered ChainStore implementation."""
+        if self.chain_store is None:
+            await ctx.send("No chain store registered.")
+            return
+
+        store = self.chain_store
+        embed = discord.Embed(
+            title="Registered Chain Store",
+            color=discord.Color.orange(),
+        )
+        embed.add_field(
+            name=type(store).__name__,
+            value=(
+                f"Module: `{store.__module__}`\n"
+                f"Cog: `{store.qualified_name if hasattr(store, 'qualified_name') else 'N/A'}`"
+            ),
+            inline=False,
+        )
 
         await ctx.send(embed=embed)
 
@@ -966,6 +1027,8 @@ class langcore(commands.Cog):
         self.unregister_provider(cog_name)
         self.hub.unregister_cog(cog_name)
         self.unregister_message_handler(cog_name)
+        if isinstance(cog, ChainStore):
+            self.unregister_chain_store()
 
     async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
         # TODO: Replace this with the proper end user data removal handling.
