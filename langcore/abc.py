@@ -107,9 +107,8 @@ class ChainProvider(ABC):
 class ChainStore(ABC):
     """Interface for vector storage backends (e.g., Qdrant).
 
-    Implementations may optionally provide a retrieve_texts(guild, collection, query_text,
-    top_n, min_score, provider) convenience method that combines embedding generation
-    with similarity search. See qdrant cog for reference implementation.
+    Implementations support embedding storage plus convenience retrieval that pairs
+    embedding generation with similarity search. See qdrant cog for reference implementation.
     """
 
     @abstractmethod
@@ -139,6 +138,26 @@ class ChainStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def delete_embeddings(
+        self,
+        guild: discord.Guild,
+        collection: str,
+        names: List[str],
+    ) -> int:
+        """Delete stored embeddings by exact name match within a guild collection.
+
+        Args:
+            guild: Guild context for multi-tenant storage isolation.
+            collection: Collection name (typically the cog name or user-specific namespace).
+            names: List of embedding record names to delete. Names must match the stored payload name exactly.
+        Returns:
+            Count of embeddings deleted (may be 0 if none matched or collection missing).
+        Raises:
+            NotImplementedError: If the store does not implement this interface.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def query(
         self,
         guild: discord.Guild,
@@ -159,6 +178,33 @@ class ChainStore(ABC):
             List of collection-scoped result dictionaries containing name, text, score, dimensions, and metadata keys.
         Raises:
             NotImplementedError: If the store does not implement this interface.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def retrieve_texts(
+        self,
+        guild: discord.Guild,
+        collection: str,
+        query_text: str,
+        top_n: int = 3,
+        min_score: Optional[float] = None,
+        provider: Any = None,
+    ) -> List[Dict[str, Any]]:
+        """Embed query_text using the provider then search the collection for similar entries.
+
+        Args:
+            guild: Guild context for multi-tenant isolation.
+            collection: Collection name (often the cog or user-specific namespace).
+            query_text: Natural language text to embed and search against stored entries.
+            top_n: Maximum number of results to return (default 3).
+            min_score: Optional minimum similarity score threshold to filter results.
+            provider: ChainProvider instance used to generate the query embedding.
+        Returns:
+            List of result dicts with keys name, text, score, metadata, and dimensions.
+        Raises:
+            NotImplementedError: If the store does not implement this interface.
+            RuntimeError: Implementations may raise if provider is missing or embedding fails.
         """
         raise NotImplementedError
 

@@ -58,7 +58,13 @@ class MermaidManager:
         self.logger = logging.getLogger("red.d_cogs.mermaid.manager")
         self.max_retries = 3
 
-    async def generate_syntax(self, description: str, diagram_type: str, guild_id: int) -> str:
+    async def generate_syntax(
+        self,
+        description: str,
+        diagram_type: str,
+        guild_id: int,
+        base_syntax: Optional[str] = None,
+    ) -> str:
         """Generate Mermaid syntax using the LLM provider."""
         try:
             provider = self.langcore_cog.get_provider("ollama")
@@ -66,6 +72,11 @@ class MermaidManager:
                 raise RuntimeError("MermaidManager could not find the ollama provider")
 
             prompt = self.SYNTAX_GENERATION_PROMPT.format(description=description, diagram_type=diagram_type)
+            if base_syntax:
+                prompt += (
+                    f"\n\n**EDIT MODE** Previous diagram:\n\n```mermaid\n{base_syntax}\n```\n\n"
+                    f"User request: {description}"
+                )
             llm = await provider.get_chat_llm(guild_id=guild_id)
             messages = convert_to_messages([{"role": "user", "content": prompt}])
             response = await llm.ainvoke(messages)
@@ -119,22 +130,54 @@ class MermaidManager:
         except Exception as exc:
             raise RuntimeError(f"Failed to fix syntax: {exc}") from exc
 
-    async def create_diagram(self, description: str, diagram_type: str, guild_id: int) -> Tuple[str, discord.File]:
+    async def create_diagram(
+        self,
+        description: str,
+        diagram_type: str,
+        guild: discord.Guild,
+        member_id: int,
+    ) -> Tuple[str, discord.File]:
         """Generate, render, and repair Mermaid syntax with retries."""
-        syntax = await self.generate_syntax(description=description, diagram_type=diagram_type, guild_id=guild_id)
+        provider = self.langcore_cog.get_provider("ollama")
+        store = self.langcore_cog.get_store()
+        if not provider or not store:
+            raise RuntimeError("MermaidManager could not find langcore provider or store")
+
+        coll = f"mermaid_{member_id}"
+        results = await store.retrieve_texts(
+            guild,
+            coll,
+            description,
+            top_n=1,
+            min_score=0.75,
+            provider=provider,
+        )
+        base_syntax = results[0]["text"] if results else None
+
+        syntax = await self.generate_syntax(
+            description=description,
+            diagram_type=diagram_type,
+            guild_id=guild.id,
+            base_syntax=base_syntax,
+        )
 
         for attempt in range(self.max_retries):
             try:
                 file = await self.mermaid_cog.render_mermaid_syntax(syntax)
+                name = f"{diagram_type}_{description.replace(' ', '_').replace('/', '_')[:80]}"
+                full_text = f"{description} {syntax}"
+                embedding = await provider.embed(full_text, guild)
+                metadata = {"diagram_type": diagram_type, "description": description}
+                await store.add_embedding(guild, coll, name, syntax, embedding, metadata)
                 return syntax, file
             except ValueError:
                 raise
             except TemplateError as exc:
                 self.logger.warning("Template error on attempt %s: %s", attempt + 1, exc)
-                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), guild_id=guild_id)
+                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), guild_id=guild.id)
             except RuntimeError as exc:
                 self.logger.warning("Rendering error on attempt %s: %s", attempt + 1, exc)
-                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), guild_id=guild_id)
+                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), guild_id=guild.id)
 
         raise RuntimeError(f"Failed to create diagram after {self.max_retries} attempts")
 
@@ -425,19 +468,24 @@ class mermaid(commands.Cog):
         if guild_id is None or channel_id is None or member_id is None:
             return "Missing context parameters (guild_id, channel_id, member_id). Cannot generate diagram."
 
+        guild_obj = self.bot.get_guild(guild_id)
+        if not guild_obj:
+            return f"Guild {guild_id} not found. Cannot upload diagram."
+
         try:
-            syntax, file = await self.manager.create_diagram(description, diagram_type, guild_id)
+            syntax, file = await self.manager.create_diagram(
+                description=description,
+                diagram_type=diagram_type,
+                guild=guild_obj,
+                member_id=member_id,
+            )
         except Exception as e:
             self.logger.error("MermaidManager failed to create diagram: %s", e)
             return f"Failed to generate diagram: {str(e)}"
 
-        guild = self.bot.get_guild(guild_id)
-        if not guild:
-            return f"Guild {guild_id} not found. Cannot upload diagram."
-
-        channel = guild.get_channel(channel_id)
+        channel = guild_obj.get_channel(channel_id)
         if not channel:
-            return f"Channel {channel_id} not found in guild {guild.name}. Cannot upload diagram."
+            return f"Channel {channel_id} not found in guild {guild_obj.name}. Cannot upload diagram."
 
         try:
             msg = await channel.send("Here's your Mermaid diagram:", file=file)
@@ -552,3 +600,84 @@ class mermaid(commands.Cog):
             await ctx.message.add_reaction("✅")
         except discord.HTTPException:
             pass
+
+    @commands.command(name="mdiagrams")
+    async def mdiagrams(self, ctx: commands.Context) -> None:
+        """List your stored Mermaid diagrams."""
+        langcore_cog = self.bot.get_cog("langcore")
+        if not langcore_cog:
+            await ctx.send("langcore cog is not available.")
+            return
+        try:
+            provider = langcore_cog.get_provider("ollama")
+            store = langcore_cog.get_store()
+        except Exception as exc:
+            await ctx.send(f"Unable to access vector store: {exc}")
+            return
+        if not provider or not store:
+            await ctx.send("Vector store or provider is unavailable.")
+            return
+
+        coll = f"mermaid_{ctx.author.id}"
+        try:
+            results = await store.retrieve_texts(ctx.guild, coll, "", top_n=10, provider=provider)
+        except Exception as exc:
+            await ctx.send(f"Failed to fetch diagrams: {exc}")
+            return
+
+        if not results:
+            await ctx.send("No diagrams found for you yet.")
+            return
+
+        lines = []
+        for r in results:
+            meta = r.get("metadata") or {}
+            description = str(meta.get("description", ""))[:50]
+            score = r.get("score") or 0.0
+            lines.append(f"**{r.get('name','unnamed')}** - {description} (score: {score:.2f})")
+
+        await ctx.send("\n".join(lines))
+
+    @commands.command(name="mdelete")
+    async def mdelete(self, ctx: commands.Context, *, query_desc: str) -> None:
+        """Delete a Mermaid diagram matching the given description."""
+        langcore_cog = self.bot.get_cog("langcore")
+        if not langcore_cog:
+            await ctx.send("langcore cog is not available.")
+            return
+        try:
+            provider = langcore_cog.get_provider("ollama")
+            store = langcore_cog.get_store()
+        except Exception as exc:
+            await ctx.send(f"Unable to access vector store: {exc}")
+            return
+        if not provider or not store:
+            await ctx.send("Vector store or provider is unavailable.")
+            return
+
+        coll = f"mermaid_{ctx.author.id}"
+        try:
+            results = await store.retrieve_texts(
+                ctx.guild,
+                coll,
+                query_desc,
+                top_n=1,
+                min_score=0.6,
+                provider=provider,
+            )
+        except Exception as exc:
+            await ctx.send(f"Failed to search diagrams: {exc}")
+            return
+
+        if not results:
+            await ctx.send("No matching diagram.")
+            return
+
+        name = results[0]["name"]
+        try:
+            deleted = await store.delete_embeddings(ctx.guild, coll, [name])
+        except Exception as exc:
+            await ctx.send(f"Failed to delete diagram: {exc}")
+            return
+
+        await ctx.send(f"✅ Deleted {deleted} matching '{query_desc}' ({name})")

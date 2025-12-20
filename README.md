@@ -44,7 +44,6 @@ graph TD
             SpoilarrAgent[SpoilarrManager: sub agent]
             Spoilarr[spoilarr]
             CPSpInstance[langcore.get_provider]
-            CSSpInstance[langcore.get_store]
         end
 
         
@@ -64,6 +63,7 @@ graph TD
             Mermaid[mermaid]
             MermaidMessageHandler[MessageHandler: send image as sub agent]
             CPMeInstance[langcore.get_provider]
+            CSMeInstance[langcore.get_store]
         end
 
         subgraph AiDefenderCogSub[AiDefenderCog: aidefender]
@@ -114,7 +114,7 @@ graph TD
 
     %% Apply styles
     class langchainModule,langchainModule2,langchainModule3,ollamaModule,qdrantModule PyPI;
-    class ChainStore,CSMInstance,CSAIInstance,CSSpInstance chainStore;
+    class ChainStore,CSMInstance,CSAIInstance,CSMeInstance chainStore;
     class ChainProvider,CPMeInstance,CPCInstance,CPEmInstance,CPClInstance,CPAIInstance,CPSpInstance chainProvider;
     class ConversationManager,ClassifierManager,MermaidAgent,AiDefenderAgent,SpoilarrAgent agent;
     class MessageHandler,MermaidMessageHandler messageHandler;

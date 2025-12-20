@@ -186,6 +186,29 @@ class qdrant(commands.Cog):
             log.error("Failed to upsert into collection %s: %s", collection_name, exc)
             return False
 
+    async def delete_embeddings(
+        self,
+        guild: discord.Guild,
+        collection: str,
+        names: List[str],
+    ) -> int:
+        coll_name = self._collection_name(guild, collection)
+        try:
+            client = await self._get_client()
+            if not client.collection_exists(coll_name):
+                return 0
+            filter = qmodels.Filter(
+                must=[qmodels.FieldCondition(key="name", match=qmodels.MatchAny(any=names))]
+            )
+            scroll_res = client.scroll(collection_name=coll_name, scroll_filter=filter, limit=1000)
+            ids = [str(p.id) for p in scroll_res.points]
+            if ids:
+                client.delete_batch(collection_name=coll_name, ids=ids)
+            return len(ids)
+        except Exception as exc:
+            log.error("Failed to delete embeddings from %s: %s", coll_name, exc)
+            return 0
+
     async def query(
         self,
         guild: discord.Guild,
@@ -355,6 +378,18 @@ class qdrant(commands.Cog):
                     text=text,
                     embedding=embedding,
                     metadata=metadata,
+                )
+
+            async def delete_embeddings(
+                self,
+                guild: discord.Guild,
+                collection: str,
+                names: List[str],
+            ) -> int:
+                return await cog.delete_embeddings(
+                    guild=guild,
+                    collection=collection,
+                    names=names,
                 )
 
             async def query(
