@@ -6,7 +6,6 @@ import discord
 from redbot.core import Config, commands
 from redbot.core.bot import Red
 
-from langcore.models import Conversation
 from .client import TMDbClient
 from .manager import SpoilarrManager
 from .types import RequestType
@@ -137,7 +136,11 @@ class spoilarr(commands.Cog):
         conversation = conv_manager.get_conversation(member_id, channel_id, guild_id)
         lock = conv_manager.get_conversation_lock(member_id, channel_id, guild_id)
         async with lock:
-            conversation.add_assistant_message(toon_str)
+            conversation.add_tool_message(
+                content=toon_str,
+                tool_call_id="spoilarr_query",
+                name="query_spoilarr",
+            )
 
         await self._handle_spoiler_instruction(member_id, channel_id, guild_id, settings["spoiler_mode"])
 

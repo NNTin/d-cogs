@@ -4,8 +4,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 import toon_format
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage, convert_to_messages
-
-from langcore.models import Conversation
 from . import internal_tools
 from .prompts import SYSTEM_PROMPT
 
@@ -220,9 +218,12 @@ class SpoilarrManager:
 
         llm = await provider.get_chat_llm(guild_id=guild_id)
 
-        conversation = Conversation()
-        conversation.add_assistant_message(SYSTEM_PROMPT)
-        conversation.update_messages(query, role="user")
+        # maintaining own message list to track tool calls and responses
+        # in future worth abstracting to a Conversation class so other ExtensionCogs can reuse
+        messages_dict: List[Dict[str, Any]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": query},
+        ]
 
         def _is_json_like(content: Any) -> bool:
             if isinstance(content, (dict, list)):
@@ -233,7 +234,7 @@ class SpoilarrManager:
             return False
 
         try:
-            messages = convert_to_messages(conversation.messages)
+            messages = convert_to_messages(messages_dict)
             callbacks = self._build_callbacks(guild_id)
             max_iterations = 10
             iteration = 0
