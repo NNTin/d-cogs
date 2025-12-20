@@ -139,20 +139,31 @@ class MermaidManager:
     ) -> Tuple[str, discord.File]:
         """Generate, render, and repair Mermaid syntax with retries."""
         provider = self.langcore_cog.get_provider("ollama")
-        store = self.langcore_cog.get_store()
-        if not provider or not store:
-            raise RuntimeError("MermaidManager could not find langcore provider or store")
+        if not provider:
+            raise RuntimeError("MermaidManager could not find the ollama provider")
+
+        store = None
+        try:
+            store = self.langcore_cog.get_store()
+        except Exception as exc:
+            self.logger.debug("No ChainStore available, proceeding without persistence: %s", exc)
 
         coll = f"mermaid_{member_id}"
-        results = await store.retrieve_texts(
-            guild,
-            coll,
-            description,
-            top_n=1,
-            min_score=0.75,
-            provider=provider,
-        )
-        base_syntax = results[0]["text"] if results else None
+        base_syntax = None
+        if store:
+            try:
+                results = await store.retrieve_texts(
+                    guild,
+                    coll,
+                    description,
+                    top_n=1,
+                    min_score=0.75,
+                    provider=provider,
+                )
+                base_syntax = results[0]["text"] if results else None
+            except NotImplementedError:
+                self.logger.debug("ChainStore.retrieve_texts not implemented; skipping context retrieval")
+                base_syntax = None
 
         syntax = await self.generate_syntax(
             description=description,
@@ -164,11 +175,15 @@ class MermaidManager:
         for attempt in range(self.max_retries):
             try:
                 file = await self.mermaid_cog.render_mermaid_syntax(syntax)
-                name = f"{diagram_type}_{description.replace(' ', '_').replace('/', '_')[:80]}"
-                full_text = f"{description} {syntax}"
-                embedding = await provider.embed(full_text, guild)
-                metadata = {"diagram_type": diagram_type, "description": description}
-                await store.add_embedding(guild, coll, name, syntax, embedding, metadata)
+                if store:
+                    try:
+                        name = f"{diagram_type}_{description.replace(' ', '_').replace('/', '_')[:80]}"
+                        full_text = f"{description} {syntax}"
+                        embedding = await provider.embed(full_text, guild)
+                        metadata = {"diagram_type": diagram_type, "description": description}
+                        await store.add_embedding(guild, coll, name, syntax, embedding, metadata)
+                    except NotImplementedError:
+                        self.logger.debug("ChainStore.add_embedding not implemented; skipping persistence")
                 return syntax, file
             except ValueError:
                 raise
@@ -621,8 +636,9 @@ class mermaid(commands.Cog):
         coll = f"mermaid_{ctx.author.id}"
         try:
             results = await store.retrieve_texts(ctx.guild, coll, "", top_n=10, provider=provider)
-        except Exception as exc:
-            await ctx.send(f"Failed to fetch diagrams: {exc}")
+        except NotImplementedError as exc:
+            self.logger.debug("ChainStore.retrieve_texts not implemented: %s", exc)
+            await ctx.send("Listing diagrams is not supported with the current vector store.")
             return
 
         if not results:
@@ -665,8 +681,9 @@ class mermaid(commands.Cog):
                 min_score=0.6,
                 provider=provider,
             )
-        except Exception as exc:
-            await ctx.send(f"Failed to search diagrams: {exc}")
+        except NotImplementedError:
+            self.logger.debug("ChainStore.retrieve_texts not implemented")
+            await ctx.send("Listing diagrams is not supported with the current vector store.")
             return
 
         if not results:
@@ -676,8 +693,9 @@ class mermaid(commands.Cog):
         name = results[0]["name"]
         try:
             deleted = await store.delete_embeddings(ctx.guild, coll, [name])
-        except Exception as exc:
-            await ctx.send(f"Failed to delete diagram: {exc}")
+        except NotImplementedError:
+            self.logger.debug("ChainStore.delete_embeddings not implemented")
+            await ctx.send("Deleting diagrams is not supported with the current vector store.")
             return
 
         await ctx.send(f"✅ Deleted {deleted} matching '{query_desc}' ({name})")
