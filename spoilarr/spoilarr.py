@@ -99,6 +99,24 @@ class TMDbClient:
     async def tv_credits(self, tv_id: int) -> Dict[str, Any]:
         return await self._request(f"/tv/{tv_id}/credits")
 
+    async def discover_movies(self, page: int = 1) -> Dict[str, Any]:
+        return await self._request("/discover/movie", params={"page": page})
+
+    async def discover_tv(self, page: int = 1) -> Dict[str, Any]:
+        return await self._request("/discover/tv", params={"page": page})
+
+    async def tv_airing_today(self, page: int = 1) -> Dict[str, Any]:
+        return await self._request("/tv/airing_today", params={"page": page})
+
+    async def tv_on_the_air(self, page: int = 1) -> Dict[str, Any]:
+        return await self._request("/tv/on_the_air", params={"page": page})
+
+    async def tv_popular(self, page: int = 1) -> Dict[str, Any]:
+        return await self._request("/tv/popular", params={"page": page})
+
+    async def tv_top_rated(self, page: int = 1) -> Dict[str, Any]:
+        return await self._request("/tv/top_rated", params={"page": page})
+
 
 class SpoilarrManager:
     """Sub-agent responsible for orchestrating Spoilarr TMDb tool usage."""
@@ -172,6 +190,90 @@ class SpoilarrManager:
                     "required": ["tmdb_id"],
                 },
             },
+            {
+                "name": "discover_movies",
+                "description": "Discover movies with optional filters and pagination.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page": {
+                            "type": "number",
+                            "description": "Page number for pagination (default: 1)",
+                        }
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "discover_tv",
+                "description": "Discover TV shows with optional filters and pagination.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page": {
+                            "type": "number",
+                            "description": "Page number for pagination (default: 1)",
+                        }
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "tv_airing_today",
+                "description": "Get TV shows airing today.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page": {
+                            "type": "number",
+                            "description": "Page number for pagination (default: 1)",
+                        }
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "tv_on_the_air",
+                "description": "Get TV shows currently on the air.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page": {
+                            "type": "number",
+                            "description": "Page number for pagination (default: 1)",
+                        }
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "tv_popular",
+                "description": "Get popular TV shows.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page": {
+                            "type": "number",
+                            "description": "Page number for pagination (default: 1)",
+                        }
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "tv_top_rated",
+                "description": "Get top-rated TV shows.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page": {
+                            "type": "number",
+                            "description": "Page number for pagination (default: 1)",
+                        }
+                    },
+                    "required": [],
+                },
+            },
         ]
 
     def _build_callbacks(self, guild_id: int) -> Dict[str, Callable[..., Any]]:
@@ -193,6 +295,24 @@ class SpoilarrManager:
         async def _tv_credits(tmdb_id: int) -> Any:
             return await self.spoilarr_cog._internal_tv_credits(tmdb_id=tmdb_id, guild_id=guild_id)
 
+        async def _discover_movies(page: int = 1) -> Any:
+            return await self.spoilarr_cog._internal_discover_movies(page=page, guild_id=guild_id)
+
+        async def _discover_tv(page: int = 1) -> Any:
+            return await self.spoilarr_cog._internal_discover_tv(page=page, guild_id=guild_id)
+
+        async def _tv_airing_today(page: int = 1) -> Any:
+            return await self.spoilarr_cog._internal_tv_airing_today(page=page, guild_id=guild_id)
+
+        async def _tv_on_the_air(page: int = 1) -> Any:
+            return await self.spoilarr_cog._internal_tv_on_the_air(page=page, guild_id=guild_id)
+
+        async def _tv_popular(page: int = 1) -> Any:
+            return await self.spoilarr_cog._internal_tv_popular(page=page, guild_id=guild_id)
+
+        async def _tv_top_rated(page: int = 1) -> Any:
+            return await self.spoilarr_cog._internal_tv_top_rated(page=page, guild_id=guild_id)
+
         return {
             "search_movies": _search_movies,
             "search_tv": _search_tv,
@@ -200,6 +320,12 @@ class SpoilarrManager:
             "tv_details": _tv_details,
             "movie_credits": _movie_credits,
             "tv_credits": _tv_credits,
+            "discover_movies": _discover_movies,
+            "discover_tv": _discover_tv,
+            "tv_airing_today": _tv_airing_today,
+            "tv_on_the_air": _tv_on_the_air,
+            "tv_popular": _tv_popular,
+            "tv_top_rated": _tv_top_rated,
         }
 
     async def handle_query(self, query: str, guild_id: int) -> str:
@@ -473,6 +599,30 @@ class spoilarr(commands.Cog):
 
     async def _internal_tv_credits(self, tmdb_id: int, guild_id: int) -> str:
         return await self._run_internal_tool(guild_id, lambda client: client.tv_credits(tmdb_id))
+
+    async def _internal_discover_movies(self, page: int = 1, guild_id: int = None) -> str:
+        # TODO: Use toon_format.dumps(result) when toon-format is re-enabled
+        return await self._run_internal_tool(guild_id, lambda client: client.discover_movies(page))
+
+    async def _internal_discover_tv(self, page: int = 1, guild_id: int = None) -> str:
+        # TODO: Use toon_format.dumps(result) when toon-format is re-enabled
+        return await self._run_internal_tool(guild_id, lambda client: client.discover_tv(page))
+
+    async def _internal_tv_airing_today(self, page: int = 1, guild_id: int = None) -> str:
+        # TODO: Use toon_format.dumps(result) when toon-format is re-enabled
+        return await self._run_internal_tool(guild_id, lambda client: client.tv_airing_today(page))
+
+    async def _internal_tv_on_the_air(self, page: int = 1, guild_id: int = None) -> str:
+        # TODO: Use toon_format.dumps(result) when toon-format is re-enabled
+        return await self._run_internal_tool(guild_id, lambda client: client.tv_on_the_air(page))
+
+    async def _internal_tv_popular(self, page: int = 1, guild_id: int = None) -> str:
+        # TODO: Use toon_format.dumps(result) when toon-format is re-enabled
+        return await self._run_internal_tool(guild_id, lambda client: client.tv_popular(page))
+
+    async def _internal_tv_top_rated(self, page: int = 1, guild_id: int = None) -> str:
+        # TODO: Use toon_format.dumps(result) when toon-format is re-enabled
+        return await self._run_internal_tool(guild_id, lambda client: client.tv_top_rated(page))
 
     async def query_spoilarr(
         self,
