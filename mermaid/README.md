@@ -16,3 +16,16 @@ custom CSS styles can be added (see /gitroot/README.md)
 by default: transparent background, image is readable for light and dark mode
 
 Users can configure light, dark or both. LLM will optimize against that. By default hybrid is selected
+
+---
+
+latest git commit has the error:
+Bot response:
+
+Here's your Mermaid diagram:
+<Image says Syntax Error!>
+Here’s the diagram you requested:
+
+✅ Diagram uploaded: Mermaid PNG
+
+The Mermaid source used is already added to this conversation for your reference.

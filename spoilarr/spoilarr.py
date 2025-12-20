@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 import aiohttp
 import discord
 import toon_format
-from langchain_core.messages import AIMessage, ToolMessage, convert_to_messages
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage, convert_to_messages
 from redbot.core import Config, commands
 from redbot.core.bot import Red
 
@@ -104,8 +104,12 @@ class SpoilarrManager:
     """Sub-agent responsible for orchestrating Spoilarr TMDb tool usage."""
 
     SYSTEM_PROMPT = (
-        "Spoilarr TMDb expert. Use tools step-by-step. Final answer: ONLY `toon.dumps(JSON)` with relevant data "
-        "(title, cast, etc.). No prose."
+        "You are the Spoilarr TMDb orchestrator. Always call tools to gather facts instead of guessing. "
+        "Plan a short multi-tool sequence (search -> details -> credits) to cover the user's ask. Pick movie vs TV, "
+        "search first if no TMDb id, then pull details and credits for the chosen id. Never fabricate. "
+        "Respond only once with plain toon.dumps(JSON) containing useful TMDb fields (title/name, overview, ids, "
+        "release/air dates, runtime/episode count, genres, backdrop/poster paths, top cast + key crew). "
+        "No prose, no markdown, no code fences, no apologies—only the JSON string."
     )
 
     def __init__(self, spoilarr_cog, langcore_cog) -> None:
@@ -209,6 +213,14 @@ class SpoilarrManager:
         conversation.add_assistant_message(self.SYSTEM_PROMPT)
         conversation.update_messages(query, role="user")
 
+        def _is_json_like(content: Any) -> bool:
+            if isinstance(content, (dict, list)):
+                return True
+            if isinstance(content, str):
+                stripped = content.strip()
+                return stripped.startswith("{") or stripped.startswith("[")
+            return False
+
         try:
             messages = convert_to_messages(conversation.messages)
             callbacks = self._build_callbacks(guild_id)
@@ -223,6 +235,20 @@ class SpoilarrManager:
                 messages.append(ai_msg)
 
                 if not ai_msg.tool_calls:
+                    if not _is_json_like(ai_msg.content):
+                        self.logger.warning(
+                            "Spoilarr agent produced non-JSON response, requesting JSON-only output (iteration %s)",
+                            iteration,
+                        )
+                        messages.append(
+                            SystemMessage(
+                                content=(
+                                    "Final reply must be toon.dumps(JSON) only. If you still need data, call the tools "
+                                    "(search -> details -> credits). No prose—return the JSON string."
+                                )
+                            )
+                        )
+                        continue
                     break
 
                 for tool_index, tool_call in enumerate(ai_msg.tool_calls):
@@ -278,11 +304,19 @@ class SpoilarrManager:
             except Exception:
                 return f'{{"error": "Spoilarr agent failed: {exc}"}}'
 
-        final_response = ""
+        final_content: Any = ""
         for msg in reversed(messages):
             if isinstance(msg, AIMessage):
-                final_response = str(msg.content) if msg.content else ""
+                final_content = msg.content if msg.content else ""
                 break
+
+        if isinstance(final_content, (dict, list)):
+            try:
+                return toon_format.dumps(final_content, indent=2)
+            except Exception:
+                pass
+
+        final_response = str(final_content).strip()
 
         if not final_response:
             self.logger.warning("Spoilarr agent loop produced no AI response content")
@@ -290,6 +324,13 @@ class SpoilarrManager:
                 return toon_format.dumps({"error": "Spoilarr agent produced no response"}, indent=2)
             except Exception:
                 return '{"error": "Spoilarr agent produced no response"}'
+
+        if not _is_json_like(final_response):
+            self.logger.warning("Spoilarr agent returned non-JSON final response")
+            try:
+                return toon_format.dumps({"error": "Spoilarr agent returned non-JSON content"}, indent=2)
+            except Exception:
+                return '{"error": "Spoilarr agent returned non-JSON content"}'
 
         return final_response.strip()
 
@@ -316,9 +357,9 @@ class spoilarr(commands.Cog):
         schema = {
             "name": "query_spoilarr",
             "description": (
-                "Query TMDb via Spoilarr sub-agent. Handles movie/TV search, details, and credits "
-                "intelligently from natural language queries. Returns toon-formatted JSON data. "
-                "Spoilers are automatically censored based on server settings."
+                "Answer movie/TV questions by calling TMDb via Spoilarr (search, details, credits). "
+                "Use for natural-language requests like cast lookups, release info, or plot questions; "
+                "returns structured data from TMDb instead of guessing."
             ),
             "parameters": {
                 "type": "object",

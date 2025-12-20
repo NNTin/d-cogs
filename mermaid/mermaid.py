@@ -21,35 +21,34 @@ class MermaidManager:
     """Sub-agent responsible for generating and repairing Mermaid syntax."""
 
     SYNTAX_GENERATION_PROMPT = (
-        "You are a Mermaid diagram syntax expert. Generate ONLY valid Mermaid syntax based on the user's description.\n\n"
-        "Rules:\n"
-        "- Return ONLY the mermaid syntax, no explanations or markdown code blocks\n"
-        "- Use the specified diagram type: {diagram_type}\n"
-        "- Follow Mermaid.js syntax strictly\n"
-        "- For sequence diagrams: use participant declarations and proper arrow syntax\n"
-        "- For flowcharts: use proper node shapes and connection syntax\n"
-        "- For class diagrams: use proper class declaration and relationship syntax\n"
-        "- For state diagrams: use stateDiagram-v2 syntax\n"
-        "- Ensure all node IDs are valid (no spaces, special characters)\n\n"
-        "User description: {description}\n"
-        "Diagram type: {diagram_type}\n\n"
-        "Generate the mermaid syntax now:"
+        "You are a strict Mermaid syntax generator. Produce one valid {diagram_type} diagram in pure Mermaid code. "
+        "Output ONLY Mermaid syntax - no markdown fences, no 'mermaid' tag, no commentary.\n\n"
+        "User description: {description}\n\n"
+        "Authoring rules:\n"
+        "- Start with the correct diagram keyword (flowchart TD|LR; sequenceDiagram; classDiagram; stateDiagram-v2; graph TD|LR).\n"
+        "- Node/participant IDs use letters, numbers, or underscores only; labels may have spaces. Declare every participant/node before linking.\n"
+        "- Keep edges directional and explicit; ensure each reference exists and arrow syntax is valid.\n"
+        "- Prefer concise labels; avoid paragraphs inside nodes.\n"
+        "- Styling: define a small palette for readability (e.g., classDef default fill:#0d1117,stroke:#2563eb,color:#e5e7eb,stroke-width:2px; "
+        "classDef accent fill:#f5f5f5,stroke:#10b981,color:#111827,stroke-width:2px;). Apply class assignments to related nodes to keep grouping clear.\n"
+        "- Use subgraphs/grouping only when it clarifies structure; keep indentation consistent.\n"
+        "- Double-check punctuation (semicolons where needed), brace/indent structure, and participant/class/state declarations before returning.\n"
+        "Return only the final Mermaid syntax with no wrappers."
     )
 
     ERROR_FIXING_PROMPT = (
-        "You are a Mermaid syntax debugger. The following Mermaid syntax produced a rendering error.\n\n"
+        "You are a Mermaid syntax debugger. The code below failed to render; repair it and return only raw Mermaid syntax (no fences, no 'mermaid' tag).\n\n"
         "Original syntax:\n"
         "{syntax}\n\n"
-        "Error context:\n"
+        "Renderer error:\n"
         "{error_message}\n\n"
-        "Fix the syntax and return ONLY the corrected Mermaid code. No explanations, no markdown blocks.\n"
-        "Common issues to check:\n"
-        "- Invalid node IDs (spaces, special characters)\n"
-        "- Missing semicolons or proper line breaks\n"
-        "- Incorrect arrow syntax\n"
-        "- Malformed participant/class/state declarations\n"
-        "- Unclosed quotes or brackets\n\n"
-        "Return the fixed syntax now:"
+        "Correction rules:\n"
+        "- Preserve the intended diagram type and structure; do not change content unnecessarily.\n"
+        "- Ensure the opening line matches the diagram type (flowchart TD|LR, sequenceDiagram, classDiagram, stateDiagram-v2, graph TD|LR).\n"
+        "- Validate IDs (letters/numbers/underscores only), declare missing participants/nodes, and fix malformed arrows or relationships.\n"
+        "- Repair common syntax issues: unmatched brackets, missing semicolons/line breaks, mis-indented subgraphs, and broken class/style definitions.\n"
+        "- Remove any markdown wrappers or stray commentary.\n"
+        "Return only the corrected Mermaid syntax."
     )
 
     def __init__(self, mermaid_cog, langcore_cog) -> None:
@@ -232,10 +231,10 @@ class mermaid(commands.Cog):
         schema = {
             "name": "generate_mermaid",
             "description": (
-                "Use LLM to generate Mermaid diagrams from natural language. "
-                "Automatically uploads PNG image to Discord channel and injects syntax into conversation for reference. "
-                "Ideal for sequence diagrams, flowcharts, class diagrams, state diagrams, and more. "
-                "Use this when the user asks to create, visualize, or diagram something."
+                "Create a Mermaid diagram from a natural-language description. "
+                "Picks the right Mermaid syntax for the requested diagram type, uploads a rendered PNG to the channel, "
+                "and adds the raw Mermaid code to the conversation for reuse. "
+                "Call this when the user asks to visualize, diagram, map a flow/sequence/state/class/graph, or requests a chart."
             ),
             "parameters": {
                 "type": "object",
@@ -251,7 +250,7 @@ class mermaid(commands.Cog):
                         "type": "string",
                         "enum": ["flowchart", "sequence", "class", "state", "graph"],
                         "description": (
-                            "Type of diagram to generate. Choose based on what best represents the concept: "
+                            "Optional: desired diagram type. If omitted, the tool will choose the closest fit. "
                             "flowchart for processes, sequence for interactions, class for structures, "
                             "state for state machines, graph for relationships."
                         ),
