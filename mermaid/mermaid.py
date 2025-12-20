@@ -338,6 +338,10 @@ class mermaid(commands.Cog):
                 await page.set_content(html_content, wait_until="networkidle", timeout=timeout * 1000)
                 await page.wait_for_selector(".mermaid", timeout=timeout * 1000)
                 await page.wait_for_function("document.querySelector('.mermaid svg') !== null", timeout=timeout * 1000)
+                error_locator = page.locator("text.error-text")
+                if await error_locator.count() > 0:
+                    error_msg = (await error_locator.first.inner_text()).strip()
+                    raise RuntimeError(f"Syntax error: {error_msg}")
                 element = await page.query_selector(".mermaid")
                 if not element:
                     raise RuntimeError("Mermaid container not found after rendering.")
