@@ -1,4 +1,4 @@
-from .spoilarr import spoilarr
+from .cog import spoilarr
 
 
 async def setup(bot):
