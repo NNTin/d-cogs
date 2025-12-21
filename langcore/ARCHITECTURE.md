@@ -65,3 +65,9 @@ sequenceDiagram
     CM->>Conv: add AI message
     CM-->>User: "I've created the diagram"
 ```
+
+## Integration Notes
+- Tool wrappers now inject an `ExtensionContext` (guild_id, channel_id, member_id, langcore) instead of loose kwargs. Use `ctx.get_provider()` and `await ctx.add_to_conversation(...)` to avoid manual locking.
+- Guilds configure their preferred LLM with `[p]langcore defaultprovider <name>`; `ctx.get_provider()` honors that setting.
+- See `langcore/EXTENSION_GUIDE.md` for step-by-step integration guidance and migration tips.
+- Lazy loading: extension and provider cogs should register on `on_langcore_cog_add` and avoid hard `langcore` imports; use dynamic access to `ctx` helpers so standalone features continue working when langcore is absent.

@@ -5,7 +5,7 @@
     "install_msg": "Thanks for installing Spoilarr! Configure your TMDb API key with `[p]spoilarr apikey <key>`. Get your API key at https://www.themoviedb.org/settings/api",
     "author": ["nntin"],
     "required_cogs": ["langcore"],
-    "requirements": ["aiohttp", "toon-format"],
+    "requirements": ["aiohttp", "toon-format", "cogchain"],
     "tags": ["tmdb", "movies", "tv", "api", "langcore"],
     "min_bot_version": "3.5.0",
     "hidden": false,

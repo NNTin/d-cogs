@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 import discord
 from pydantic import Field
 
-from langcore.models import BaseModel
+from cogchain.models import BaseModel
 
 
 class OpenRouterGuildConfig(BaseModel):

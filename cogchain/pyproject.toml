@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cogchain"
+version = "0.1.0"
+description = "Shared interfaces and models for d-cogs"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "d-cogs maintainers" }]
+dependencies = [
+    "discord.py>=2.3.0",
+    "langchain-core>=0.3.0",
+    "orjson>=3.9.10",
+    "pydantic>=1.10.0",
+    "red-discordbot>=3.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/nntin/d-cogs"
+Source = "https://github.com/nntin/d-cogs/tree/main/cogchain"

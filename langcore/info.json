@@ -9,7 +9,7 @@
         "Tin Nguyen"
     ],
     "required_cogs": {},
-    "requirements": [],
+    "requirements": ["cogchain"],
     "tags": [
         "LangChain",
         "AI",

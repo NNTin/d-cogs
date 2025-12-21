@@ -1,7 +1,6 @@
 import asyncio
 import difflib
 import logging
-from importlib import import_module
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal, Optional, Tuple
@@ -14,6 +13,7 @@ from playwright.async_api import async_playwright
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
+from cogchain.interfaces import ExtensionContext, LangcoreProtocol, MessageHandler
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
@@ -26,12 +26,15 @@ class MermaidManager:
         "Output ONLY Mermaid syntax - no markdown fences, no 'mermaid' tag, no commentary.\n\n"
         "User description: {description}\n\n"
         "Authoring rules:\n"
-        "- Start with the correct diagram keyword (flowchart TD|LR; sequenceDiagram; classDiagram; stateDiagram-v2; graph TD|LR).\n"
+        "- Start with the correct diagram keyword (flowchart TD|LR; sequenceDiagram; classDiagram; stateDiagram-v2; erDiagram; requirementDiagram; graph TD|LR).\n"
         "- Node/participant IDs use letters, numbers, or underscores only; labels may have spaces. Declare every participant/node before linking.\n"
         "- Keep edges directional and explicit; ensure each reference exists and arrow syntax is valid.\n"
         "- Prefer concise labels; avoid paragraphs inside nodes.\n"
-        "- Styling: define a small palette for readability (e.g., classDef default fill:#0d1117,stroke:#2563eb,color:#e5e7eb,stroke-width:2px; "
-        "classDef accent fill:#f5f5f5,stroke:#10b981,color:#111827,stroke-width:2px;). Apply class assignments to related nodes to keep grouping clear.\n"
+        "- Styling rules:\n"
+        "  * ONLY apply classDef and class assignments when the diagram type is one of: flowchart, stateDiagram, stateDiagram-v2, erDiagram, requirementDiagram.\n"
+        "  * When allowed, define a small, readable palette (e.g., classDef default fill:#0d1117,stroke:#2563eb,color:#e5e7eb,stroke-width:2px; "
+        "classDef accent fill:#f5f5f5,stroke:#10b981,color:#111827,stroke-width:2px;), and apply classes consistently to related nodes.\n"
+        "  * When NOT allowed (e.g., sequenceDiagram, gantt, pie, journey, timeline, gitGraph, mindmap), DO NOT emit classDef, class, or node-level styling.\n"
         "- Use subgraphs/grouping only when it clarifies structure; keep indentation consistent.\n"
         "- Double-check punctuation (semicolons where needed), brace/indent structure, and participant/class/state declarations before returning.\n"
         "Return only the final Mermaid syntax with no wrappers."
@@ -52,9 +55,8 @@ class MermaidManager:
         "Return only the corrected Mermaid syntax."
     )
 
-    def __init__(self, mermaid_cog, langcore_cog) -> None:
+    def __init__(self, mermaid_cog) -> None:
         self.mermaid_cog = mermaid_cog
-        self.langcore_cog = langcore_cog
         self.logger = logging.getLogger("red.d_cogs.mermaid.manager")
         self.max_retries = 3
 
@@ -62,14 +64,12 @@ class MermaidManager:
         self,
         description: str,
         diagram_type: str,
-        guild_id: int,
+        ctx: ExtensionContext,
         base_syntax: Optional[str] = None,
     ) -> str:
         """Generate Mermaid syntax using the LLM provider."""
         try:
-            provider = self.langcore_cog.get_provider("ollama")
-            if not provider:
-                raise RuntimeError("MermaidManager could not find the ollama provider")
+            provider = ctx.get_provider()
 
             prompt = self.SYNTAX_GENERATION_PROMPT.format(description=description, diagram_type=diagram_type)
             if base_syntax:
@@ -77,7 +77,7 @@ class MermaidManager:
                     f"\n\n**EDIT MODE** Previous diagram:\n\n```mermaid\n{base_syntax}\n```\n\n"
                     f"User request: {description}"
                 )
-            llm = await provider.get_chat_llm(guild_id=guild_id)
+            llm = await provider.get_chat_llm(guild_id=ctx.guild_id)
             messages = convert_to_messages([{"role": "user", "content": prompt}])
             response = await llm.ainvoke(messages)
             syntax = str(response.content).strip()
@@ -94,15 +94,12 @@ class MermaidManager:
         except Exception as exc:
             raise RuntimeError(f"Failed to generate syntax: {exc}") from exc
 
-    async def fix_syntax_error(self, syntax: str, error_message: str, guild_id: int) -> str:
+    async def fix_syntax_error(self, syntax: str, error_message: str, ctx: ExtensionContext) -> str:
         """Attempt to fix Mermaid syntax using the LLM based on an error message."""
         try:
-            provider = self.langcore_cog.get_provider("ollama")
-            if not provider:
-                raise RuntimeError("MermaidManager could not find the ollama provider")
-
+            provider = ctx.get_provider()
             prompt = self.ERROR_FIXING_PROMPT.format(syntax=syntax, error_message=error_message)
-            llm = await provider.get_chat_llm(guild_id=guild_id)
+            llm = await provider.get_chat_llm(guild_id=ctx.guild_id)
             messages = convert_to_messages([{"role": "user", "content": prompt}])
             response = await llm.ainvoke(messages)
             fixed_syntax = str(response.content).strip()
@@ -135,20 +132,19 @@ class MermaidManager:
         description: str,
         diagram_type: str,
         guild: discord.Guild,
-        member_id: int,
+        ctx: ExtensionContext,
     ) -> Tuple[str, discord.File]:
         """Generate, render, and repair Mermaid syntax with retries."""
-        provider = self.langcore_cog.get_provider("ollama")
-        if not provider:
-            raise RuntimeError("MermaidManager could not find the ollama provider")
+        provider = ctx.get_provider()
 
         store = None
         try:
-            store = self.langcore_cog.get_store()
+            store = ctx.get_store()
         except Exception as exc:
+            store = None
             self.logger.debug("No ChainStore available, proceeding without persistence: %s", exc)
 
-        coll = f"mermaid_{member_id}"
+        coll = f"mermaid_{ctx.member_id}"
         base_syntax = None
         if store:
             try:
@@ -168,7 +164,7 @@ class MermaidManager:
         syntax = await self.generate_syntax(
             description=description,
             diagram_type=diagram_type,
-            guild_id=guild.id,
+            ctx=ctx,
             base_syntax=base_syntax,
         )
 
@@ -189,10 +185,10 @@ class MermaidManager:
                 raise
             except TemplateError as exc:
                 self.logger.warning("Template error on attempt %s: %s", attempt + 1, exc)
-                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), guild_id=guild.id)
+                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), ctx=ctx)
             except RuntimeError as exc:
                 self.logger.warning("Rendering error on attempt %s: %s", attempt + 1, exc)
-                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), guild_id=guild.id)
+                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), ctx=ctx)
 
         raise RuntimeError(f"Failed to create diagram after {self.max_retries} attempts")
 
@@ -212,21 +208,12 @@ class mermaid(commands.Cog):
             force_registration=True,
         )
         self.manager: Optional[MermaidManager] = None
-        self.message_handler: Optional[Any] = None
+        self.message_handler: Optional[MessageHandler] = None
 
-    def _build_message_handler(self) -> Any:
-        """
-        Build a MessageHandler instance compatible with the current langcore definition.
+    def _build_message_handler(self) -> MessageHandler:
+        """Build a MessageHandler instance for langcore registrations."""
 
-        This mirrors ollama's dynamic provider construction to tolerate langcore reloads.
-        """
-        try:
-            MessageHandler = getattr(import_module("langcore.abc"), "MessageHandler")
-        except Exception as exc:  # noqa: BLE001
-            self.logger.debug("Unable to import langcore.abc.MessageHandler: %s", exc)
-            MessageHandler = object  # type: ignore[assignment]
-
-        class _MermaidMessageHandler(MessageHandler):  # type: ignore[misc,valid-type]
+        class _MermaidMessageHandler(MessageHandler):
             """Message handler for sending Mermaid diagram content."""
 
             async def send_text(self, ctx: commands.Context, text: str, **kwargs: Any) -> discord.Message:
@@ -292,7 +279,7 @@ class mermaid(commands.Cog):
 
         # ChainHub will automatically unregister via langcore's on_cog_remove listener
         langcore_cog = self.bot.get_cog("langcore")
-        if getattr(langcore_cog, "conversation_manager", None):
+        if isinstance(langcore_cog, LangcoreProtocol):
             try:
                 langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
             except Exception as exc:
@@ -358,8 +345,9 @@ class mermaid(commands.Cog):
             except Exception as exc:
                 self.logger.warning("Failed to register Mermaid system prompt: %s", exc)
 
-        self.manager = MermaidManager(mermaid_cog=self, langcore_cog=langcore_cog)
-        self.logger.info("MermaidManager initialized as sub-agent")
+        if not self.manager:
+            self.manager = MermaidManager(mermaid_cog=self)
+            self.logger.info("MermaidManager initialized as sub-agent")
 
         self.message_handler = self._build_message_handler()
         if langcore_cog.register_message_handler(self.qualified_name, self.message_handler):
@@ -371,7 +359,7 @@ class mermaid(commands.Cog):
     async def on_langcore_cog_remove(self, langcore_cog=None):
         """Ensure the system prompt is removed when langcore unloads."""
         langcore_cog = langcore_cog or self.bot.get_cog("langcore")
-        if getattr(langcore_cog, "conversation_manager", None):
+        if isinstance(langcore_cog, LangcoreProtocol):
             try:
                 langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
                 self.logger.info("Unregistered Mermaid system prompt after langcore removal")
@@ -434,13 +422,24 @@ class mermaid(commands.Cog):
             page = await browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
             try:
                 await page.set_content(html_content, wait_until="networkidle", timeout=timeout * 1000)
-                await page.wait_for_selector(".mermaid", timeout=timeout * 1000)
-                await page.wait_for_function("document.querySelector('.mermaid svg') !== null", timeout=timeout * 1000)
-                error_locator = page.locator("text.error-text")
+                await page.wait_for_selector(".mermaid-container", timeout=timeout * 1000)
+                await page.wait_for_function(
+                    "document.querySelector('.mermaid-container svg') || "
+                    "document.querySelector('.mermaid-container .error-text')",
+                    timeout=timeout * 1000,
+                )
+                error_locator = page.locator(".mermaid-container .error-text")
                 if await error_locator.count() > 0:
-                    error_msg = (await error_locator.first.inner_text()).strip()
+                    first_error = error_locator.first
+                    raw_error = await first_error.text_content()
+                    if raw_error is None:
+                        try:
+                            raw_error = await first_error.inner_text()
+                        except Exception as exc:  # noqa: BLE001
+                            raw_error = f"Unable to read error text: {exc}"
+                    error_msg = raw_error.strip() if raw_error else "Unknown Mermaid syntax error"
                     raise RuntimeError(f"Syntax error: {error_msg}")
-                element = await page.query_selector(".mermaid")
+                element = await page.query_selector(".mermaid-container")
                 if not element:
                     raise RuntimeError("Mermaid container not found after rendering.")
                 png_bytes = await element.screenshot(type="png")
@@ -490,6 +489,7 @@ class mermaid(commands.Cog):
             png_bytes = await self._render_mermaid_png(rendered_html)
         except RuntimeError as exc:
             self.logger.error("Failed to generate PNG from Mermaid diagram: %s", exc)
+            self.logger.error("Mermaid syntax causing error: %s", syntax)
             raise RuntimeError(f"Failed to generate PNG from Mermaid diagram: {exc}") from exc
         except Exception as exc:
             self.logger.exception("Unexpected error while generating Mermaid PNG")
@@ -503,50 +503,53 @@ class mermaid(commands.Cog):
         self,
         description: str,
         diagram_type: str = "flowchart",
+        ctx: Optional[ExtensionContext] = None,
         guild_id: Optional[int] = None,
         channel_id: Optional[int] = None,
         member_id: Optional[int] = None,
     ) -> str:
         """Generate a Mermaid diagram via the MermaidManager sub-agent and upload it."""
-        if guild_id is None or channel_id is None or member_id is None:
-            return "Missing context parameters (guild_id, channel_id, member_id). Cannot generate diagram."
+        if ctx is None and (guild_id is None or channel_id is None or member_id is None):
+            self.logger.warning("generate_mermaid called without langcore context or IDs")
+            return "Langcore context is required to generate a diagram via the tool."
 
-        guild_obj = self.bot.get_guild(guild_id)
+        if ctx is None:
+            self.logger.warning("Langcore context unavailable; cannot generate diagram.")
+            return "Langcore context unavailable; cannot generate diagram."
+
+        guild_obj = self.bot.get_guild(ctx.guild_id)
         if not guild_obj:
-            return f"Guild {guild_id} not found. Cannot upload diagram."
+            return f"Guild {ctx.guild_id} not found. Cannot upload diagram."
 
         try:
             syntax, file = await self.manager.create_diagram(
                 description=description,
                 diagram_type=diagram_type,
                 guild=guild_obj,
-                member_id=member_id,
+                ctx=ctx,
             )
         except Exception as e:
             self.logger.error("MermaidManager failed to create diagram: %s", e)
             return f"Failed to generate diagram: {str(e)}"
 
-        channel = guild_obj.get_channel(channel_id)
+        channel = guild_obj.get_channel(ctx.channel_id)
         if not channel:
-            return f"Channel {channel_id} not found in guild {guild_obj.name}. Cannot upload diagram."
+            return f"Channel {ctx.channel_id} not found in guild {guild_obj.name}. Cannot upload diagram."
 
         try:
             msg = await channel.send("Here's your Mermaid diagram:", file=file)
         except discord.HTTPException as e:
-            self.logger.error("Failed to upload diagram to channel %s: %s", channel_id, e)
+            self.logger.error("Failed to upload diagram to channel %s: %s", ctx.channel_id, e)
             return f"Failed to upload diagram: {str(e)}"
 
-        langcore_cog = self.bot.get_cog("langcore")
-        if not langcore_cog:
-            self.logger.warning("langcore cog not found, cannot inject syntax into conversation")
-            return f"✅ Diagram uploaded: {msg.jump_url} (Warning: syntax not added to conversation context)"
-
-        conv_manager = langcore_cog.conversation_manager
-        conversation = conv_manager.get_conversation(member_id, channel_id, guild_id)
-        lock = conv_manager.get_conversation_lock(member_id, channel_id, guild_id)
-
-        async with lock:
-            conversation.add_assistant_message(f"```mermaid\n{syntax}\n```")
+        try:
+            await ctx.add_to_conversation(f"```mermaid\n{syntax}\n```")
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Failed to inject Mermaid syntax into conversation: %s", exc)
+            return (
+                f"✅ Diagram uploaded: {msg.jump_url} "
+                "(Warning: syntax not added to conversation context)"
+            )
 
         return f"✅ Diagram uploaded: {msg.jump_url}\nMermaid syntax added to conversation context."
 
@@ -652,7 +655,7 @@ class mermaid(commands.Cog):
             await ctx.send("langcore cog is not available.")
             return
         try:
-            provider = langcore_cog.get_provider("ollama")
+            provider = await langcore_cog.get_default_provider(ctx.guild.id)
             store = langcore_cog.get_store()
         except Exception as exc:
             await ctx.send(f"Unable to access vector store: {exc}")
@@ -690,7 +693,7 @@ class mermaid(commands.Cog):
             await ctx.send("langcore cog is not available.")
             return
         try:
-            provider = langcore_cog.get_provider("ollama")
+            provider = await langcore_cog.get_default_provider(ctx.guild.id)
             store = langcore_cog.get_store()
         except Exception as exc:
             await ctx.send(f"Unable to access vector store: {exc}")

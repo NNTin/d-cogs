@@ -3,6 +3,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 import toon_format
+from cogchain.interfaces import ExtensionContext
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage, convert_to_messages
 from . import internal_tools
 from .prompts import SYSTEM_PROMPT
@@ -11,9 +12,8 @@ from .prompts import SYSTEM_PROMPT
 class SpoilarrManager:
     """Sub-agent responsible for orchestrating Spoilarr TMDb tool usage."""
 
-    def __init__(self, spoilarr_cog, langcore_cog) -> None:
+    def __init__(self, spoilarr_cog) -> None:
         self.spoilarr_cog = spoilarr_cog
-        self.langcore_cog = langcore_cog
         self.logger = logging.getLogger("red.d_cogs.spoilarr.manager")
 
         self._tool_schemas: List[Dict[str, Any]] = [
@@ -211,12 +211,13 @@ class SpoilarrManager:
             "tv_top_rated": _tv_top_rated,
         }
 
-    async def handle_query(self, query: str, guild_id: int) -> str:
-        provider = self.langcore_cog.get_provider("ollama")
-        if not provider:
-            raise RuntimeError("SpoilarrManager could not find the ollama provider")
+    async def handle_query(self, query: str, ctx: ExtensionContext) -> str:
+        provider = ctx.get_provider()
 
-        llm = await provider.get_chat_llm(guild_id=guild_id)
+        llm = await provider.get_chat_llm(
+            guild_id=ctx.guild_id,
+            member_id=ctx.member_id,
+        )
 
         # maintaining own message list to track tool calls and responses
         # in future worth abstracting to a Conversation class so other ExtensionCogs can reuse
@@ -235,7 +236,7 @@ class SpoilarrManager:
 
         try:
             messages = convert_to_messages(messages_dict)
-            callbacks = self._build_callbacks(guild_id)
+            callbacks = self._build_callbacks(ctx.guild_id)
             max_iterations = 10
             iteration = 0
 

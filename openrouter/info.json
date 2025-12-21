@@ -10,7 +10,8 @@
     ],
     "required_cogs": {},
     "requirements": [
-        "langchain-openai"
+        "langchain-openai",
+        "cogchain"
     ],
     "tags": [
         "openrouter",

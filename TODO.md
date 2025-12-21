@@ -21,7 +21,8 @@ langcore is not aware of the plugins that will be installed. There should be no 
 Review langcore and check if their means of exposing functions follow best practice.  
 Finally check the extension cogs mermaid and spoilarr if they integrate the functions using the best practice.  
 
-The code is working. We need architectural improvements so we have standardized means. ChainProvider and ChainStore have this fully abstracted. 
+The code is working. We need architectural improvements so we have standardized means. ChainProvider and ChainStore have this fully abstracted. To the ExtensionCogs we need clear interfaces, not hacky solutions that require complicated code.  
+Note: It is not possible to import between the cogs!
 
 ---
 
@@ -39,8 +40,9 @@ fix ollama/modelspy: from langcore.models import BaseModel
 ---
 
 implement common pitfalls for test check:
-- importing a python module from another cog
+- importing a python module from another cog (should use cogchain)
 - defining interface without doc string
+- usage of getattr
 
 ---
 
@@ -82,3 +84,41 @@ PyPI langchain-ollama and langchain-openai requested but not used (not using lan
 -> adjust the architectural images, throw out dependency
 
 ---
+
+re-evaluate conversation handling in mermaid and spoilarr
+
+in mermaid the mermaid agent uploads image on discord -> adding to conversation so conversation agent is aware
+in spoilarr the spoiler agent does **not** interact with discord -> should not be added to the conversation
+
+mermaid talks to discord through MessageHandler. MessageHandler should implement the Conversation handling.  
+
+Conversation:  
+Discord User: Create me a diagram that shows a conversation between Bob and Alice
+<Conversation Agent deletegates task to Mermaid Agent>
+Mermaid Agent: *posts raw Mermaid Syntax into conversation*
+<Mermaid Agent uploads a Discord file image showing the Mermaid diagram>
+Mermaid Agent: post System image for Conversation Agent: The mermaid syntax has been sent to the Discord User as an image
+Conversation Agent: *talks about the diagram without posting the mermaid syntax again - unless specifically asked to do so*
+
+---
+
+In the ExtensionCogs there are some hard references to langcore.  
+Because we cannot control the order in which cogs are loaded, we need a better way to allow lazy loading and only do the registration (ChainHub, ChainProvider and ChainStore) when the langcore cog is loaded. The langcore cog does fire an event for this.  
+
+
+---
+
+We have several references of `getattr()` in langcore, mermaid, qdrant and spoilarr. This kind of implementation is not nice and does not fully utilize the advantages of defined interfaces. 
+
+I am developing plugins (or cogs) for the Red-DiscordBot. I have the problem that I requires Abstractions, Contracts and Interfaces between the cogs. However there cannot be any hard references between the plugins. They are not directly aware of each other's existance. In order to share the Contracts between them we will create a PyPI package.
+
+The PyPI package will be called cogchain.
+
+In order to be able to locally develop with it, we will locally install the cog with `pip install -e .`  
+When the package is ready we will publish it.
+
+---
+
+sync cog pipeline requires
+
+pip install -e cogchain

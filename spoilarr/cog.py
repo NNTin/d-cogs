@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 import discord
 from redbot.core import Config, commands
 from redbot.core.bot import Red
+from cogchain.interfaces import ExtensionContext, LangcoreProtocol
 
 from .client import TMDbClient
 from .manager import SpoilarrManager
@@ -73,7 +74,8 @@ class spoilarr(commands.Cog):
             except Exception as exc:
                 self.logger.warning("Failed to register Spoilarr system prompt: %s", exc)
 
-        self.manager = SpoilarrManager(self, langcore_cog)
+        if not self.manager:
+            self.manager = SpoilarrManager(self)
 
     async def _ensure_context(self, guild_id: Optional[int]) -> bool:
         return guild_id is not None
@@ -84,34 +86,21 @@ class spoilarr(commands.Cog):
         spoiler_mode = await guild_conf.spoiler_mode()
         return {"api_key": api_key, "spoiler_mode": spoiler_mode}
 
-    async def _handle_spoiler_instruction(
-        self,
-        member_id: Optional[int],
-        channel_id: Optional[int],
-        guild_id: Optional[int],
-        spoiler_mode: bool,
-    ) -> None:
+    async def _handle_spoiler_instruction(self, ctx: ExtensionContext, spoiler_mode: bool) -> None:
         if spoiler_mode:
             return
-        if member_id is None or channel_id is None or guild_id is None:
-            return
-        langcore_cog = self.bot.get_cog("langcore")
-        if not langcore_cog:
-            return
-        conv_manager = getattr(langcore_cog, "conversation_manager", None)
-        if not conv_manager:
-            return
-
-        conversation = conv_manager.get_conversation(member_id, channel_id, guild_id)
-        lock = conv_manager.get_conversation_lock(member_id, channel_id, guild_id)
-        async with lock:
-            conversation.add_assistant_message(
+        try:
+            await ctx.add_to_conversation(
                 "Note: Use Discord spoiler markup ||like this|| when presenting sensitive information like plot details, character deaths, or major reveals to the user."
             )
+        except Exception:
+            # Non-blocking best-effort helper; logging stays minimal to avoid noisy tool failures.
+            return
 
     async def query_spoilarr(
         self,
         query: str,
+        ctx: Optional[ExtensionContext] = None,
         guild_id: Optional[int] = None,
         channel_id: Optional[int] = None,
         member_id: Optional[int] = None,
@@ -120,42 +109,50 @@ class spoilarr(commands.Cog):
 
         self.logger.info("Spoilarr query received: %s", query)
 
-        if guild_id is None or channel_id is None or member_id is None:
+        if ctx is None and (guild_id is None or channel_id is None or member_id is None):
             return "Missing context parameters (guild_id, channel_id, member_id). Cannot query TMDb."
 
-        settings = await self._get_settings(guild_id)
+        if ctx is None:
+            langcore_cog = self.bot.get_cog("langcore")
+            if not langcore_cog:
+                return "Langcore cog unavailable; cannot query TMDb."
+            ctx = ExtensionContext(
+                guild_id=int(guild_id),
+                channel_id=int(channel_id),
+                member_id=int(member_id),
+                langcore=langcore_cog,
+                default_provider=langcore_cog.DEFAULT_PROVIDER_FALLBACK,
+            )
+
+        settings = await self._get_settings(ctx.guild_id)
         if not settings["api_key"]:
             return "TMDb API key not configured. Use [p]spoilarr apikey <key>"
 
         if not self.manager:
-            langcore_cog = self.bot.get_cog("langcore")
-            self.manager = SpoilarrManager(self, langcore_cog)
+            self.manager = SpoilarrManager(self)
 
         try:
-            toon_str = await self.manager.handle_query(query, guild_id)
+            toon_str = await self.manager.handle_query(query, ctx)
         except Exception as exc:
             self.logger.error("SpoilarrManager query failed: %s", exc)
             return f"Failed to query TMDb: {str(exc)}"
 
-        langcore_cog = self.bot.get_cog("langcore")
-        if not langcore_cog:
-            return "Langcore cog unavailable; cannot inject TMDb data."
-        conv_manager = getattr(langcore_cog, "conversation_manager", None)
-        if not conv_manager:
-            return "Conversation manager unavailable; cannot inject TMDb data."
-
-        conversation = conv_manager.get_conversation(member_id, channel_id, guild_id)
-        lock = conv_manager.get_conversation_lock(member_id, channel_id, guild_id)
-        async with lock:
-            conversation.add_tool_message(
+        try:
+            await ctx.add_to_conversation(
                 content=toon_str,
+                role="tool",
                 tool_call_id="spoilarr_query",
                 name="query_spoilarr",
             )
+        except Exception as exc:
+            self.logger.warning("Failed to inject Spoilarr data into conversation: %s", exc)
+            return f"{toon_str}\n\n⚠️ Conversation context was not updated due to an injection error."
 
-        await self._handle_spoiler_instruction(member_id, channel_id, guild_id, settings["spoiler_mode"])
+        await self._handle_spoiler_instruction(ctx, settings["spoiler_mode"])
 
-        return "✅ Spoilarr retrieved TMDb data (toon-formatted JSON added to conversation context)."
+        # return "✅ Spoilarr retrieved TMDb data (toon-formatted JSON added to conversation context)."
+        # todo: see TODO.md
+        return toon_str
 
     @commands.group(name="spoilarr")
     @commands.admin_or_permissions(administrator=True)
@@ -200,7 +197,7 @@ class spoilarr(commands.Cog):
     async def cog_unload(self) -> None:
         await super().cog_unload()
         langcore_cog = self.bot.get_cog("langcore")
-        if getattr(langcore_cog, "conversation_manager", None):
+        if isinstance(langcore_cog, LangcoreProtocol):
             try:
                 langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
             except Exception as exc:
@@ -212,7 +209,7 @@ class spoilarr(commands.Cog):
     async def on_langcore_cog_remove(self, langcore_cog=None) -> None:
         """Remove the Spoilarr system prompt if langcore unloads."""
         langcore_cog = langcore_cog or self.bot.get_cog("langcore")
-        if getattr(langcore_cog, "conversation_manager", None):
+        if isinstance(langcore_cog, LangcoreProtocol):
             try:
                 langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
                 self.logger.info("Unregistered Spoilarr system prompt after langcore removal")
