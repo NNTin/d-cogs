@@ -5,6 +5,44 @@ Huge thanks goes out towards [vertyco](http://github.com/vertyco/). While workin
 
 ## Architecture
 
+### Shared interfaces via `cogchain`
+
+Cross-cog contracts live in the `cogchain` package so features can evolve without tight coupling. Langcore, providers, stores, and extension cogs all import the same interfaces instead of reaching into each other. See `cogchain/README.md` for details.
+
+```mermaid
+flowchart LR
+    subgraph PyPI Package
+        CC[cogchain\n(interfaces + models)]
+    end
+
+    subgraph Core Cog
+        LC[langcore]
+    end
+
+    subgraph Providers
+        OR[openrouter]
+        OL[ollama]
+    end
+
+    subgraph Stores
+        QD[qdrant]
+    end
+
+    subgraph Extensions
+        SP[spoilarr]
+        MM[mermaid]
+        EM[embed]
+    end
+
+    CC --> LC
+    CC --> OR
+    CC --> OL
+    CC --> QD
+    CC --> SP
+    CC --> MM
+    CC --> EM
+```
+
 ### LangCore Cog Architecture and ChainHub Integration
 ```mermaid
 graph TD

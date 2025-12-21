@@ -1,13 +1,11 @@
 import asyncio
-import difflib
 import logging
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Literal, Optional, Tuple
+from typing import Any, Optional
 
 import discord
 from jinja2 import Environment, FileSystemLoader, TemplateError, select_autoescape
-from langchain_core.messages import convert_to_messages
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
 from redbot.core import commands
@@ -15,182 +13,8 @@ from redbot.core.bot import Red
 from redbot.core.config import Config
 from cogchain.interfaces import ExtensionContext, LangcoreProtocol, MessageHandler
 
-RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
-
-
-class MermaidManager:
-    """Sub-agent responsible for generating and repairing Mermaid syntax."""
-
-    SYNTAX_GENERATION_PROMPT = (
-        "You are a strict Mermaid syntax generator. Produce one valid {diagram_type} diagram in pure Mermaid code. "
-        "Output ONLY Mermaid syntax - no markdown fences, no 'mermaid' tag, no commentary.\n\n"
-        "User description: {description}\n\n"
-        "Authoring rules:\n"
-        "- Start with the correct diagram keyword (flowchart TD|LR; sequenceDiagram; classDiagram; stateDiagram-v2; erDiagram; requirementDiagram; graph TD|LR).\n"
-        "- Node/participant IDs use letters, numbers, or underscores only; labels may have spaces. Declare every participant/node before linking.\n"
-        "- Keep edges directional and explicit; ensure each reference exists and arrow syntax is valid.\n"
-        "- Prefer concise labels; avoid paragraphs inside nodes.\n"
-        "- Styling rules:\n"
-        "  * ONLY apply classDef and class assignments when the diagram type is one of: flowchart, stateDiagram, stateDiagram-v2, erDiagram, requirementDiagram.\n"
-        "  * When allowed, define a small, readable palette (e.g., classDef default fill:#0d1117,stroke:#2563eb,color:#e5e7eb,stroke-width:2px; "
-        "classDef accent fill:#f5f5f5,stroke:#10b981,color:#111827,stroke-width:2px;), and apply classes consistently to related nodes.\n"
-        "  * When NOT allowed (e.g., sequenceDiagram, gantt, pie, journey, timeline, gitGraph, mindmap), DO NOT emit classDef, class, or node-level styling.\n"
-        "- Use subgraphs/grouping only when it clarifies structure; keep indentation consistent.\n"
-        "- Double-check punctuation (semicolons where needed), brace/indent structure, and participant/class/state declarations before returning.\n"
-        "Return only the final Mermaid syntax with no wrappers."
-    )
-
-    ERROR_FIXING_PROMPT = (
-        "You are a Mermaid syntax debugger. The code below failed to render; repair it and return only raw Mermaid syntax (no fences, no 'mermaid' tag).\n\n"
-        "Original syntax:\n"
-        "{syntax}\n\n"
-        "Renderer error:\n"
-        "{error_message}\n\n"
-        "Correction rules:\n"
-        "- Preserve the intended diagram type and structure; do not change content unnecessarily.\n"
-        "- Ensure the opening line matches the diagram type (flowchart TD|LR, sequenceDiagram, classDiagram, stateDiagram-v2, graph TD|LR).\n"
-        "- Validate IDs (letters/numbers/underscores only), declare missing participants/nodes, and fix malformed arrows or relationships.\n"
-        "- Repair common syntax issues: unmatched brackets, missing semicolons/line breaks, mis-indented subgraphs, and broken class/style definitions.\n"
-        "- Remove any markdown wrappers or stray commentary.\n"
-        "Return only the corrected Mermaid syntax."
-    )
-
-    def __init__(self, mermaid_cog) -> None:
-        self.mermaid_cog = mermaid_cog
-        self.logger = logging.getLogger("red.d_cogs.mermaid.manager")
-        self.max_retries = 3
-
-    async def generate_syntax(
-        self,
-        description: str,
-        diagram_type: str,
-        ctx: ExtensionContext,
-        base_syntax: Optional[str] = None,
-    ) -> str:
-        """Generate Mermaid syntax using the LLM provider."""
-        try:
-            provider = ctx.get_provider()
-
-            prompt = self.SYNTAX_GENERATION_PROMPT.format(description=description, diagram_type=diagram_type)
-            if base_syntax:
-                prompt += (
-                    f"\n\n**EDIT MODE** Previous diagram:\n\n```mermaid\n{base_syntax}\n```\n\n"
-                    f"User request: {description}"
-                )
-            llm = await provider.get_chat_llm(guild_id=ctx.guild_id)
-            messages = convert_to_messages([{"role": "user", "content": prompt}])
-            response = await llm.ainvoke(messages)
-            syntax = str(response.content).strip()
-
-            if syntax.startswith("```"):
-                syntax = syntax.strip("`")
-                if syntax.lower().startswith("mermaid"):
-                    syntax = syntax[len("mermaid") :].strip()
-
-            self.logger.debug("Generated Mermaid syntax: %s", syntax[:100])
-            return syntax
-        except asyncio.TimeoutError as exc:
-            raise RuntimeError("LLM timeout during syntax generation") from exc
-        except Exception as exc:
-            raise RuntimeError(f"Failed to generate syntax: {exc}") from exc
-
-    async def fix_syntax_error(self, syntax: str, error_message: str, ctx: ExtensionContext) -> str:
-        """Attempt to fix Mermaid syntax using the LLM based on an error message."""
-        try:
-            provider = ctx.get_provider()
-            prompt = self.ERROR_FIXING_PROMPT.format(syntax=syntax, error_message=error_message)
-            llm = await provider.get_chat_llm(guild_id=ctx.guild_id)
-            messages = convert_to_messages([{"role": "user", "content": prompt}])
-            response = await llm.ainvoke(messages)
-            fixed_syntax = str(response.content).strip()
-
-            if fixed_syntax.startswith("```"):
-                fixed_syntax = fixed_syntax.strip("`")
-                if fixed_syntax.lower().startswith("mermaid"):
-                    fixed_syntax = fixed_syntax[len("mermaid") :].strip()
-
-            diff_lines = list(
-                difflib.unified_diff(
-                    syntax.splitlines(keepends=True),
-                    fixed_syntax.splitlines(keepends=True),
-                    fromfile="original",
-                    tofile="fixed",
-                )
-            )
-            if diff_lines:
-                self.logger.warning("Mermaid syntax auto-fixed:\n%s", "".join(diff_lines))
-
-            self.logger.debug("Fixed Mermaid syntax: %s", fixed_syntax[:100])
-            return fixed_syntax
-        except asyncio.TimeoutError as exc:
-            raise RuntimeError("LLM timeout during syntax fixing") from exc
-        except Exception as exc:
-            raise RuntimeError(f"Failed to fix syntax: {exc}") from exc
-
-    async def create_diagram(
-        self,
-        description: str,
-        diagram_type: str,
-        guild: discord.Guild,
-        ctx: ExtensionContext,
-    ) -> Tuple[str, discord.File]:
-        """Generate, render, and repair Mermaid syntax with retries."""
-        provider = ctx.get_provider()
-
-        store = None
-        try:
-            store = ctx.get_store()
-        except Exception as exc:
-            store = None
-            self.logger.debug("No ChainStore available, proceeding without persistence: %s", exc)
-
-        coll = f"mermaid_{ctx.member_id}"
-        base_syntax = None
-        if store:
-            try:
-                results = await store.retrieve_texts(
-                    guild,
-                    coll,
-                    description,
-                    top_n=1,
-                    min_score=0.75,
-                    provider=provider,
-                )
-                base_syntax = results[0]["text"] if results else None
-            except NotImplementedError:
-                self.logger.debug("ChainStore.retrieve_texts not implemented; skipping context retrieval")
-                base_syntax = None
-
-        syntax = await self.generate_syntax(
-            description=description,
-            diagram_type=diagram_type,
-            ctx=ctx,
-            base_syntax=base_syntax,
-        )
-
-        for attempt in range(self.max_retries):
-            try:
-                file = await self.mermaid_cog.render_mermaid_syntax(syntax)
-                if store:
-                    try:
-                        name = f"{diagram_type}_{description.replace(' ', '_').replace('/', '_')[:80]}"
-                        full_text = f"{description} {syntax}"
-                        embedding = await provider.embed(full_text, guild)
-                        metadata = {"diagram_type": diagram_type, "description": description}
-                        await store.add_embedding(guild, coll, name, syntax, embedding, metadata)
-                    except NotImplementedError:
-                        self.logger.debug("ChainStore.add_embedding not implemented; skipping persistence")
-                return syntax, file
-            except ValueError:
-                raise
-            except TemplateError as exc:
-                self.logger.warning("Template error on attempt %s: %s", attempt + 1, exc)
-                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), ctx=ctx)
-            except RuntimeError as exc:
-                self.logger.warning("Rendering error on attempt %s: %s", attempt + 1, exc)
-                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), ctx=ctx)
-
-        raise RuntimeError(f"Failed to create diagram after {self.max_retries} attempts")
+from .manager import MermaidManager
+from .types import RequestType
 
 
 class mermaid(commands.Cog):
@@ -277,7 +101,6 @@ class mermaid(commands.Cog):
         """Clean up when mermaid cog is unloaded."""
         await super().cog_unload()
 
-        # ChainHub will automatically unregister via langcore's on_cog_remove listener
         langcore_cog = self.bot.get_cog("langcore")
         if isinstance(langcore_cog, LangcoreProtocol):
             try:
@@ -520,6 +343,9 @@ class mermaid(commands.Cog):
         guild_obj = self.bot.get_guild(ctx.guild_id)
         if not guild_obj:
             return f"Guild {ctx.guild_id} not found. Cannot upload diagram."
+
+        if not self.manager:
+            self.manager = MermaidManager(mermaid_cog=self)
 
         try:
             syntax, file = await self.manager.create_diagram(

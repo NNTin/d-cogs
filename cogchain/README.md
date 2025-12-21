@@ -27,6 +27,43 @@ cogchain/
 
 The goal is to keep only interfaces, protocols, and shared models here—no implementation details. If a cog needs new cross-cog behavior, add or adjust the interface first, then implement it inside the individual cog.
 
+## How it is used (at a glance)
+
+The shared interfaces let cogs talk to each other without direct imports. Langcore owns the runtime flow; provider and store cogs plug in by implementing the protocols defined here.
+
+```mermaid
+flowchart LR
+    subgraph User Actions
+        U[Discord User]
+    end
+
+    subgraph Langcore Cog
+        LC[langcore commands.Cog]
+        CM[ConversationManagerProtocol]
+        HUB[ChainHubProtocol]
+    end
+
+    subgraph Providers
+        OR[openrouter\nChainProvider]
+        OL[ollama\nChainProvider]
+    end
+
+    subgraph Stores
+        QD[qdrant\nChainStore]
+    end
+
+    U -->|messages| LC
+    LC --> CM
+    LC --> HUB
+    LC -->|uses provider interface| OR
+    LC -->|uses provider interface| OL
+    LC -->|uses store interface| QD
+```
+
+Interfaces are also used by extension cogs to register tools and handlers without coupling.
+
+For more details or updates, see the source of this document at [`cogchain/README.md`](../cogchain/README.md).
+
 ## Local development
 
 Install in editable mode while building or consuming the interfaces locally:
