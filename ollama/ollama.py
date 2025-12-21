@@ -1,4 +1,6 @@
 import logging
+import re
+import time
 from typing import Any, Dict, List, Literal, Optional, Callable, Awaitable
 
 import discord
@@ -28,6 +30,8 @@ log = logging.getLogger("red.tin.ollama")
 
 class RetryingChatOllama:
     """Wrapper that retries ChatOllama calls across configured fallback models."""
+
+    _rate_limit_cooldowns: Dict[str, float] = {}
 
     def __init__(
         self,
@@ -75,6 +79,14 @@ class RetryingChatOllama:
         last_exc: Optional[Exception] = None
 
         for idx, model in enumerate(self.candidates):
+            if self._is_in_cooldown(model):
+                log.info(
+                    "Skipping Ollama model '%s' due to rate-limit cooldown (%.0fs remaining)",
+                    model,
+                    self._cooldown_seconds_left(model),
+                )
+                continue
+
             if idx > 0:
                 log.warning("Retrying Ollama chat with fallback '%s' (previous=%s)", model, self._current_model)
                 self._current_model = model
@@ -84,6 +96,7 @@ class RetryingChatOllama:
                 return await caller(self._llm)
             except ResponseError as exc:
                 last_exc = exc
+                self._track_rate_limit(model, exc)
                 if not self._should_retry(exc):
                     raise
                 continue
@@ -117,6 +130,55 @@ class RetryingChatOllama:
         if status == 400 and "does not support chat" in message:
             return True
         return False
+
+    @classmethod
+    def _track_rate_limit(cls, model: str, exc: ResponseError) -> None:
+        status = exc.status_code or 0
+        if status != 429 and "rate limit" not in str(exc).lower():
+            return
+
+        cooldown_seconds = cls._extract_retry_after(str(exc)) or 300
+        cls._rate_limit_cooldowns[model] = time.monotonic() + cooldown_seconds
+        log.warning(
+            "Model '%s' hit rate limit; cooling down for %ss",
+            model,
+            int(cooldown_seconds),
+        )
+
+    @staticmethod
+    def _extract_retry_after(message: str) -> Optional[int]:
+        # Try to parse phrases like "retry in 12s" or "retry after 120"
+        match = re.search(r"retry\s+(?:in|after)\s+(\d+)", message, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+        match_seconds = re.search(r"(\d+)\s*seconds", message, re.IGNORECASE)
+        if match_seconds:
+            try:
+                return int(match_seconds.group(1))
+            except ValueError:
+                return None
+        match_short = re.search(r"(\d+)\s*s", message, re.IGNORECASE)
+        if match_short:
+            try:
+                return int(match_short.group(1))
+            except ValueError:
+                return None
+        return None
+
+    @classmethod
+    def _is_in_cooldown(cls, model: str) -> bool:
+        now = time.monotonic()
+        expires = cls._rate_limit_cooldowns.get(model, 0)
+        return expires > now
+
+    @classmethod
+    def _cooldown_seconds_left(cls, model: str) -> float:
+        now = time.monotonic()
+        expires = cls._rate_limit_cooldowns.get(model, 0)
+        return max(0.0, expires - now)
 
     def __getattr__(self, item: str) -> Any:
         return getattr(self._llm, item)
