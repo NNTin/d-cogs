@@ -50,61 +50,12 @@ sequenceDiagram
     LAN-->>User: Service response
   {% endset %}
   <title>{{ page_title }}</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
-      margin: 0;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
-    }
-    .card {
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 12px;
-      padding: 20px 24px;
-      max-width: 1200px;
-      width: 100%;
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-    }
-    h1 {
-      margin: 0 0 12px;
-      font-size: 22px;
-      letter-spacing: 0.5px;
-      color: #f8fafc;
-    }
-    p {
-      margin: 0 0 18px;
-      color: #cbd5e1;
-    }
-    .mermaid-container {
-      background: #0b1220;
-      border: 1px solid #334155;
-      border-radius: 10px;
-      padding: 12px;
-      overflow-x: auto;
-    }
-    pre.error-text {
-      color: #f87171;
-      background: #020617;
-      padding: 12px;
-      border-radius: 8px;
-      white-space: pre-wrap;
-      margin: 0;
-      font-size: 14px;
-      border: 1px solid #7f1d1d;
-    }
-  </style>
   <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
 
     mermaid.initialize({
       startOnLoad: false,
-      theme: 'dark',
+      theme: 'default',
       securityLevel: 'strict',
       logLevel: 'debug',
     });
