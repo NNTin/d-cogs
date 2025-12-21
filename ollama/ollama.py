@@ -6,6 +6,7 @@ from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
 
+from cogchain.interfaces import ChainProvider
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from ollama import AsyncClient, ResponseError
@@ -58,25 +59,11 @@ class ollama(commands.Cog):
         self.embedder = None
         self.provider = self._build_provider()
 
-    def _build_provider(self):
-        """
-        Build a ChainProvider instance compatible with the *currently loaded*
-        `langcore.abc.ChainProvider` class.
-
-        This matters when langcore is hot-reloaded: `ChainProvider` is redefined,
-        and instances created before the reload will fail `isinstance(...)`.
-        """
-        try:
-            from importlib import import_module
-
-            chainprovider_cls = getattr(import_module("langcore.abc"), "ChainProvider")
-        except Exception as exc:  # noqa: BLE001
-            log.debug("Unable to import langcore.abc.ChainProvider: %s", exc)
-            chainprovider_cls = object  # type: ignore[assignment]
-
+    def _build_provider(self) -> ChainProvider:
+        """Build a ChainProvider instance bound to this cog."""
         cog = self
 
-        class _OllamaChainProvider(chainprovider_cls):  # type: ignore[misc,valid-type]
+        class _OllamaChainProvider(ChainProvider):
             async def chat(
                 self,
                 messages: List[Dict[str, Any]],
@@ -95,19 +82,7 @@ class ollama(commands.Cog):
                 member_id: Optional[int] = None,
                 model: Optional[str] = None,
             ) -> ChatOllama:
-                """Get a configured ChatOllama instance for tool binding and agentic workflows.
-
-                Args:
-                    guild_id: Guild identifier for configuration lookup.
-                    member_id: Optional member ID for role-based model overrides.
-                    model: Optional model name to override guild/role configuration.
-
-                Returns:
-                    ChatOllama instance configured with the appropriate model for the guild/member.
-
-                Raises:
-                    commands.UserFeedbackCheckFailure: If configuration is invalid or model unavailable.
-                """
+                """Get a configured ChatOllama instance for tool binding and agentic workflows."""
                 return await cog.get_chat_llm(guild_id=guild_id, member_id=member_id, model=model)
 
         return _OllamaChainProvider()

@@ -3,6 +3,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 import toon_format
+from cogchain.interfaces import ExtensionContext
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage, convert_to_messages
 from . import internal_tools
 from .prompts import SYSTEM_PROMPT
@@ -210,16 +211,12 @@ class SpoilarrManager:
             "tv_top_rated": _tv_top_rated,
         }
 
-    async def handle_query(self, query: str, ctx: Any) -> str:
-        provider_getter = getattr(ctx, "get_provider", None)
-        if not provider_getter:
-            raise RuntimeError("Langcore provider not available; cannot query TMDb.")
-
-        provider = provider_getter()
+    async def handle_query(self, query: str, ctx: ExtensionContext) -> str:
+        provider = ctx.get_provider()
 
         llm = await provider.get_chat_llm(
-            guild_id=getattr(ctx, "guild_id", None),
-            member_id=getattr(ctx, "member_id", None),
+            guild_id=ctx.guild_id,
+            member_id=ctx.member_id,
         )
 
         # maintaining own message list to track tool calls and responses
@@ -239,7 +236,7 @@ class SpoilarrManager:
 
         try:
             messages = convert_to_messages(messages_dict)
-            callbacks = self._build_callbacks(getattr(ctx, "guild_id", 0))
+            callbacks = self._build_callbacks(ctx.guild_id)
             max_iterations = 10
             iteration = 0
 

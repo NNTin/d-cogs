@@ -6,6 +6,7 @@ from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
 
+from cogchain.interfaces import ChainProvider
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
@@ -55,22 +56,11 @@ class openrouter(commands.Cog):
         )
         self.provider = self._build_provider()
 
-    def _build_provider(self):
-        """
-        Build a ChainProvider instance compatible with the *currently loaded*
-        `langcore.abc.ChainProvider` class.
-        """
-        try:
-            from importlib import import_module
-
-            chainprovider_cls = getattr(import_module("langcore.abc"), "ChainProvider")
-        except Exception as exc:  # noqa: BLE001
-            log.debug("Unable to import langcore.abc.ChainProvider: %s", exc)
-            chainprovider_cls = object  # type: ignore[assignment]
-
+    def _build_provider(self) -> ChainProvider:
+        """Build a ChainProvider instance bound to this cog."""
         cog = self
 
-        class _OpenRouterChainProvider(chainprovider_cls):  # type: ignore[misc,valid-type]
+        class _OpenRouterChainProvider(ChainProvider):
             async def chat(
                 self,
                 messages: List[Dict[str, Any]],

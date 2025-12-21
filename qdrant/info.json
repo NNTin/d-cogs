@@ -10,7 +10,8 @@
     ],
     "required_cogs": {},
     "requirements": [
-        "qdrant-client"
+        "qdrant-client",
+        "cogchain"
     ],
     "tags": [
         "vectordb",

@@ -1,7 +1,6 @@
 import asyncio
 import difflib
 import logging
-from importlib import import_module
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal, Optional, Tuple
@@ -14,6 +13,7 @@ from playwright.async_api import async_playwright
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
+from cogchain.interfaces import ExtensionContext, MessageHandler
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
@@ -64,16 +64,12 @@ class MermaidManager:
         self,
         description: str,
         diagram_type: str,
-        ctx: Any,
+        ctx: ExtensionContext,
         base_syntax: Optional[str] = None,
     ) -> str:
         """Generate Mermaid syntax using the LLM provider."""
-        provider_getter = getattr(ctx, "get_provider", None)
-        if not provider_getter:
-            raise RuntimeError("Langcore provider not available; cannot generate Mermaid syntax.")
-
         try:
-            provider = provider_getter()
+            provider = ctx.get_provider()
 
             prompt = self.SYNTAX_GENERATION_PROMPT.format(description=description, diagram_type=diagram_type)
             if base_syntax:
@@ -98,14 +94,10 @@ class MermaidManager:
         except Exception as exc:
             raise RuntimeError(f"Failed to generate syntax: {exc}") from exc
 
-    async def fix_syntax_error(self, syntax: str, error_message: str, ctx: Any) -> str:
+    async def fix_syntax_error(self, syntax: str, error_message: str, ctx: ExtensionContext) -> str:
         """Attempt to fix Mermaid syntax using the LLM based on an error message."""
-        provider_getter = getattr(ctx, "get_provider", None)
-        if not provider_getter:
-            raise RuntimeError("Langcore provider not available; cannot fix Mermaid syntax.")
-
         try:
-            provider = provider_getter()
+            provider = ctx.get_provider()
             prompt = self.ERROR_FIXING_PROMPT.format(syntax=syntax, error_message=error_message)
             llm = await provider.get_chat_llm(guild_id=ctx.guild_id)
             messages = convert_to_messages([{"role": "user", "content": prompt}])
@@ -140,23 +132,17 @@ class MermaidManager:
         description: str,
         diagram_type: str,
         guild: discord.Guild,
-        ctx: Any,
+        ctx: ExtensionContext,
     ) -> Tuple[str, discord.File]:
         """Generate, render, and repair Mermaid syntax with retries."""
-        provider_getter = getattr(ctx, "get_provider", None)
-        if not provider_getter:
-            raise RuntimeError("Langcore provider not available; cannot create Mermaid diagram.")
+        provider = ctx.get_provider()
 
-        provider = provider_getter()
-
-        store_getter = getattr(ctx, "get_store", None)
         store = None
-        if store_getter:
-            try:
-                store = store_getter()
-            except Exception as exc:
-                store = None
-                self.logger.debug("No ChainStore available, proceeding without persistence: %s", exc)
+        try:
+            store = ctx.get_store()
+        except Exception as exc:
+            store = None
+            self.logger.debug("No ChainStore available, proceeding without persistence: %s", exc)
 
         coll = f"mermaid_{ctx.member_id}"
         base_syntax = None
@@ -222,21 +208,12 @@ class mermaid(commands.Cog):
             force_registration=True,
         )
         self.manager: Optional[MermaidManager] = None
-        self.message_handler: Optional[Any] = None
+        self.message_handler: Optional[MessageHandler] = None
 
-    def _build_message_handler(self) -> Any:
-        """
-        Build a MessageHandler instance compatible with the current langcore definition.
+    def _build_message_handler(self) -> MessageHandler:
+        """Build a MessageHandler instance for langcore registrations."""
 
-        This mirrors ollama's dynamic provider construction to tolerate langcore reloads.
-        """
-        try:
-            MessageHandler = getattr(import_module("langcore.abc"), "MessageHandler")
-        except Exception as exc:  # noqa: BLE001
-            self.logger.debug("Unable to import langcore.abc.MessageHandler: %s", exc)
-            MessageHandler = object  # type: ignore[assignment]
-
-        class _MermaidMessageHandler(MessageHandler):  # type: ignore[misc,valid-type]
+        class _MermaidMessageHandler(MessageHandler):
             """Message handler for sending Mermaid diagram content."""
 
             async def send_text(self, ctx: commands.Context, text: str, **kwargs: Any) -> discord.Message:
@@ -526,7 +503,7 @@ class mermaid(commands.Cog):
         self,
         description: str,
         diagram_type: str = "flowchart",
-        ctx: Any = None,
+        ctx: Optional[ExtensionContext] = None,
         guild_id: Optional[int] = None,
         channel_id: Optional[int] = None,
         member_id: Optional[int] = None,

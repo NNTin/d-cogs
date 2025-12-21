@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 import discord
 from redbot.core import Config, commands
 from redbot.core.bot import Red
+from cogchain.interfaces import ExtensionContext
 
 from .client import TMDbClient
 from .manager import SpoilarrManager
@@ -85,7 +86,7 @@ class spoilarr(commands.Cog):
         spoiler_mode = await guild_conf.spoiler_mode()
         return {"api_key": api_key, "spoiler_mode": spoiler_mode}
 
-    async def _handle_spoiler_instruction(self, ctx: Any, spoiler_mode: bool) -> None:
+    async def _handle_spoiler_instruction(self, ctx: ExtensionContext, spoiler_mode: bool) -> None:
         if spoiler_mode:
             return
         try:
@@ -101,7 +102,7 @@ class spoilarr(commands.Cog):
     async def query_spoilarr(
         self,
         query: str,
-        ctx: Any = None,
+        ctx: Optional[ExtensionContext] = None,
         guild_id: Optional[int] = None,
         channel_id: Optional[int] = None,
         member_id: Optional[int] = None,
@@ -117,11 +118,13 @@ class spoilarr(commands.Cog):
             langcore_cog = self.bot.get_cog("langcore")
             if not langcore_cog:
                 return "Langcore cog unavailable; cannot query TMDb."
-            ctx = type("SpoilarrCtx", (), {})()
-            ctx.guild_id = int(guild_id)
-            ctx.channel_id = int(channel_id)
-            ctx.member_id = int(member_id)
-            ctx.langcore = langcore_cog
+            ctx = ExtensionContext(
+                guild_id=int(guild_id),
+                channel_id=int(channel_id),
+                member_id=int(member_id),
+                langcore=langcore_cog,
+                default_provider=getattr(langcore_cog, "DEFAULT_PROVIDER_FALLBACK", None),
+            )
 
         settings = await self._get_settings(getattr(ctx, "guild_id", guild_id))
         if not settings["api_key"]:
