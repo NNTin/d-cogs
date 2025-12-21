@@ -26,12 +26,15 @@ class MermaidManager:
         "Output ONLY Mermaid syntax - no markdown fences, no 'mermaid' tag, no commentary.\n\n"
         "User description: {description}\n\n"
         "Authoring rules:\n"
-        "- Start with the correct diagram keyword (flowchart TD|LR; sequenceDiagram; classDiagram; stateDiagram-v2; graph TD|LR).\n"
+        "- Start with the correct diagram keyword (flowchart TD|LR; sequenceDiagram; classDiagram; stateDiagram-v2; erDiagram; requirementDiagram; graph TD|LR).\n"
         "- Node/participant IDs use letters, numbers, or underscores only; labels may have spaces. Declare every participant/node before linking.\n"
         "- Keep edges directional and explicit; ensure each reference exists and arrow syntax is valid.\n"
         "- Prefer concise labels; avoid paragraphs inside nodes.\n"
-        "- Styling: define a small palette for readability (e.g., classDef default fill:#0d1117,stroke:#2563eb,color:#e5e7eb,stroke-width:2px; "
-        "classDef accent fill:#f5f5f5,stroke:#10b981,color:#111827,stroke-width:2px;). Apply class assignments to related nodes to keep grouping clear.\n"
+        "- Styling rules:\n"
+        "  * ONLY apply classDef and class assignments when the diagram type is one of: flowchart, stateDiagram, stateDiagram-v2, erDiagram, requirementDiagram.\n"
+        "  * When allowed, define a small, readable palette (e.g., classDef default fill:#0d1117,stroke:#2563eb,color:#e5e7eb,stroke-width:2px; "
+        "classDef accent fill:#f5f5f5,stroke:#10b981,color:#111827,stroke-width:2px;), and apply classes consistently to related nodes.\n"
+        "  * When NOT allowed (e.g., sequenceDiagram, gantt, pie, journey, timeline, gitGraph, mindmap), DO NOT emit classDef, class, or node-level styling.\n"
         "- Use subgraphs/grouping only when it clarifies structure; keep indentation consistent.\n"
         "- Double-check punctuation (semicolons where needed), brace/indent structure, and participant/class/state declarations before returning.\n"
         "Return only the final Mermaid syntax with no wrappers."
@@ -444,9 +447,16 @@ class mermaid(commands.Cog):
                 await page.set_content(html_content, wait_until="networkidle", timeout=timeout * 1000)
                 await page.wait_for_selector(".mermaid", timeout=timeout * 1000)
                 await page.wait_for_function("document.querySelector('.mermaid svg') !== null", timeout=timeout * 1000)
-                error_locator = page.locator("text.error-text")
+                error_locator = page.locator(".error-text")
                 if await error_locator.count() > 0:
-                    error_msg = (await error_locator.first.inner_text()).strip()
+                    first_error = error_locator.first
+                    raw_error = await first_error.text_content()
+                    if raw_error is None:
+                        try:
+                            raw_error = await first_error.inner_text()
+                        except Exception as exc:  # noqa: BLE001
+                            raw_error = f"Unable to read error text: {exc}"
+                    error_msg = raw_error.strip() if raw_error else "Unknown Mermaid syntax error"
                     raise RuntimeError(f"Syntax error: {error_msg}")
                 element = await page.query_selector(".mermaid")
                 if not element:
@@ -498,6 +508,7 @@ class mermaid(commands.Cog):
             png_bytes = await self._render_mermaid_png(rendered_html)
         except RuntimeError as exc:
             self.logger.error("Failed to generate PNG from Mermaid diagram: %s", exc)
+            self.logger.error("Mermaid syntax causing error: %s", syntax)
             raise RuntimeError(f"Failed to generate PNG from Mermaid diagram: {exc}") from exc
         except Exception as exc:
             self.logger.exception("Unexpected error while generating Mermaid PNG")
