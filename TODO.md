@@ -116,3 +116,9 @@ The PyPI package will be called cogchain.
 
 In order to be able to locally develop with it, we will locally install the cog with `pip install -e .`  
 When the package is ready we will publish it.
+
+---
+
+sync cog pipeline requires
+
+pip install -e cogchain
