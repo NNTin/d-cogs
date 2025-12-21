@@ -1,8 +1,5 @@
 # AI automation cogs
 
-Inspiration has been drawn from assistant (see `Synced Cogs Notice`), however since I am navigating "unused" code (OpenAI is ignored) too much I'll re-invent the wheel. Most of my changes are towards Ollama. Thus working with the original assistant cog has been quite a challenge.  
-Huge thanks goes out towards [vertyco](http://github.com/vertyco/). While working with assistant I have learned quite a few things which makes me comfortable starting my own version.
-
 ## Architecture
 
 ### Shared interfaces via `cogchain`
@@ -308,16 +305,18 @@ Add RAG pipeline. Fomerely implemented as a cog ragutils for assistant cog. This
 
 ---
 
-## Synced Cogs Notice
+## Credits
 
-This repository mirrors cogs that were authored elsewhere. **Please install them directly from their source repositories instead of from this mirror**.
+This repository mirrors a cog that were authored elsewhere. **Please install directly from the source repository instead of from this mirror**.
 
 - `hotreload` — sourced from [`cswimr/SeaCogs`](https://c.csw.im/cswimr/SeaCogs) (branch `main`). 
 
-These copies are synced for convenience and are not my creations. Please support and credit the original authors when using their cogs.
+The copy is synced for convenience and is not my creation.
 
-- `assistant` — sourced from [`vertyco/vrt-cogs`](https://github.com/vertyco/vrt-cogs) (branch `main`). 
+- `assistant` — was sourced from [`vertyco/vrt-cogs`](https://github.com/vertyco/vrt-cogs) (branch `main`). 
 
-Used to be mirroed but is replaced by the cogs `langcore`, `ollama` and `qdrant`.
+Used to be mirrored but is replaced by the cogs `langcore`, `ollama`, `openrouter` and `qdrant` + the python module `cogchain` + various extension cogs like `mermaid` and `spoilarr`. Inspiration has been drawn from `assistant` but I was too restricted so I had to re-invent the wheel.
 
-Huge thanks to [cswimr](https://c.csw.im/cswimr) and [vertyco](https://github.com/vertyco) for allowing me to mirror their work!
+- `modreload` — a copy of `hotreload`, `mod` stands for python module. Instead of reloading a cog, it'll perform a pip install. Used for the development of the `cogchain` python module. Created with 1 prompt, see implementation plan (`modreload/IMPLEMENTATION_PLAN.md`).
+
+Huge thanks to [cswimr](https://c.csw.im/cswimr) and [vertyco](https://github.com/vertyco).

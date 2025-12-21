@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/refs/heads/V3/develop/schema/red_cog.schema.json",
+  "author": [
+    "cswimr", "Tin Nguyen"
+  ],
+  "install_msg": "Thank you for installing ModReload! Configure tracked modules with `[p]modreload add`. It's not meant to be installed and was hastily copied from [HotReload](https://c.csw.im/cswimr/SeaCogs/src/branch/main/hotreload).",
+  "name": "ModReload",
+  "short": "Automatically reinstall and reload tracked Python modules on change.",
+  "description": "Watches local Python packages (non-cogs) and reinstalls/reloads them when files change.",
+  "end_user_data_statement": "This cog does not store end user data.",
+  "hidden": false,
+  "disabled": false,
+  "min_bot_version": "3.5.0",
+  "min_python_version": [
+    3,
+    11,
+    0
+  ],
+  "requirements": [
+    "watchdog~=6.0"
+  ],
+  "tags": [
+    "utility",
+    "development"
+  ]
+}

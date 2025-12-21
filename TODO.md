@@ -55,17 +55,15 @@ fix pipeline, add automatic tests, activate tests in pipeline
 
 ---
 
-support OpenRouter as an additional ChainProvider, see @ollama implementation
+OpenRouter is untested. Created but I don't use API keys for it yet.
+
 later: Fallback strategy: OpenRouter (free) -> Ollama (cloud) -> Ollama (local hardware)
+-> worth offloading as a cog since different people have different ideas of it
 
 ---
 
 create mkdocs
 
----
-
-refactor mermaid similar to spoilarr
-for each AI cog: put prompts into <cogname>/prompts.py similar to spoilarr
 
 ---
 
@@ -102,23 +100,19 @@ Conversation Agent: *talks about the diagram without posting the mermaid syntax 
 
 ---
 
-In the ExtensionCogs there are some hard references to langcore.  
-Because we cannot control the order in which cogs are loaded, we need a better way to allow lazy loading and only do the registration (ChainHub, ChainProvider and ChainStore) when the langcore cog is loaded. The langcore cog does fire an event for this.  
-
-
----
-
-We have several references of `getattr()` in langcore, mermaid, qdrant and spoilarr. This kind of implementation is not nice and does not fully utilize the advantages of defined interfaces. 
-
-I am developing plugins (or cogs) for the Red-DiscordBot. I have the problem that I requires Abstractions, Contracts and Interfaces between the cogs. However there cannot be any hard references between the plugins. They are not directly aware of each other's existance. In order to share the Contracts between them we will create a PyPI package.
-
-The PyPI package will be called cogchain.
-
-In order to be able to locally develop with it, we will locally install the cog with `pip install -e .`  
-When the package is ready we will publish it.
-
----
-
 sync cog pipeline requires
 
 pip install -e cogchain
+
+---
+
+SubAgents defined in cogchain but not used
+
+---
+
+hotreload is amazing. It reloads the cog on file changes.  
+cogchain is not a cog. It is a python module that has to be installed.
+
+Create me another cog, named modreload (short for python module reload)
+
+**Investigate** how hotreload works and create an **extensive** implementation plan for modreload. Put it into modreload/README.md
