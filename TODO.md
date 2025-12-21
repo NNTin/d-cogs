@@ -108,4 +108,10 @@ Because we cannot control the order in which cogs are loaded, we need a better w
 ---
 
 We have several references of `getattr()` in langcore, mermaid, qdrant and spoilarr. This kind of implementation is not nice and does not fully utilize the advantages of defined interfaces. 
--> still conceptualizing how to proceed here
+
+I am developing plugins (or cogs) for the Red-DiscordBot. I have the problem that I requires Abstractions, Contracts and Interfaces between the cogs. However there cannot be any hard references between the plugins. They are not directly aware of each other's existance. In order to share the Contracts between them we will create a PyPI package.
+
+The PyPI package will be called cogchain.
+
+In order to be able to locally develop with it, we will locally install the cog with `pip install -e .`  
+When the package is ready we will publish it.
