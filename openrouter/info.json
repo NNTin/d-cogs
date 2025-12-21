@@ -1,0 +1,25 @@
+{
+    "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog.schema.json",
+    "name": "openrouter",
+    "short": "OpenRouter ChainProvider for langcore",
+    "description": "Implements the ChainProvider abstraction from langcore using OpenRouter chat and embeddings.",
+    "end_user_data_statement": "Work in Progress",
+    "install_msg": "Work in Progress",
+    "author": [
+        "Tin Nguyen"
+    ],
+    "required_cogs": {},
+    "requirements": [
+        "langchain-openai"
+    ],
+    "tags": [
+        "openrouter",
+        "ai",
+        "agent",
+        "llm"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}
