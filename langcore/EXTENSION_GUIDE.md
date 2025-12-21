@@ -49,11 +49,18 @@ class MyManager(SubAgent):
             tools=[{"name": "search"}],
             callbacks=callbacks,
             guild_id=ctx.guild_id,
-            member_id=ctx.member_id,
             channel_id=ctx.channel_id,
+            member_id=ctx.member_id,
             provider=ctx.get_provider(),
         )
 ```
+
+## Lazy Loading & No Imports
+- Do **not** hard-import `langcore` modules inside extension/provider/store cogs. Prefer dynamic imports (e.g., `import_module("langcore.abc")`) or event-driven registration via `on_langcore_cog_add` / `on_langcore_cog_remove`.
+- Tool signatures can accept `ctx: Any = None`; call `getattr(ctx, "get_provider", lambda: None)()` and `getattr(ctx, "add_to_conversation", None)` defensively so the cog can load without langcore.
+- Standalone features (like `[p]mermaid`) must function when langcore is absent.
+- Provider/store cogs should mirror the lazy pattern from ollama/openrouter/qdrant: build ABC subclasses dynamically and register only after receiving the langcore add event.
+- If langcore isn’t present, return a clear error from tool callbacks instead of failing at import time.
 
 ## Migration Checklist (old pattern → new pattern)
 - Replace `langcore_cog.get_provider("ollama")` with `ctx.get_provider()`.

@@ -14,7 +14,6 @@ from playwright.async_api import async_playwright
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
-from langcore.abc import ExtensionContext
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
@@ -53,9 +52,8 @@ class MermaidManager:
         "Return only the corrected Mermaid syntax."
     )
 
-    def __init__(self, mermaid_cog, langcore_cog) -> None:
+    def __init__(self, mermaid_cog) -> None:
         self.mermaid_cog = mermaid_cog
-        self.langcore_cog = langcore_cog
         self.logger = logging.getLogger("red.d_cogs.mermaid.manager")
         self.max_retries = 3
 
@@ -63,12 +61,16 @@ class MermaidManager:
         self,
         description: str,
         diagram_type: str,
-        ctx: ExtensionContext,
+        ctx: Any,
         base_syntax: Optional[str] = None,
     ) -> str:
         """Generate Mermaid syntax using the LLM provider."""
+        provider_getter = getattr(ctx, "get_provider", None)
+        if not provider_getter:
+            raise RuntimeError("Langcore provider not available; cannot generate Mermaid syntax.")
+
         try:
-            provider = ctx.get_provider()
+            provider = provider_getter()
 
             prompt = self.SYNTAX_GENERATION_PROMPT.format(description=description, diagram_type=diagram_type)
             if base_syntax:
@@ -93,11 +95,14 @@ class MermaidManager:
         except Exception as exc:
             raise RuntimeError(f"Failed to generate syntax: {exc}") from exc
 
-    async def fix_syntax_error(self, syntax: str, error_message: str, ctx: ExtensionContext) -> str:
+    async def fix_syntax_error(self, syntax: str, error_message: str, ctx: Any) -> str:
         """Attempt to fix Mermaid syntax using the LLM based on an error message."""
-        try:
-            provider = ctx.get_provider()
+        provider_getter = getattr(ctx, "get_provider", None)
+        if not provider_getter:
+            raise RuntimeError("Langcore provider not available; cannot fix Mermaid syntax.")
 
+        try:
+            provider = provider_getter()
             prompt = self.ERROR_FIXING_PROMPT.format(syntax=syntax, error_message=error_message)
             llm = await provider.get_chat_llm(guild_id=ctx.guild_id)
             messages = convert_to_messages([{"role": "user", "content": prompt}])
@@ -132,16 +137,23 @@ class MermaidManager:
         description: str,
         diagram_type: str,
         guild: discord.Guild,
-        ctx: ExtensionContext,
+        ctx: Any,
     ) -> Tuple[str, discord.File]:
         """Generate, render, and repair Mermaid syntax with retries."""
-        provider = ctx.get_provider()
+        provider_getter = getattr(ctx, "get_provider", None)
+        if not provider_getter:
+            raise RuntimeError("Langcore provider not available; cannot create Mermaid diagram.")
 
-        try:
-            store = ctx.get_store()
-        except Exception as exc:
-            store = None
-            self.logger.debug("No ChainStore available, proceeding without persistence: %s", exc)
+        provider = provider_getter()
+
+        store_getter = getattr(ctx, "get_store", None)
+        store = None
+        if store_getter:
+            try:
+                store = store_getter()
+            except Exception as exc:
+                store = None
+                self.logger.debug("No ChainStore available, proceeding without persistence: %s", exc)
 
         coll = f"mermaid_{ctx.member_id}"
         base_syntax = None
@@ -353,8 +365,9 @@ class mermaid(commands.Cog):
             except Exception as exc:
                 self.logger.warning("Failed to register Mermaid system prompt: %s", exc)
 
-        self.manager = MermaidManager(mermaid_cog=self, langcore_cog=langcore_cog)
-        self.logger.info("MermaidManager initialized as sub-agent")
+        if not self.manager:
+            self.manager = MermaidManager(mermaid_cog=self)
+            self.logger.info("MermaidManager initialized as sub-agent")
 
         self.message_handler = self._build_message_handler()
         if langcore_cog.register_message_handler(self.qualified_name, self.message_handler):
@@ -498,29 +511,23 @@ class mermaid(commands.Cog):
         self,
         description: str,
         diagram_type: str = "flowchart",
-        ctx: Optional[ExtensionContext] = None,
+        ctx: Any = None,
         guild_id: Optional[int] = None,
         channel_id: Optional[int] = None,
         member_id: Optional[int] = None,
     ) -> str:
         """Generate a Mermaid diagram via the MermaidManager sub-agent and upload it."""
         if ctx is None and (guild_id is None or channel_id is None or member_id is None):
-            return "Missing context parameters (guild_id, channel_id, member_id). Cannot generate diagram."
+            self.logger.warning("generate_mermaid called without langcore context or IDs")
+            return "Langcore context is required to generate a diagram via the tool."
 
         if ctx is None:
-            langcore_cog = self.bot.get_cog("langcore")
-            if not langcore_cog:
-                return "Langcore cog unavailable; cannot generate diagram."
-            ctx = ExtensionContext(
-                guild_id=int(guild_id),
-                channel_id=int(channel_id),
-                member_id=int(member_id),
-                langcore=langcore_cog,
-            )
+            self.logger.warning("Langcore context unavailable; cannot generate diagram.")
+            return "Langcore context unavailable; cannot generate diagram."
 
-        guild_obj = self.bot.get_guild(ctx.guild_id)
+        guild_obj = self.bot.get_guild(getattr(ctx, "guild_id", guild_id))
         if not guild_obj:
-            return f"Guild {ctx.guild_id} not found. Cannot upload diagram."
+            return f"Guild {getattr(ctx, 'guild_id', guild_id)} not found. Cannot upload diagram."
 
         try:
             syntax, file = await self.manager.create_diagram(
@@ -533,9 +540,9 @@ class mermaid(commands.Cog):
             self.logger.error("MermaidManager failed to create diagram: %s", e)
             return f"Failed to generate diagram: {str(e)}"
 
-        channel = guild_obj.get_channel(ctx.channel_id)
+        channel = guild_obj.get_channel(getattr(ctx, "channel_id", channel_id))
         if not channel:
-            return f"Channel {ctx.channel_id} not found in guild {guild_obj.name}. Cannot upload diagram."
+            return f"Channel {getattr(ctx, 'channel_id', channel_id)} not found in guild {guild_obj.name}. Cannot upload diagram."
 
         try:
             msg = await channel.send("Here's your Mermaid diagram:", file=file)
@@ -543,14 +550,16 @@ class mermaid(commands.Cog):
             self.logger.error("Failed to upload diagram to channel %s: %s", ctx.channel_id, e)
             return f"Failed to upload diagram: {str(e)}"
 
-        try:
-            await ctx.add_to_conversation(f"```mermaid\n{syntax}\n```")
-        except Exception as exc:  # noqa: BLE001
-            self.logger.warning("Failed to inject Mermaid syntax into conversation: %s", exc)
-            return (
-                f"✅ Diagram uploaded: {msg.jump_url} "
-                "(Warning: syntax not added to conversation context)"
-            )
+        add_conv = getattr(ctx, "add_to_conversation", None)
+        if add_conv:
+            try:
+                await add_conv(f"```mermaid\n{syntax}\n```")
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("Failed to inject Mermaid syntax into conversation: %s", exc)
+                return (
+                    f"✅ Diagram uploaded: {msg.jump_url} "
+                    "(Warning: syntax not added to conversation context)"
+                )
 
         return f"✅ Diagram uploaded: {msg.jump_url}\nMermaid syntax added to conversation context."
 
