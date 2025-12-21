@@ -49,8 +49,11 @@ class SpoilarrManager:
                 "description": "Get TMDb TV show details by ID.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"tmdb_id": {"type": "number", "description": "TMDb TV show ID"}},
-                    "required": ["tmdb_id"],
+                    "properties": {
+                        "tmdb_id": {"type": "number", "description": "TMDb TV show ID"},
+                        "tv_id": {"type": "number", "description": "TV show ID (alias for tmdb_id)"},
+                    },
+                    "required": [],
                 },
             },
             {
@@ -67,8 +70,11 @@ class SpoilarrManager:
                 "description": "Get TMDb TV show credits by ID.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"tmdb_id": {"type": "number", "description": "TMDb TV show ID"}},
-                    "required": ["tmdb_id"],
+                    "properties": {
+                        "tmdb_id": {"type": "number", "description": "TMDb TV show ID"},
+                        "tv_id": {"type": "number", "description": "TV show ID (alias for tmdb_id)"},
+                    },
+                    "required": [],
                 },
             },
             {
@@ -169,14 +175,22 @@ class SpoilarrManager:
         async def _movie_details(tmdb_id: int) -> Any:
             return await internal_tools.internal_movie_details(self.spoilarr_cog, tmdb_id=tmdb_id, guild_id=guild_id)
 
-        async def _tv_details(tmdb_id: int) -> Any:
-            return await internal_tools.internal_tv_details(self.spoilarr_cog, tmdb_id=tmdb_id, guild_id=guild_id)
+        async def _tv_details(tmdb_id: Optional[int] = None, tv_id: Optional[int] = None) -> Any:
+            tv_id_val = tmdb_id or tv_id
+            if tv_id_val is None:
+                self.logger.warning("tv_details called without tmdb_id/tv_id")
+                return "Missing tmdb_id for tv_details"
+            return await internal_tools.internal_tv_details(self.spoilarr_cog, tmdb_id=int(tv_id_val), guild_id=guild_id)
 
         async def _movie_credits(tmdb_id: int) -> Any:
             return await internal_tools.internal_movie_credits(self.spoilarr_cog, tmdb_id=tmdb_id, guild_id=guild_id)
 
-        async def _tv_credits(tmdb_id: int) -> Any:
-            return await internal_tools.internal_tv_credits(self.spoilarr_cog, tmdb_id=tmdb_id, guild_id=guild_id)
+        async def _tv_credits(tmdb_id: Optional[int] = None, tv_id: Optional[int] = None) -> Any:
+            tv_id_val = tmdb_id or tv_id
+            if tv_id_val is None:
+                self.logger.warning("tv_credits called without tmdb_id/tv_id")
+                return "Missing tmdb_id for tv_credits"
+            return await internal_tools.internal_tv_credits(self.spoilarr_cog, tmdb_id=int(tv_id_val), guild_id=guild_id)
 
         async def _discover_movies(page: int = 1) -> Any:
             return await internal_tools.internal_discover_movies(self.spoilarr_cog, page=page, guild_id=guild_id)
@@ -237,7 +251,7 @@ class SpoilarrManager:
         try:
             messages = convert_to_messages(messages_dict)
             callbacks = self._build_callbacks(ctx.guild_id)
-            max_iterations = 50
+            max_iterations = 10
             iteration = 0
 
             while iteration < max_iterations:
@@ -245,26 +259,26 @@ class SpoilarrManager:
 
                 bound_llm = llm.bind_tools(self._tool_schemas)
                 ai_msg: AIMessage = await bound_llm.ainvoke(messages)
-                self.logger.info("Spoilarr agent iteration %s AI message: %s", iteration, ai_msg)
                 messages.append(ai_msg)
 
-                # TODO: disabled final response check for now to allow non-JSON replies, there is a bug with the conversion
-                # if not ai_msg.tool_calls:
-                #     if not _is_json_like(ai_msg.content):
-                #         self.logger.warning(
-                #             "Spoilarr agent produced non-JSON response, requesting JSON-only output (iteration %s)",
-                #             iteration,
-                #         )
-                #         messages.append(
-                #             SystemMessage(
-                #                 content=(
-                #                     "Final reply must be toon.dumps(JSON) only. If you still need data, call the tools "
-                #                     "(search -> details -> credits). No prose—return the JSON string."
-                #                 )
-                #             )
-                #         )
-                #         continue
-                #     break
+                if not ai_msg.tool_calls:
+                    # TODO: disabled final response check for now to allow non-JSON replies, there is a bug with the conversion
+                    # if not _is_json_like(ai_msg.content):
+                    #     self.logger.warning(
+                    #         "Spoilarr agent produced non-JSON response, requesting JSON-only output (iteration %s)",
+                    #         iteration,
+                    #     )
+                    #     messages.append(
+                    #         SystemMessage(
+                    #             content=(
+                    #                 "Final reply must be toon.dumps(JSON) only. If you still need data, call the tools "
+                    #                 "(search -> details -> credits). No prose—return the JSON string."
+                    #             )
+                    #         )
+                    #     )
+                    #     continue
+                    break
+
 
                 for tool_index, tool_call in enumerate(ai_msg.tool_calls):
                     if isinstance(tool_call, dict):
@@ -315,7 +329,8 @@ class SpoilarrManager:
                 self.logger.warning("Spoilarr agent loop reached max iterations (%s)", max_iterations)
         except Exception as exc:
             self.logger.error("Spoilarr agent loop failed: %s", exc)
-            # We will not return error, instead we proceed and return everything we have from the loop            # try:
+            # We will not return error, instead we proceed and return everything we have from the loop
+            # try:
             #     return toon_format.dumps({"error": f"Spoilarr agent failed: {exc}"}, indent=2)
             # except Exception:
             #     return f'{{"error": "Spoilarr agent failed: {exc}"}}'
@@ -327,10 +342,12 @@ class SpoilarrManager:
                 break
 
         if isinstance(final_content, (dict, list)):
-            try:
-                return toon_format.dumps(final_content, indent=2)
-            except Exception:
-                pass
+            return final_content
+            # 
+            # try:
+            #     return toon_format.dumps(final_content, indent=2)
+            # except Exception:
+            #     pass
 
         final_response = str(final_content).strip()
 
