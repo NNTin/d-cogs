@@ -81,20 +81,48 @@ sequenceDiagram
       margin: 0 0 18px;
       color: #cbd5e1;
     }
-    .mermaid {
+    .mermaid-container {
       background: #0b1220;
       border: 1px solid #334155;
       border-radius: 10px;
       padding: 12px;
+      overflow-x: auto;
+    }
+    pre.error-text {
+      color: #f87171;
+      background: #020617;
+      padding: 12px;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      margin: 0;
+      font-size: 14px;
+      border: 1px solid #7f1d1d;
     }
   </style>
   <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
 
     mermaid.initialize({
-      startOnLoad: true,
+      startOnLoad: false,
       theme: 'dark',
-      securityLevel: 'strict'
+      securityLevel: 'strict',
+      logLevel: 'debug',
+    });
+
+    const diagramText = {{ diagram | default(default_diagram) | tojson | safe }};
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      const container = document.getElementById('diagram');
+
+      try {
+        await mermaid.parse(diagramText);
+        const { svg } = await mermaid.render('diagram1', diagramText);
+        container.innerHTML = svg;
+      } catch (err) {
+        console.error(err);
+        const message = (err && err.message) ? err.message : 'Unknown Mermaid render error';
+        container.innerHTML = `<pre class="error-text">${message}</pre>`;
+      }
     });
   </script>
 </head>
@@ -102,7 +130,7 @@ sequenceDiagram
   <main class="card">
     <h1>{{ main_title }}</h1>
     <p>{{ description }}</p>
-    <div class="mermaid">{{ diagram | default(default_diagram) | safe }}</div>
+    <div id="diagram" class="mermaid-container"></div>
   </main>
 </body>
 </html>

@@ -445,9 +445,13 @@ class mermaid(commands.Cog):
             page = await browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
             try:
                 await page.set_content(html_content, wait_until="networkidle", timeout=timeout * 1000)
-                await page.wait_for_selector(".mermaid", timeout=timeout * 1000)
-                await page.wait_for_function("document.querySelector('.mermaid svg') !== null", timeout=timeout * 1000)
-                error_locator = page.locator(".error-text")
+                await page.wait_for_selector(".mermaid-container", timeout=timeout * 1000)
+                await page.wait_for_function(
+                    "document.querySelector('.mermaid-container svg') || "
+                    "document.querySelector('.mermaid-container .error-text')",
+                    timeout=timeout * 1000,
+                )
+                error_locator = page.locator(".mermaid-container .error-text")
                 if await error_locator.count() > 0:
                     first_error = error_locator.first
                     raw_error = await first_error.text_content()
@@ -458,7 +462,7 @@ class mermaid(commands.Cog):
                             raw_error = f"Unable to read error text: {exc}"
                     error_msg = raw_error.strip() if raw_error else "Unknown Mermaid syntax error"
                     raise RuntimeError(f"Syntax error: {error_msg}")
-                element = await page.query_selector(".mermaid")
+                element = await page.query_selector(".mermaid-container")
                 if not element:
                     raise RuntimeError("Mermaid container not found after rendering.")
                 png_bytes = await element.screenshot(type="png")
