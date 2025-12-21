@@ -14,6 +14,7 @@ from playwright.async_api import async_playwright
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
+from langcore.abc import ExtensionContext
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
@@ -62,14 +63,12 @@ class MermaidManager:
         self,
         description: str,
         diagram_type: str,
-        guild_id: int,
+        ctx: ExtensionContext,
         base_syntax: Optional[str] = None,
     ) -> str:
         """Generate Mermaid syntax using the LLM provider."""
         try:
-            provider = self.langcore_cog.get_provider("ollama")
-            if not provider:
-                raise RuntimeError("MermaidManager could not find the ollama provider")
+            provider = ctx.get_provider()
 
             prompt = self.SYNTAX_GENERATION_PROMPT.format(description=description, diagram_type=diagram_type)
             if base_syntax:
@@ -77,7 +76,7 @@ class MermaidManager:
                     f"\n\n**EDIT MODE** Previous diagram:\n\n```mermaid\n{base_syntax}\n```\n\n"
                     f"User request: {description}"
                 )
-            llm = await provider.get_chat_llm(guild_id=guild_id)
+            llm = await provider.get_chat_llm(guild_id=ctx.guild_id)
             messages = convert_to_messages([{"role": "user", "content": prompt}])
             response = await llm.ainvoke(messages)
             syntax = str(response.content).strip()
@@ -94,15 +93,13 @@ class MermaidManager:
         except Exception as exc:
             raise RuntimeError(f"Failed to generate syntax: {exc}") from exc
 
-    async def fix_syntax_error(self, syntax: str, error_message: str, guild_id: int) -> str:
+    async def fix_syntax_error(self, syntax: str, error_message: str, ctx: ExtensionContext) -> str:
         """Attempt to fix Mermaid syntax using the LLM based on an error message."""
         try:
-            provider = self.langcore_cog.get_provider("ollama")
-            if not provider:
-                raise RuntimeError("MermaidManager could not find the ollama provider")
+            provider = ctx.get_provider()
 
             prompt = self.ERROR_FIXING_PROMPT.format(syntax=syntax, error_message=error_message)
-            llm = await provider.get_chat_llm(guild_id=guild_id)
+            llm = await provider.get_chat_llm(guild_id=ctx.guild_id)
             messages = convert_to_messages([{"role": "user", "content": prompt}])
             response = await llm.ainvoke(messages)
             fixed_syntax = str(response.content).strip()
@@ -135,20 +132,18 @@ class MermaidManager:
         description: str,
         diagram_type: str,
         guild: discord.Guild,
-        member_id: int,
+        ctx: ExtensionContext,
     ) -> Tuple[str, discord.File]:
         """Generate, render, and repair Mermaid syntax with retries."""
-        provider = self.langcore_cog.get_provider("ollama")
-        if not provider:
-            raise RuntimeError("MermaidManager could not find the ollama provider")
+        provider = ctx.get_provider()
 
-        store = None
         try:
-            store = self.langcore_cog.get_store()
+            store = ctx.get_store()
         except Exception as exc:
+            store = None
             self.logger.debug("No ChainStore available, proceeding without persistence: %s", exc)
 
-        coll = f"mermaid_{member_id}"
+        coll = f"mermaid_{ctx.member_id}"
         base_syntax = None
         if store:
             try:
@@ -168,7 +163,7 @@ class MermaidManager:
         syntax = await self.generate_syntax(
             description=description,
             diagram_type=diagram_type,
-            guild_id=guild.id,
+            ctx=ctx,
             base_syntax=base_syntax,
         )
 
@@ -189,10 +184,10 @@ class MermaidManager:
                 raise
             except TemplateError as exc:
                 self.logger.warning("Template error on attempt %s: %s", attempt + 1, exc)
-                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), guild_id=guild.id)
+                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), ctx=ctx)
             except RuntimeError as exc:
                 self.logger.warning("Rendering error on attempt %s: %s", attempt + 1, exc)
-                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), guild_id=guild.id)
+                syntax = await self.fix_syntax_error(syntax=syntax, error_message=str(exc), ctx=ctx)
 
         raise RuntimeError(f"Failed to create diagram after {self.max_retries} attempts")
 
@@ -503,50 +498,59 @@ class mermaid(commands.Cog):
         self,
         description: str,
         diagram_type: str = "flowchart",
+        ctx: Optional[ExtensionContext] = None,
         guild_id: Optional[int] = None,
         channel_id: Optional[int] = None,
         member_id: Optional[int] = None,
     ) -> str:
         """Generate a Mermaid diagram via the MermaidManager sub-agent and upload it."""
-        if guild_id is None or channel_id is None or member_id is None:
+        if ctx is None and (guild_id is None or channel_id is None or member_id is None):
             return "Missing context parameters (guild_id, channel_id, member_id). Cannot generate diagram."
 
-        guild_obj = self.bot.get_guild(guild_id)
+        if ctx is None:
+            langcore_cog = self.bot.get_cog("langcore")
+            if not langcore_cog:
+                return "Langcore cog unavailable; cannot generate diagram."
+            ctx = ExtensionContext(
+                guild_id=int(guild_id),
+                channel_id=int(channel_id),
+                member_id=int(member_id),
+                langcore=langcore_cog,
+            )
+
+        guild_obj = self.bot.get_guild(ctx.guild_id)
         if not guild_obj:
-            return f"Guild {guild_id} not found. Cannot upload diagram."
+            return f"Guild {ctx.guild_id} not found. Cannot upload diagram."
 
         try:
             syntax, file = await self.manager.create_diagram(
                 description=description,
                 diagram_type=diagram_type,
                 guild=guild_obj,
-                member_id=member_id,
+                ctx=ctx,
             )
         except Exception as e:
             self.logger.error("MermaidManager failed to create diagram: %s", e)
             return f"Failed to generate diagram: {str(e)}"
 
-        channel = guild_obj.get_channel(channel_id)
+        channel = guild_obj.get_channel(ctx.channel_id)
         if not channel:
-            return f"Channel {channel_id} not found in guild {guild_obj.name}. Cannot upload diagram."
+            return f"Channel {ctx.channel_id} not found in guild {guild_obj.name}. Cannot upload diagram."
 
         try:
             msg = await channel.send("Here's your Mermaid diagram:", file=file)
         except discord.HTTPException as e:
-            self.logger.error("Failed to upload diagram to channel %s: %s", channel_id, e)
+            self.logger.error("Failed to upload diagram to channel %s: %s", ctx.channel_id, e)
             return f"Failed to upload diagram: {str(e)}"
 
-        langcore_cog = self.bot.get_cog("langcore")
-        if not langcore_cog:
-            self.logger.warning("langcore cog not found, cannot inject syntax into conversation")
-            return f"✅ Diagram uploaded: {msg.jump_url} (Warning: syntax not added to conversation context)"
-
-        conv_manager = langcore_cog.conversation_manager
-        conversation = conv_manager.get_conversation(member_id, channel_id, guild_id)
-        lock = conv_manager.get_conversation_lock(member_id, channel_id, guild_id)
-
-        async with lock:
-            conversation.add_assistant_message(f"```mermaid\n{syntax}\n```")
+        try:
+            await ctx.add_to_conversation(f"```mermaid\n{syntax}\n```")
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Failed to inject Mermaid syntax into conversation: %s", exc)
+            return (
+                f"✅ Diagram uploaded: {msg.jump_url} "
+                "(Warning: syntax not added to conversation context)"
+            )
 
         return f"✅ Diagram uploaded: {msg.jump_url}\nMermaid syntax added to conversation context."
 
@@ -652,7 +656,7 @@ class mermaid(commands.Cog):
             await ctx.send("langcore cog is not available.")
             return
         try:
-            provider = langcore_cog.get_provider("ollama")
+            provider = await langcore_cog.get_default_provider(ctx.guild.id)
             store = langcore_cog.get_store()
         except Exception as exc:
             await ctx.send(f"Unable to access vector store: {exc}")
@@ -690,7 +694,7 @@ class mermaid(commands.Cog):
             await ctx.send("langcore cog is not available.")
             return
         try:
-            provider = langcore_cog.get_provider("ollama")
+            provider = await langcore_cog.get_default_provider(ctx.guild.id)
             store = langcore_cog.get_store()
         except Exception as exc:
             await ctx.send(f"Unable to access vector store: {exc}")

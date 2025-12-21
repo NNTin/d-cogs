@@ -124,6 +124,7 @@ class Conversation(BaseModel):
 
 class GuildConfig(BaseModel):
     enabled: bool = True
+    default_provider: str = "ollama"
     max_retention: int = 50
     max_retention_time: int = 1800
     blacklist: List[int] = Field(default_factory=list)

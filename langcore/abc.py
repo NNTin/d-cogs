@@ -16,13 +16,20 @@ MessageHandler Pattern:
 - This enables modular, cog-specific rendering and message lifecycle management.
 """
 
+import asyncio
+import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Union
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 import discord
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage, convert_to_messages
 from redbot.core import commands
 
 from .models import GuildConfig
+
+if TYPE_CHECKING:
+    from .langcore import langcore
 
 
 class ChainProvider(ABC):
@@ -322,3 +329,193 @@ class MessageHandler(ABC):
             discord.Forbidden: If lacking permissions to edit.
         """
         raise NotImplementedError
+
+
+@dataclass
+class ExtensionContext:
+    """Context injected into extension cog tool functions.
+
+    Provides safe access to providers, vector stores, and conversation updates without
+    requiring direct access to langcore internals.
+
+    Example:
+        async def generate_diagram(description: str, ctx: ExtensionContext) -> str:
+            provider = ctx.get_provider()
+            store = ctx.get_store()
+            # ... use provider/store ...
+            await ctx.add_to_conversation("Done rendering diagram.")
+            return "✅ Diagram created"
+    """
+
+    guild_id: int
+    channel_id: int
+    member_id: int
+    langcore: "langcore"
+    default_provider: Optional[str] = None
+
+    def get_provider(self, name: Optional[str] = None) -> ChainProvider:
+        """Return a registered provider, defaulting to the guild's configured provider."""
+        if not self.langcore:
+            raise RuntimeError("Langcore reference missing on ExtensionContext.")
+
+        provider_name = name or self.default_provider or getattr(self.langcore, "DEFAULT_PROVIDER_FALLBACK", None) or "ollama"
+        provider = self.langcore.get_provider(provider_name)
+        if not provider:
+            raise RuntimeError(f"Provider '{provider_name}' is not registered with langcore.")
+        return provider
+
+    def get_store(self) -> ChainStore:
+        """Get the configured ChainStore, raising if none is available."""
+        if not self.langcore:
+            raise RuntimeError("Langcore reference missing on ExtensionContext.")
+        return self.langcore.get_store()
+
+    async def add_to_conversation(
+        self,
+        content: str,
+        role: str = "assistant",
+        tool_call_id: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        """Inject content into the active conversation using langcore's helper.
+
+        Args:
+            content: Text to add.
+            role: Message role (`assistant`, `tool`, or `user`).
+            tool_call_id: Optional tool call identifier when role is `tool`.
+            name: Optional message name for tool metadata.
+        """
+        if not self.langcore:
+            raise RuntimeError("Langcore reference missing on ExtensionContext.")
+
+        await self.langcore.inject_conversation_content(
+            member_id=self.member_id,
+            channel_id=self.channel_id,
+            guild_id=self.guild_id,
+            content=content,
+            role=role,
+            tool_call_id=tool_call_id,
+            name=name,
+        )
+
+
+class SubAgent(ABC):
+    """Base class for extension cog sub-agents.
+
+    Provides a shared tool-calling loop for managers like MermaidManager or SpoilarrManager.
+
+    Usage:
+        class MermaidManager(SubAgent):
+            async def handle_request(self, request: str, ctx: ExtensionContext) -> str:
+                provider = ctx.get_provider()
+                messages = [
+                    {"role": "system", "content": "..."},
+                    {"role": "user", "content": request},
+                ]
+                callbacks = {"render": self.render}
+                return await self.run_tool_loop(
+                    messages=messages,
+                    tools=[{"name": "render"}],
+                    callbacks=callbacks,
+                    guild_id=ctx.guild_id,
+                    member_id=ctx.member_id,
+                    provider=provider,
+                )
+    """
+
+    def __init__(self, extension_cog: Any, langcore_cog: "langcore") -> None:
+        self.extension_cog = extension_cog
+        self.langcore_cog = langcore_cog
+        cog_name = getattr(extension_cog, "qualified_name", type(extension_cog).__name__)
+        self.logger = logging.getLogger(f"red.{cog_name}.agent")
+
+    @abstractmethod
+    async def handle_request(self, request: str, ctx: ExtensionContext) -> Any:
+        """Handle a request forwarded from langcore."""
+        raise NotImplementedError
+
+    async def run_tool_loop(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        callbacks: Dict[str, Callable[..., Any]],
+        guild_id: int,
+        member_id: Optional[int] = None,
+        provider: Optional[ChainProvider] = None,
+        max_iterations: int = 10,
+    ) -> str:
+        """Standardized LangChain tool-calling loop for sub-agents."""
+        provider_to_use = provider
+        if provider_to_use is None:
+            try:
+                provider_to_use = await self.langcore_cog.get_default_provider(guild_id)  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001
+                self.logger.debug("Could not resolve default provider for guild %s: %s", guild_id, exc)
+                provider_to_use = None
+
+        if provider_to_use is None:
+            raise RuntimeError("No provider available for sub-agent tool loop.")
+
+        llm = await provider_to_use.get_chat_llm(guild_id=guild_id, member_id=member_id)
+        lc_messages = convert_to_messages(messages)
+
+        iteration = 0
+        while iteration < max_iterations:
+            iteration += 1
+            bound_llm = llm.bind_tools(tools) if tools else llm
+            ai_msg: AIMessage = await bound_llm.ainvoke(lc_messages)
+            lc_messages.append(ai_msg)
+
+            if not ai_msg.tool_calls:
+                break
+
+            for tool_index, tool_call in enumerate(ai_msg.tool_calls):
+                if isinstance(tool_call, dict):
+                    tool_name = tool_call.get("name")
+                    tool_args = tool_call.get("args")
+                    tool_id = tool_call.get("id")
+                else:
+                    tool_name = getattr(tool_call, "name", None)
+                    tool_args = getattr(tool_call, "args", None)
+                    tool_id = getattr(tool_call, "id", None)
+                    if (tool_name is None or tool_args is None or tool_id is None) and hasattr(tool_call, "get"):
+                        tool_name = tool_name or tool_call.get("name")
+                        tool_args = tool_args if tool_args is not None else tool_call.get("args")
+                        tool_id = tool_id or tool_call.get("id")
+
+                if tool_name is None:
+                    self.logger.warning("Tool call missing name (type=%s): %r", type(tool_call), tool_call)
+                    tool_name = ""
+
+                if tool_args is None or not isinstance(tool_args, dict):
+                    self.logger.warning("Tool %s args expected dict, got %s", tool_name, type(tool_args))
+                    tool_args = {}
+
+                if tool_id is None:
+                    tool_id = f"tool_call_{iteration}_{tool_index}"
+
+                callback = callbacks.get(tool_name, lambda **_: f"Tool '{tool_name}' not found")
+
+                try:
+                    result = (
+                        await callback(**tool_args)
+                        if asyncio.iscoroutinefunction(callback)
+                        else callback(**tool_args)
+                    )
+                    tool_result = str(result)
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.error("Tool %s execution failed: %s", tool_name, exc)
+                    tool_result = f"Error executing {tool_name}: {exc}"
+
+                lc_messages.append(ToolMessage(content=tool_result, tool_call_id=tool_id))
+
+        if iteration >= max_iterations:
+            self.logger.warning("Sub-agent loop reached max iterations (%s)", max_iterations)
+
+        final_content: Any = ""
+        for msg in reversed(lc_messages):
+            if isinstance(msg, AIMessage):
+                final_content = msg.content if msg.content else ""
+                break
+
+        return str(final_content).strip()

@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import discord
 from langchain_core.messages import (
@@ -12,8 +12,11 @@ from langchain_core.messages import (
     convert_to_messages,
 )
 
-from .abc import ChainProvider
+from .abc import ChainProvider, ExtensionContext
 from .models import Conversation, GuildConfig
+
+if TYPE_CHECKING:
+    from .langcore import langcore
 
 log = logging.getLogger("red.tin.langcore.conversation")
 
@@ -21,6 +24,9 @@ log = logging.getLogger("red.tin.langcore.conversation")
 class ConversationManager:
     """
     Manages conversation lifecycle including creation, retrieval, cleanup, and reset operations.
+
+    Prefer using ExtensionContext.add_to_conversation() (or langcore.inject_conversation_content)
+    for thread-safe writes; the manual lock pattern below is still available for advanced cases.
 
     Sub-Agent Interface:
     -------------------
@@ -76,10 +82,11 @@ class ConversationManager:
         await handler.send_file(ctx, file, content="Here's your diagram!")
     """
 
-    def __init__(self) -> None:
+    def __init__(self, langcore_cog: Optional["langcore"] = None) -> None:
         self._conversations: Dict[str, Conversation] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
         self.cog_system_prompts: Dict[str, str] = {}
+        self.langcore_cog = langcore_cog
         self.DEFAULT_SYSTEM_PROMPT = (
             "You are a concise assistant that favors calling available tools/functions over guessing. "
             "Refer to tools generically (e.g., 'using an available lookup') and do not mention internal names or schemas. "
@@ -201,6 +208,7 @@ class ConversationManager:
         guild_id: int,
         member_id: int,
         config: GuildConfig,
+        langcore_cog: Optional["langcore"] = None,
     ) -> str:
         """Execute an agent chat with tool calling support.
 
@@ -220,6 +228,15 @@ class ConversationManager:
             Exception: If LLM invocation or tool execution fails.
         """
         try:
+            langcore_ref = langcore_cog or self.langcore_cog
+            extension_ctx = ExtensionContext(
+                guild_id=guild_id,
+                channel_id=key[1],
+                member_id=key[0],
+                langcore=langcore_ref,
+                default_provider=getattr(config, "default_provider", None),
+            )
+
             # Get conversation
             conversation_key = f"{key[0]}-{key[1]}-{key[2]}"
             lock = self._get_lock(conversation_key)
@@ -283,18 +300,50 @@ class ConversationManager:
 
             wrapped_callbacks: Dict[str, Callable[..., Any]] = {}
 
+            def _is_signature_type_error(exc: TypeError) -> bool:
+                msg = str(exc)
+                return (
+                    "unexpected keyword argument" in msg
+                    or "positional arguments but" in msg
+                    or "required positional argument" in msg
+                    or "positional argument" in msg
+                )
+
             def build_wrapper(cb: Callable) -> Callable[..., Any]:
                 async def wrapper(**tool_args):
+                    kw_with_ctx = dict(tool_args)
+                    kw_with_ctx.setdefault("ctx", extension_ctx)
                     try:
-                        kw = dict(guild_id=guild_id, channel_id=key[1], member_id=key[0], **tool_args)
                         if asyncio.iscoroutinefunction(cb):
-                            return await cb(**kw)
-                        return cb(**kw)
-                    except TypeError:
-                        # Fallback when the callback does not accept extra context arguments
+                            return await cb(**kw_with_ctx)
+                        return cb(**kw_with_ctx)
+                    except TypeError as exc:
+                        if not _is_signature_type_error(exc):
+                            raise
+                        log.debug(
+                            "Tool %s rejected ExtensionContext injection: %s",
+                            getattr(cb, "__name__", cb),
+                            exc,
+                        )
+
+                    kw_with_context = dict(tool_args)
+                    kw_with_context.update(guild_id=guild_id, channel_id=key[1], member_id=key[0])
+                    try:
                         if asyncio.iscoroutinefunction(cb):
-                            return await cb(**tool_args)
-                        return cb(**tool_args)
+                            return await cb(**kw_with_context)
+                        return cb(**kw_with_context)
+                    except TypeError as exc:
+                        if not _is_signature_type_error(exc):
+                            raise
+                        log.debug(
+                            "Tool %s rejected context kwargs, falling back to raw args: %s",
+                            getattr(cb, "__name__", cb),
+                            exc,
+                        )
+
+                    if asyncio.iscoroutinefunction(cb):
+                        return await cb(**tool_args)
+                    return cb(**tool_args)
 
                 return wrapper
 
