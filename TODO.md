@@ -21,7 +21,8 @@ langcore is not aware of the plugins that will be installed. There should be no 
 Review langcore and check if their means of exposing functions follow best practice.  
 Finally check the extension cogs mermaid and spoilarr if they integrate the functions using the best practice.  
 
-The code is working. We need architectural improvements so we have standardized means. ChainProvider and ChainStore have this fully abstracted. 
+The code is working. We need architectural improvements so we have standardized means. ChainProvider and ChainStore have this fully abstracted. To the ExtensionCogs we need clear interfaces, not hacky solutions that require complicated code.  
+Note: It is not possible to import between the cogs!
 
 ---
 
