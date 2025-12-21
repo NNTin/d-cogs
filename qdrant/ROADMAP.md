@@ -1,54 +1,124 @@
 # Qdrant Cog Roadmap
 
-This roadmap outlines the development of the `qdrant` cog, which serves as the `ChainStore` implementation for the `langcore` framework. The goal is to provide a robust, dynamic, and scalable vector storage solution that integrates seamlessly with the RAG pipeline.
+Roadmap for the `qdrant` cog: the `ChainStore` implementation used by `langcore` to provide shared vector storage and the RAG pipeline. `langcore` itself does **not** store or retrieve vectors; only extension cogs do, and each cog that calls `langcore.get_store()` writes to its own Qdrant collection to avoid collisions.
 
-## Vision
-To create a flexible VectorDB interface that allows multiple cogs to store and retrieve semantic data without collision, while supporting advanced RAG configurations dynamically.
+## Vision and Principles
+- Single, pluggable ChainStore for all cogs; each cog owns its collection (no shared indexes by default).
+- RAG pipeline lives in this cog (migrated from `ragutils`); extension cogs call into it via `langcore` interfaces, but `langcore` itself never touches the vector DB.
+- Configuration-first: collections, dimensions, and distance metrics configurable per cog; sensible defaults.
+- Safe multi-tenant operation inside one Qdrant instance with namespacing, TTLs/cleanup hooks, and usage limits.
 
-## Milestones
+## High-Level Architecture
+```mermaid
+graph TD
+	subgraph DiscordBot
+		LangCore[langcore: ChainHub (no vector IO)]
+		QdrantCog[qdrant: ChainStore]
+		OtherCogs[Extension cogs using get_store]
+	end
 
-### Iteration 1: Minimum Viable Product (MVP)
-**Goal:** Establish connectivity and basic storage capabilities.
-*Focus: Connectivity, Basic CRUD, Interface Compliance.*
+	subgraph QdrantCluster[Qdrant Server]
+		CollA[Collection: spoilarr]
+		CollB[Collection: memory]
+		CollC[Collection: embed]
+	end
 
-- [ ] **ChainStore Implementation**: Implement the basic abstract methods defined in `langcore`'s `ChainStore`.
-- [ ] **Backend Connection**: Implement connection logic to the Qdrant server (default: `localhost:6333`).
-- [ ] **Basic Collection Management**: Create a mechanism to initialize a collection.
-- [ ] **Write Operations**: Implement `add_documents` (or equivalent) to store embeddings.
-- [ ] **Read Operations**: Implement basic `similarity_search` to retrieve documents.
-- [ ] **Integration Test**: Verify `langcore` can load `qdrant` as its storage backend.
+	LangCore -.->|tool schemas / store handle| QdrantCog
+	OtherCogs -->|write/read own collection| QdrantCog
+	QdrantCog -->|CRUD + search| QdrantCluster
+```
 
-### Iteration 2: Dynamic Configuration & Isolation
-**Goal:** Support multiple cogs and dynamic runtime parameters.
-*Focus: Namespace isolation, Dynamic Configs, Metadata.*
+## Data Model and Collections
+- **Per-cog collections**: collection name convention `${cog_name}` (optionally `${cog_name}_${guild}` if isolation per guild is enabled later).
+- **Payload schema** (minimal baseline): `text`, `source` (cog + context), `metadata` dict, `embedding_model`, `timestamp`.
+- **Vector parameters**: dimension and distance metric configurable per collection; defaults follow provider embedding size and cosine distance.
+- **Partitioning options** (later): optional shards/replicas if Qdrant cluster is used.
 
-- [ ] **Collection Strategy**: Implement a strategy to prevent collisions between cogs (e.g., separate collections per cog vs. single collection with payload filtering).
-- [ ] **Dynamic RAG Config**: Update interfaces to accept runtime parameters for retrieval (e.g., `top_k`, `score_threshold`) instead of hardcoded values.
-- [ ] **Metadata/Tagging System**: Evaluate and implement a standard metadata schema to tag memories/documents (e.g., `source_cog`, `user_id`, `timestamp`).
-- [ ] **Config Validation**: Ensure passed configurations are valid for the Qdrant backend.
+## RAG Pipeline (migrated from `ragutils`)
+```mermaid
+sequenceDiagram
+	participant Cog as Cog using get_store()
+	participant Langcore as langcore (ChainHub)
+	participant QCog as qdrant Cog
+	participant Qdrant as Qdrant Service
 
-### Iteration 3: Advanced RAG Pipeline Integration
-**Goal:** Incorporate advanced retrieval logic (formerly `ragutils`).
-*Focus: MMR, Reranking, Thresholds.*
+	Cog->>Langcore: register tool/function with store access (no vector IO in langcore)
+	Cog->>QCog: upsert vectors (embeddings, payload)
+	QCog->>Qdrant: upsert points into cog collection
+	Cog->>QCog: query (text, filters, k)
+	QCog->>Qdrant: search with filters
+	Qdrant-->>QCog: top-k matches
+	QCog-->>Cog: RAG context (documents + metadata)
+```
 
-- [ ] **MMR Support**: Implement Maximal Marginal Relevance search to diversify results.
-- [ ] **Thresholding**: Implement score threshold filtering to reduce hallucinations/irrelevant results.
-- [ ] **Reranking**: Investigate and implement reranking logic (if feasible within the cog or as a post-retrieval step).
-- [ ] **Embedding Flexibility**: Ensure the system handles different embedding methods/models dynamically as requested by the calling cog.
+### Pipeline Components
+- **Embedder abstraction**: select embedding model from provider; supply dimension to collection config.
+- **Upsert**: dedupe by `id`/`hash`, batch writes, optional TTL or logical delete flag for cleanup.
+- **Query**: vector search + optional metadata filters; return scored documents to the calling cog (for its conversation/agent flow).
+- **Retrieval composition**: support `similarity` and `mmr` (later) reranking on top of Qdrant results.
 
-### Iteration 4: ChainHub Integration & Tooling
-**Goal:** Expose storage capabilities to AI Agents.
-*Focus: Tools, Agent Interaction.*
+## Feature Set (phased)
+1) **MVP (aligns with current `ragutils`)**
+   - Upsert/search/delete APIs exposed via ChainStore interface.
+   - Per-cog collections, auto-create with correct dimension/metric.
+	- Basic RAG helpers: chunking hook (delegated to caller), vector search, return payloads to the calling cog.
+2) **Quality & Ops**
+   - Health checks and readiness probe (Qdrant connectivity, collections exist).
+   - Structured logging for latency and errors; backoff/retry on transient failures.
+   - Admin commands to inspect collections, counts, and purge.
+3) **Advanced RAG**
+   - Metadata filters and payload-based filters (guild/channel/user scoping when needed).
+   - Rerank options (MMR/local reranker) applied after Qdrant search.
+   - Optional per-guild isolation via collection suffixes.
+4) **Lifecycle & Hygiene**
+   - TTL/soft-delete cleanup tasks.
+   - Migration helpers (recreate collection with new dimensions/metrics, reindex from source).
+5) **Testing & Tooling**
+   - Integration tests against ephemeral Qdrant.
+   - Load/latency benchmarks for typical k and payload sizes.
 
-- [ ] **Tool Registration**: Expose Qdrant functions as tools via `ChainHub` (e.g., `remember_this`, `search_memory`).
-- [ ] **Agent-Accessible Search**: Allow agents to perform semantic searches with natural language queries.
-- [ ] **Context Management**: Implement tools for agents to manage their own context (delete/update entries).
+## Component Responsibilities
+```mermaid
+graph LR
+	QCog[qdrant Cog]
+	StoreAPI[ChainStore API]
+	CollMgr[Collection Manager]
+	RagAPI[RAG API]
+	Health[Health/Diagnostics]
 
-### Iteration 5: Feature Complete & Optimization
-**Goal:** Production readiness and full feature set.
-*Focus: Optimization, Summarization, Stability.*
+	QCog --> StoreAPI
+	StoreAPI --> CollMgr
+	StoreAPI --> RagAPI
+	StoreAPI --> Health
+	CollMgr -->|create/configure| Qdrant
+	RagAPI -->|search/upsert/delete| Qdrant
+	Health -->|ping/stats| Qdrant
+```
 
-- [ ] **Summarization**: Implement logic to summarize retrieved context if it exceeds token limits (potentially utilizing `ChainProvider`).
-- [ ] **Performance Tuning**: Optimize payload indexing and vector search parameters.
-- [ ] **Error Handling**: Robust handling of connection drops and backend errors.
-- [ ] **Final Review**: Ensure all `ragutils` functionality is effectively superseded or integrated.
+## Configuration
+- Qdrant endpoint, API key (if used), and TLS settings.
+- Default embedding model + dimension; overrides per collection.
+- Distance metric default (cosine) with per-collection override.
+- Limits: max `k`, max batch size, max payload size.
+
+## Commands / Admin (planned)
+- `qdrant stats` – connection check and version info.
+- `qdrant collections` – list collections, dimensions, counts.
+- `qdrant purge <collection>` – delete a cog’s collection (guarded).
+- `qdrant reindex <collection>` – recreate with new config (future).
+
+## Migration from `ragutils`
+- Move RAG pipeline code into this cog; `ragutils` becomes a thin shim or is retired.
+- Update langcore to reference the new ChainStore implementation; all cogs using `langcore.get_store()` write to their own collections.
+- Keep API-compatible helpers to avoid breaking existing tool schemas where possible.
+
+## Risks and Mitigations
+- **Dimension mismatch**: validate on upsert; auto-recreate collection when safe.
+- **Unbounded growth**: offer TTL/cleanup and quotas.
+- **Latency under load**: batch writes, limit `k`, expose metrics to tune.
+
+## Success Criteria
+- Cogs can read/write their own collections without collisions.
+- RAG queries return deterministic, filtered results for the calling cog/agent flows.
+- Admin visibility into collection health and ability to purge/rebuild safely.
+

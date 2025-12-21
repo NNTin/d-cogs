@@ -1,0 +1,65 @@
+name: Publish cogchain to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (x.y.z)"
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ github.event.inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate version input
+        run: |
+          python - <<'PY'
+          import os
+          import re
+
+          version = os.environ.get("VERSION", "")
+          if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+              raise SystemExit(f"Invalid version '{version}'. Expected x.y.z")
+          PY
+          
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build
+
+      - name: Update package version
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          version = os.environ["VERSION"]
+          path = Path("cogchain/pyproject.toml")
+          text = path.read_text()
+          new_text, count = re.subn(r'(?m)^version\s*=\s*".*?"', f'version = "{version}"', text)
+          if count != 1:
+              raise SystemExit("Failed to update version in cogchain/pyproject.toml")
+          path.write_text(new_text)
+          PY
+
+      - name: Build distribution
+        working-directory: cogchain
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages_dir: cogchain/dist/

@@ -13,7 +13,9 @@ from redbot.core.bot import Red
 from redbot.core.config import Config
 from redbot.core.utils.chat_formatting import pagify, text_to_file
 
-from .abc import ChainProvider, MessageHandler
+from cogchain.interfaces import ChainHubProtocol, ConversationManagerProtocol
+
+from .abc import ChainProvider, ChainStore, MessageHandler
 from .classifier import ClassifierManager
 from .conversation import ConversationManager
 from .hub import ChainHub
@@ -29,6 +31,8 @@ class langcore(commands.Cog):
     core framework cog build on top of LangChain framework
     """
 
+    DEFAULT_PROVIDER_FALLBACK = "ollama"
+
     def __init__(self, bot: Red) -> None:
         self.bot = bot
         self.config = Config.get_conf(
@@ -39,6 +43,7 @@ class langcore(commands.Cog):
         default_guild = GuildConfig().model_dump(exclude_defaults=False)
         self.config.register_guild(
             enabled=default_guild["enabled"],
+            default_provider=default_guild["default_provider"],
             max_retention=default_guild["max_retention"],
             max_retention_time=default_guild["max_retention_time"],
             blacklist=default_guild["blacklist"],
@@ -52,11 +57,12 @@ class langcore(commands.Cog):
             classifier_model=default_guild["classifier_model"],
         )
 
-        self.conversation_manager = ConversationManager()
+        self.conversation_manager: ConversationManagerProtocol = ConversationManager(langcore_cog=self)
         self.classifier_manager = ClassifierManager()
-        self.hub = ChainHub(self.bot)
+        self.hub: ChainHubProtocol = ChainHub(self.bot)
         self.providers: Dict[str, ChainProvider] = {}
         self.message_handlers: Dict[str, MessageHandler] = {}
+        self.chain_store: Optional[ChainStore] = None
 
     def register_provider(self, name: str, provider: ChainProvider) -> bool:
         """Register a ChainProvider implementation.
@@ -115,6 +121,19 @@ class langcore(commands.Cog):
             Dictionary mapping provider names to ChainProvider instances
         """
         return self.providers.copy()
+
+    async def get_default_provider_name(self, guild_id: int) -> str:
+        """Return the configured default provider name for a guild."""
+        config = await self.get_guild_config(guild_id)
+        return config.default_provider or self.DEFAULT_PROVIDER_FALLBACK
+
+    async def get_default_provider(self, guild_id: int) -> Optional[ChainProvider]:
+        """Retrieve the default provider for a guild, if registered."""
+        provider_name = await self.get_default_provider_name(guild_id)
+        provider = self.get_provider(provider_name)
+        if not provider:
+            log.warning("Default provider '%s' is not registered for guild %s", provider_name, guild_id)
+        return provider
 
     def register_message_handler(self, name: str, handler: MessageHandler) -> bool:
         """Register a MessageHandler implementation.
@@ -179,6 +198,77 @@ class langcore(commands.Cog):
         """
         return self.message_handlers.copy()
 
+    def register_chain_store(self, store: ChainStore) -> bool:
+        """Register a ChainStore implementation."""
+        if not isinstance(store, ChainStore):
+            log.warning("Chain store registration failed: not a ChainStore instance")
+            return False
+
+        if self.chain_store is store:
+            log.debug("Chain store already registered with same instance; skipping")
+            return True
+
+        if self.chain_store is not None:
+            log.warning("Chain store already registered, overwriting existing store")
+
+        self.chain_store = store
+        log.info("Registered chain store: %s", type(store).__name__)
+        return True
+
+    def unregister_chain_store(self) -> None:
+        """Unregister the current ChainStore implementation."""
+        if self.chain_store is None:
+            log.debug("No chain store registered; skipping unregister")
+            return
+
+        log.info("Unregistered chain store: %s", type(self.chain_store).__name__)
+        self.chain_store = None
+
+    def get_store(self) -> ChainStore:
+        """Get the registered ChainStore or raise if missing."""
+        if self.chain_store is None:
+            raise RuntimeError(
+                "No ChainStore registered. Load the qdrant cog or another store implementation."
+            )
+        return self.chain_store
+
+    async def inject_conversation_content(
+        self,
+        member_id: int,
+        channel_id: int,
+        guild_id: int,
+        content: str,
+        role: str = "assistant",
+        tool_call_id: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        """Thread-safe helper to add content to a conversation.
+
+        Example:
+            await self.inject_conversation_content(member_id, channel_id, guild_id, "Here you go!")
+            await self.inject_conversation_content(
+                member_id,
+                channel_id,
+                guild_id,
+                content="json payload",
+                role="tool",
+                tool_call_id="spoilarr_query",
+                name="query_spoilarr",
+            )
+        """
+        conversation = self.conversation_manager.get_conversation(member_id, channel_id, guild_id)
+        lock = self.conversation_manager.get_conversation_lock(member_id, channel_id, guild_id)
+
+        async with lock:
+            if role == "assistant":
+                conversation.add_assistant_message(content)
+            elif role == "tool":
+                conversation.add_tool_message(content, tool_call_id or "auto", name)
+            elif role == "user":
+                conversation.update_messages(content, "user", name)
+            else:
+                raise ValueError(f"Unsupported role for conversation injection: {role}")
+
     async def cog_load(self) -> None:
         """Initialize langcore and discover existing providers."""
         import asyncio
@@ -196,6 +286,9 @@ class langcore(commands.Cog):
             if isinstance(cog, ChainProvider):
                 self.register_provider(cog_name, cog)
                 log.info("Discovered provider: %s", cog_name)
+            if isinstance(cog, ChainStore):
+                self.register_chain_store(cog)
+                log.info("Discovered chain store: %s", cog_name)
         self.bot.dispatch("langcore_cog_add", self)
         log.info("LangCore initialized with %d providers", len(self.providers))
 
@@ -253,6 +346,11 @@ class langcore(commands.Cog):
         embed.add_field(
             name="Status",
             value=f"Enabled: {config.enabled}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Provider",
+            value=f"Default: `{config.default_provider}`",
             inline=False,
         )
         embed.add_field(
@@ -318,6 +416,15 @@ class langcore(commands.Cog):
 
         await ctx.send(embed=embed)
 
+    @langcore_config.command(name="defaultprovider")
+    async def set_default_provider(self, ctx: commands.Context, provider_name: str):
+        """Set the default provider name for this server."""
+        await self.config.guild(ctx.guild).default_provider.set(provider_name)
+        suffix = ""
+        if provider_name not in self.providers:
+            suffix = " (not currently registered)"
+        await ctx.send(f"Default provider set to `{provider_name}`{suffix}.")
+
     @langcore_config.command(name="handlers")
     async def view_handlers(self, ctx: commands.Context):
         """List all registered MessageHandler implementations."""
@@ -337,6 +444,29 @@ class langcore(commands.Cog):
                 value=f"Type: `{handler_type}`\nModule: `{handler.__module__}`",
                 inline=False,
             )
+
+        await ctx.send(embed=embed)
+
+    @langcore_config.command(name="store")
+    async def view_store(self, ctx: commands.Context):
+        """Show the registered ChainStore implementation."""
+        if self.chain_store is None:
+            await ctx.send("No chain store registered.")
+            return
+
+        store = self.chain_store
+        embed = discord.Embed(
+            title="Registered Chain Store",
+            color=discord.Color.orange(),
+        )
+        embed.add_field(
+            name=type(store).__name__,
+            value=(
+                f"Module: `{store.__module__}`\n"
+                f"Cog: `{store.qualified_name if hasattr(store, 'qualified_name') else 'N/A'}`"
+            ),
+            inline=False,
+        )
 
         await ctx.send(embed=embed)
 
@@ -730,9 +860,12 @@ class langcore(commands.Cog):
         conversation.update_messages(question, "user")
         conversation.cleanup(max_retention, max_retention_time)
 
-        provider = self.get_provider("ollama")
+        provider = await self.get_default_provider(ctx.guild.id)
         if not provider:
-            await ctx.send("No AI provider is available. Please load the ollama cog.")
+            await ctx.send(
+                "No AI provider is available. Load a provider cog and set it with "
+                "`[p]langcore defaultprovider <name>`."
+            )
             return
 
         functions, callbacks = await self.hub.get_functions(
@@ -752,6 +885,7 @@ class langcore(commands.Cog):
                     guild_id=ctx.guild.id,
                     member_id=ctx.author.id,
                     config=config,
+                    langcore_cog=self,
                 )
             except commands.UserFeedbackCheckFailure as e:
                 # Provider raised user-facing error
@@ -835,9 +969,12 @@ class langcore(commands.Cog):
         if not should_respond:
             return
 
-        provider = self.get_provider("ollama")
+        provider = await self.get_default_provider(guild.id)
         if not provider:
-            await message.reply("No AI provider is available. Please load the ollama cog.")
+            await message.reply(
+                "No AI provider is available. Load a provider cog and set it with "
+                "`[p]langcore defaultprovider <name>`."
+            )
             return
 
         # Classifier gatekeeper for assistant channel
@@ -922,6 +1059,7 @@ class langcore(commands.Cog):
                     guild_id=guild.id,
                     member_id=message.author.id,
                     config=config,
+                    langcore_cog=self,
                 )
             except commands.UserFeedbackCheckFailure as e:
                 await message.reply(str(e))
@@ -965,7 +1103,10 @@ class langcore(commands.Cog):
         cog_name = cog.qualified_name
         self.unregister_provider(cog_name)
         self.hub.unregister_cog(cog_name)
+        self.conversation_manager.unregister_cog_system_prompt(cog_name)
         self.unregister_message_handler(cog_name)
+        if isinstance(cog, ChainStore):
+            self.unregister_chain_store()
 
     async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
         # TODO: Replace this with the proper end user data removal handling.

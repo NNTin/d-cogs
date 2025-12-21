@@ -2,7 +2,7 @@ from redbot.core.bot import Red
 from redbot.core.utils import get_end_user_data_statement_or_raise
 
 from .langcore import langcore
-from .abc import ChainProvider, ChainStore
+from .abc import ChainProvider, ChainStore, ExtensionContext, SubAgent
 from .conversation import ConversationManager
 from .hub import ChainHub
 from .models import BaseModel, Conversation, GuildConfig
@@ -18,6 +18,8 @@ __all__ = [
     "ChainProvider",
     "ChainStore",
     "ChainHub",
+    "ExtensionContext",
+    "SubAgent",
 ]
 
 

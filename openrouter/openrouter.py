@@ -8,9 +8,9 @@ from redbot.core.config import Config
 
 from cogchain.interfaces import ChainProvider
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_ollama import ChatOllama, OllamaEmbeddings
-from ollama import AsyncClient, ResponseError
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
+from cogchain.interfaces import ChainProvider, LangcoreProtocol
 from .health import HealthMonitor
 from .model_utils import (
     is_embedding_model,
@@ -18,17 +18,17 @@ from .model_utils import (
     select_default_chat_model,
     select_default_embed_model,
 )
-from .models import OllamaConfig, OllamaGuildConfig
-from .utils import format_ollama_error
+from .models import OpenRouterConfig, OpenRouterGuildConfig
+from .utils import format_openrouter_error
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
-log = logging.getLogger("red.tin.ollama")
+log = logging.getLogger("red.tin.openrouter")
 
 
-class ollama(commands.Cog):
+class openrouter(commands.Cog):
     """
-    implements ChainProvider for langcore
+    Implements ChainProvider for langcore via OpenRouter.
     """
 
     def __init__(self, bot: Red) -> None:
@@ -38,8 +38,8 @@ class ollama(commands.Cog):
             identifier=257263088,
             force_registration=True,
         )
-        self.config.register_global(ollama_config={})
-        default_guild = OllamaGuildConfig().model_dump(exclude_defaults=False)
+        self.config.register_global(openrouter_config={})
+        default_guild = OpenRouterGuildConfig().model_dump(exclude_defaults=False)
         self.config.register_guild(
             chat_model=default_guild["chat_model"],
             embed_model=default_guild["embed_model"],
@@ -49,21 +49,19 @@ class ollama(commands.Cog):
             tool_scope=default_guild["tool_scope"],
         )
 
-        self.ollama_config = OllamaConfig()
+        self.openrouter_config = OpenRouterConfig()
         self.health_monitor = HealthMonitor(
             bot=self.bot,
-            config=self.ollama_config,
-            endpoint=self.ollama_config.endpoint,
+            config=self.openrouter_config,
+            base_url=self.openrouter_config.base_url,
         )
-        self.llm = None
-        self.embedder = None
         self.provider = self._build_provider()
 
     def _build_provider(self) -> ChainProvider:
         """Build a ChainProvider instance bound to this cog."""
         cog = self
 
-        class _OllamaChainProvider(ChainProvider):
+        class _OpenRouterChainProvider(ChainProvider):
             async def chat(
                 self,
                 messages: List[Dict[str, Any]],
@@ -81,22 +79,21 @@ class ollama(commands.Cog):
                 guild_id: int,
                 member_id: Optional[int] = None,
                 model: Optional[str] = None,
-            ) -> ChatOllama:
-                """Get a configured ChatOllama instance for tool binding and agentic workflows."""
+            ) -> ChatOpenAI:
                 return await cog.get_chat_llm(guild_id=guild_id, member_id=member_id, model=model)
 
-        return _OllamaChainProvider()
+        return _OpenRouterChainProvider()
 
     def _refresh_provider(self) -> None:
         self.provider = self._build_provider()
 
-    async def get_guild_config(self, guild_id: int) -> OllamaGuildConfig:
+    async def get_guild_config(self, guild_id: int) -> OpenRouterGuildConfig:
         data = await self.config.guild_from_id(guild_id).all()
         try:
-            return OllamaGuildConfig.model_validate(data)
+            return OpenRouterGuildConfig.model_validate(data)
         except Exception as exc:  # noqa: BLE001
-            log.warning("Invalid Ollama config for guild %s, using defaults: %s", guild_id, exc)
-            default = OllamaGuildConfig()
+            log.warning("Invalid OpenRouter config for guild %s, using defaults: %s", guild_id, exc)
+            default = OpenRouterGuildConfig()
             try:
                 guild_conf = self.config.guild_from_id(guild_id)
                 default_data = default.model_dump(exclude_defaults=False)
@@ -110,77 +107,93 @@ class ollama(commands.Cog):
                 ):
                     await getattr(guild_conf, key).set(default_data.get(key))
             except Exception:  # noqa: BLE001
-                log.exception("Failed to reset Ollama config for guild %s", guild_id)
+                log.exception("Failed to reset OpenRouter config for guild %s", guild_id)
             return default
 
-    async def save_ollama_config(self) -> bool:
-        """Save global Ollama configuration."""
+    async def save_openrouter_config(self) -> bool:
+        """Save global OpenRouter configuration."""
         try:
-            await self.config.ollama_config.set(self.ollama_config.model_dump(exclude_defaults=False))
+            await self.config.openrouter_config.set(
+                self.openrouter_config.model_dump(exclude_defaults=False)
+            )
             return True
         except Exception as exc:  # noqa: BLE001
-            log.error("Failed to save Ollama config: %s", exc)
+            log.error("Failed to save OpenRouter config: %s", exc)
             return False
 
     async def cog_load(self) -> None:
+        """Load config and register provider when available."""
         try:
-            stored = await self.config.ollama_config()
+            stored = await self.config.openrouter_config()
             if stored:
-                loaded = OllamaConfig.model_validate(stored)
+                loaded = OpenRouterConfig.model_validate(stored)
                 for key, value in loaded.model_dump(exclude_defaults=False).items():
-                    setattr(self.ollama_config, key, value)
+                    setattr(self.openrouter_config, key, value)
             else:
-                await self.config.ollama_config.set(self.ollama_config.model_dump(exclude_defaults=False))
+                await self.config.openrouter_config.set(
+                    self.openrouter_config.model_dump(exclude_defaults=False)
+                )
 
-            self.health_monitor.endpoint = self.ollama_config.endpoint
-            self.health_monitor.health_loop.change_interval(seconds=self.ollama_config.health_check_interval)
+            self.health_monitor.base_url = self.openrouter_config.base_url
+            self.health_monitor.health_loop.change_interval(seconds=self.openrouter_config.health_check_interval)
 
+            # Prime guild configs
+            for guild in self.bot.guilds:
+                await self.get_guild_config(guild.id)
+
+            # Initial health check & discovery
             healthy, models = await self.health_monitor.check_health()
-            self.ollama_config.update_health(healthy, models)
+            self.openrouter_config.update_health(healthy, models)
             log.debug(
-                "Initial Ollama health check for %s: healthy=%s (%s models)",
-                self.ollama_config.endpoint,
+                "Initial OpenRouter health check for %s: healthy=%s (%s models)",
+                self.openrouter_config.base_url,
                 healthy,
                 len(models),
             )
 
-            for guild in self.bot.guilds:
-                await self.get_guild_config(guild.id)
-
-            if self.ollama_config.health_check_enabled:
+            if self.openrouter_config.health_check_enabled:
                 self.health_monitor.start()
 
-            # Register with langcore if it's already loaded
             langcore_cog = self.bot.get_cog("langcore")
             if langcore_cog:
                 self._refresh_provider()
                 success = langcore_cog.register_provider(self.qualified_name, self.provider)
                 if success:
-                    log.info("Registered ollama with existing langcore instance")
+                    log.info("Registered openrouter with existing langcore instance")
         except Exception:  # noqa: BLE001
-            log.exception("Failed to initialize Ollama cog health monitoring")
+            log.exception("Failed to initialize OpenRouter cog")
 
     async def cog_unload(self) -> None:
         self.health_monitor.stop()
+        langcore_cog = self.bot.get_cog("langcore")
+        if langcore_cog:
+            try:
+                langcore_cog.unregister_provider(self.qualified_name)
+                log.info("Unregistered openrouter provider from langcore on unload.")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Failed to unregister openrouter provider on unload: %s", exc)
 
     @commands.Cog.listener()
     async def on_langcore_cog_add(self, langcore_cog):
         """Register this cog as a ChainProvider when langcore loads."""
+        if not isinstance(langcore_cog, LangcoreProtocol):
+            return
         self._refresh_provider()
         success = langcore_cog.register_provider(self.qualified_name, self.provider)
         if success:
-            log.info("Registered ollama as ChainProvider with langcore")
+            log.info("Registered openrouter as ChainProvider with langcore")
         else:
-            log.error("Failed to register ollama with langcore")
+            log.error("Failed to register openrouter with langcore")
 
     @commands.Cog.listener()
     async def on_langcore_cog_remove(self):
         """Handle langcore cog removal."""
-        log.info("LangCore cog removed, provider registration cleared")
+        log.info("Langcore cog removed, openrouter provider registration cleared")
 
-    async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
-        # TODO: Replace this with the proper end user data removal handling.
-        super().red_delete_data_for_user(requester=requester, user_id=user_id)
+    @commands.Cog.listener()
+    async def on_cog_remove(self, cog: commands.Cog):
+        if getattr(cog, "qualified_name", "") == "langcore":
+            self.provider = None
 
     def _select_model_with_fallback(
         self,
@@ -209,19 +222,7 @@ class ollama(commands.Cog):
         )
         return selected
 
-    async def chat(
-        self,
-        messages: List[Dict[str, Any]],
-        guild: discord.Guild,
-        member: Optional[discord.Member] = None,
-        **kwargs: Any,
-    ) -> str:
-        guild_config = await self.get_guild_config(guild.id)
-        available_models = self.ollama_config.available_models
-
-        preferred_model = guild_config.get_user_model(member, available_models)
-        model = self._select_model_with_fallback(preferred_model, guild_config.chat_fallback, available_models)
-
+    def _build_messages(self, messages: List[Dict[str, Any]]) -> List[Any]:
         langchain_messages: List[Any] = []
         for message in messages:
             role = (message.get("role") or "").lower()
@@ -232,15 +233,45 @@ class ollama(commands.Cog):
                 langchain_messages.append(AIMessage(content=content))
             else:
                 langchain_messages.append(HumanMessage(content=content))
+        return langchain_messages
 
-        chat_model_fields = getattr(ChatOllama, "model_fields", None)
-        allowed_options = set(chat_model_fields.keys()) if chat_model_fields else {"temperature", "num_predict", "seed"}
-        filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_options and v is not None}
+    def _filter_chat_kwargs(self, **kwargs: Any) -> Dict[str, Any]:
+        chat_model_fields = getattr(ChatOpenAI, "model_fields", None)
+        allowed_options = set(chat_model_fields.keys()) if chat_model_fields else set()
+        if not allowed_options:
+            allowed_options = {"temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty"}
+        return {k: v for k, v in kwargs.items() if k in allowed_options and v is not None}
+
+    def _build_headers(self) -> Optional[Dict[str, str]]:
+        return self.openrouter_config.default_headers or None
+
+    def _ensure_api_key(self) -> None:
+        if not self.openrouter_config.has_api_key():
+            raise commands.UserFeedbackCheckFailure("OpenRouter API key is not configured.")
+
+    async def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        guild: discord.Guild,
+        member: Optional[discord.Member] = None,
+        **kwargs: Any,
+    ) -> str:
+        self._ensure_api_key()
+        guild_config = await self.get_guild_config(guild.id)
+        available_models = self.openrouter_config.available_models
+
+        preferred_model = guild_config.get_user_model(member, available_models)
+        model = self._select_model_with_fallback(preferred_model, guild_config.chat_fallback, available_models)
+
+        langchain_messages = self._build_messages(messages)
+        filtered_kwargs = self._filter_chat_kwargs(**kwargs)
 
         async def invoke_chat(selected_model: str) -> str:
-            llm = ChatOllama(
-                base_url=self.ollama_config.endpoint,
+            llm = ChatOpenAI(
+                base_url=self.openrouter_config.base_url,
+                api_key=self.openrouter_config.api_key,
                 model=selected_model,
+                default_headers=self._build_headers(),
                 **filtered_kwargs,
             )
             response = await llm.ainvoke(langchain_messages)
@@ -248,29 +279,8 @@ class ollama(commands.Cog):
 
         try:
             return await invoke_chat(model)
-        except ResponseError as exc:
-            is_not_chat = exc.status_code == 400 and "does not support chat" in str(exc).lower()
-            if is_not_chat and available_models:
-                chat_candidates = [
-                    m for m in available_models if m and not is_embedding_model(m) and m != model
-                ]
-                # Prefer configured chat model name (tagless → resolved) if possible
-                configured = resolve_model_name(guild_config.chat_model, available_models)
-                if configured and configured in chat_candidates:
-                    chat_candidates.remove(configured)
-                    chat_candidates.insert(0, configured)
-
-                for candidate in chat_candidates[:5]:
-                    try:
-                        log.warning("Model '%s' does not support chat; retrying with '%s'", model, candidate)
-                        return await invoke_chat(candidate)
-                    except ResponseError as retry_exc:
-                        if retry_exc.status_code == 400 and "does not support chat" in str(retry_exc).lower():
-                            continue
-                        raise
-
-            is_not_found = exc.status_code == 404 or "not found" in str(exc).lower()
-            if is_not_found and model != guild_config.chat_fallback:
+        except Exception as exc:  # noqa: BLE001
+            if model != guild_config.chat_fallback:
                 retry_model = self._select_model_with_fallback(
                     guild_config.chat_fallback,
                     guild_config.chat_fallback,
@@ -278,40 +288,30 @@ class ollama(commands.Cog):
                 )
                 if retry_model != model:
                     try:
+                        log.warning("Chat failed for model '%s', retrying with '%s'", model, retry_model)
                         return await invoke_chat(retry_model)
-                    except ResponseError as retry_exc:
-                        log.warning("Ollama chat failed for guild %s model=%s: %s", guild.id, retry_model, retry_exc)
-                        raise commands.UserFeedbackCheckFailure(
-                            format_ollama_error(
-                                retry_exc,
-                                model=retry_model,
-                                endpoint=self.ollama_config.endpoint,
-                            )
-                        ) from retry_exc
                     except Exception as retry_exc:  # noqa: BLE001
-                        log.exception("Unexpected Ollama chat error for guild %s model=%s", guild.id, retry_model)
+                        log.warning(
+                            "Fallback chat failed for guild %s model=%s: %s", guild.id, retry_model, retry_exc
+                        )
                         raise commands.UserFeedbackCheckFailure(
-                            format_ollama_error(
+                            format_openrouter_error(
                                 retry_exc,
                                 model=retry_model,
-                                endpoint=self.ollama_config.endpoint,
+                                endpoint=self.openrouter_config.base_url,
                             )
                         ) from retry_exc
-            log.warning("Ollama chat failed for guild %s model=%s: %s", guild.id, model, exc)
+
+            log.exception("Unexpected OpenRouter chat error for guild %s model=%s", guild.id, model)
             raise commands.UserFeedbackCheckFailure(
-                format_ollama_error(exc, model=model, endpoint=self.ollama_config.endpoint)
-            ) from exc
-        except Exception as exc:  # noqa: BLE001
-            log.exception("Unexpected Ollama chat error for guild %s model=%s", guild.id, model)
-            raise commands.UserFeedbackCheckFailure(
-                format_ollama_error(exc, model=model, endpoint=self.ollama_config.endpoint)
+                format_openrouter_error(exc, model=model, endpoint=self.openrouter_config.base_url)
             ) from exc
 
     async def embed(self, text: str, guild: discord.Guild, **kwargs: Any) -> List[float]:
+        self._ensure_api_key()
         guild_config = await self.get_guild_config(guild.id)
-        available_models = self.ollama_config.available_models
+        available_models = self.openrouter_config.available_models
 
-        # Prefer embedding-like models when choosing defaults
         resolved_embed = resolve_model_name(guild_config.embed_model, available_models) or guild_config.embed_model
         resolved_fallback = (
             resolve_model_name(guild_config.embed_fallback, available_models) or guild_config.embed_fallback
@@ -325,37 +325,19 @@ class ollama(commands.Cog):
         else:
             model = resolved_embed
 
-        try:
-            embedder = OllamaEmbeddings(
-                base_url=self.ollama_config.endpoint,
-                model=model,
+        async def invoke_embed(selected_model: str) -> List[float]:
+            embedder = OpenAIEmbeddings(
+                model=selected_model,
+                base_url=self.openrouter_config.base_url,
+                api_key=self.openrouter_config.api_key,
+                default_headers=self._build_headers(),
             )
             return await embedder.aembed_query(text)
-        except ResponseError as exc:
-            is_not_embed = exc.status_code == 400 and "does not support" in str(exc).lower() and "embed" in str(exc).lower()
-            if is_not_embed and available_models:
-                embed_candidates = [
-                    m for m in available_models if m and is_embedding_model(m) and m != model
-                ]
-                configured = resolve_model_name(guild_config.embed_model, available_models)
-                if configured and configured in embed_candidates:
-                    embed_candidates.remove(configured)
-                    embed_candidates.insert(0, configured)
-                for candidate in embed_candidates[:5]:
-                    try:
-                        log.warning("Model '%s' does not support embeddings; retrying with '%s'", model, candidate)
-                        embedder = OllamaEmbeddings(
-                            base_url=self.ollama_config.endpoint,
-                            model=candidate,
-                        )
-                        return await embedder.aembed_query(text)
-                    except ResponseError as retry_exc:
-                        if retry_exc.status_code == 400 and "does not support" in str(retry_exc).lower():
-                            continue
-                        raise
 
-            is_not_found = exc.status_code == 404 or "not found" in str(exc).lower()
-            if is_not_found and model != guild_config.embed_fallback:
+        try:
+            return await invoke_embed(model)
+        except Exception as exc:  # noqa: BLE001
+            if model != guild_config.embed_fallback:
                 if available_models:
                     retry_model = (
                         resolve_model_name(guild_config.embed_fallback, available_models)
@@ -366,37 +348,30 @@ class ollama(commands.Cog):
                     retry_model = guild_config.embed_fallback
                 if retry_model != model:
                     try:
-                        embedder = OllamaEmbeddings(
-                            base_url=self.ollama_config.endpoint,
-                            model=retry_model,
+                        log.warning(
+                            "Embedding failed for model '%s', retrying with fallback '%s'",
+                            model,
+                            retry_model,
                         )
-                        return await embedder.aembed_query(text)
-                    except ResponseError as retry_exc:
-                        log.warning("Ollama embed failed for guild %s model=%s: %s", guild.id, retry_model, retry_exc)
-                        raise commands.UserFeedbackCheckFailure(
-                            format_ollama_error(
-                                retry_exc,
-                                model=retry_model,
-                                endpoint=self.ollama_config.endpoint,
-                            )
-                        ) from retry_exc
+                        return await invoke_embed(retry_model)
                     except Exception as retry_exc:  # noqa: BLE001
-                        log.exception("Unexpected Ollama embed error for guild %s model=%s", guild.id, retry_model)
+                        log.warning(
+                            "Fallback embed failed for guild %s model=%s: %s",
+                            guild.id,
+                            retry_model,
+                            retry_exc,
+                        )
                         raise commands.UserFeedbackCheckFailure(
-                            format_ollama_error(
+                            format_openrouter_error(
                                 retry_exc,
                                 model=retry_model,
-                                endpoint=self.ollama_config.endpoint,
+                                endpoint=self.openrouter_config.base_url,
                             )
                         ) from retry_exc
-            log.warning("Ollama embed failed for guild %s model=%s: %s", guild.id, model, exc)
+
+            log.exception("Unexpected OpenRouter embed error for guild %s model=%s", guild.id, model)
             raise commands.UserFeedbackCheckFailure(
-                format_ollama_error(exc, model=model, endpoint=self.ollama_config.endpoint)
-            ) from exc
-        except Exception as exc:  # noqa: BLE001
-            log.exception("Unexpected Ollama embed error for guild %s model=%s", guild.id, model)
-            raise commands.UserFeedbackCheckFailure(
-                format_ollama_error(exc, model=model, endpoint=self.ollama_config.endpoint)
+                format_openrouter_error(exc, model=model, endpoint=self.openrouter_config.base_url)
             ) from exc
 
     async def get_chat_llm(
@@ -404,104 +379,88 @@ class ollama(commands.Cog):
         guild_id: int,
         member_id: Optional[int] = None,
         model: Optional[str] = None,
-    ) -> ChatOllama:
-        """Get a configured ChatOllama instance for the specified guild and member.
-
-        This method performs model selection using the same logic as chat(), including:
-        - Guild-specific model configuration
-        - Role-based model overrides
-        - Fallback model handling
-        - Model availability validation
-
-        Args:
-            guild_id: Guild identifier for configuration lookup.
-            member_id: Optional member ID for role-based model overrides.
-            model: Optional model name to override guild/role configuration. When provided,
-                skips selection logic and uses this model directly.
-
-        Returns:
-            ChatOllama instance ready for tool binding and invocation.
-
-        Raises:
-            commands.UserFeedbackCheckFailure: If model selection fails or endpoint unavailable.
-        """
-        # If explicit model provided, use it directly (e.g., for classifier)
+    ) -> ChatOpenAI:
+        self._ensure_api_key()
         if model:
-            log.debug("Using explicit model override '%s' for guild %s", model, guild_id)
             try:
-                return ChatOllama(
-                    base_url=self.ollama_config.endpoint,
+                return ChatOpenAI(
+                    base_url=self.openrouter_config.base_url,
+                    api_key=self.openrouter_config.api_key,
                     model=model,
+                    default_headers=self._build_headers(),
                 )
             except Exception as exc:  # noqa: BLE001
-                log.error("Failed to create ChatOllama with explicit model '%s': %s", model, exc)
                 raise commands.UserFeedbackCheckFailure(
-                    f"Failed to initialize chat model '{model}': {exc}"
+                    f"Failed to initialize OpenRouter chat model '{model}': {exc}"
                 ) from exc
 
         guild_config = await self.get_guild_config(guild_id)
-        available_models = self.ollama_config.available_models
+        available_models = self.openrouter_config.available_models
 
-        # Get member object if member_id provided
         member = None
         if member_id:
             guild = self.bot.get_guild(guild_id)
             if guild:
                 member = guild.get_member(member_id)
 
-        # Use same model selection logic as chat()
         preferred_model = guild_config.get_user_model(member, available_models)
-        model = self._select_model_with_fallback(
+        selected = self._select_model_with_fallback(
             preferred_model,
             guild_config.chat_fallback,
             available_models,
         )
 
-        # Validate model availability
-        if available_models and model not in available_models:
+        if available_models and selected not in available_models:
             log.warning(
                 "Selected model '%s' not in available models for guild %s; using anyway",
-                model,
+                selected,
                 guild_id,
             )
 
-        # Return configured ChatOllama instance
         try:
-            return ChatOllama(
-                base_url=self.ollama_config.endpoint,
-                model=model,
+            return ChatOpenAI(
+                base_url=self.openrouter_config.base_url,
+                api_key=self.openrouter_config.api_key,
+                model=selected,
+                default_headers=self._build_headers(),
             )
         except Exception as exc:  # noqa: BLE001
-            log.error("Failed to create ChatOllama instance for guild %s: %s", guild_id, exc)
-            raise commands.UserFeedbackCheckFailure(f"Failed to initialize chat model: {exc}") from exc
+            raise commands.UserFeedbackCheckFailure(
+                f"Failed to initialize OpenRouter chat model '{selected}': {exc}"
+            ) from exc
 
-    @commands.group(name="ollama")
+    async def red_delete_data_for_user(self, *, requester: RequestType, user_id: int) -> None:
+        # No user-specific data is stored locally by this cog.
+        return
+
+    # ------------------------------ Commands ------------------------------
+    @commands.group(name="openrouter")
     @commands.admin_or_permissions(administrator=True)
     @commands.guild_only()
-    async def ollama_config(self, ctx: commands.Context):
-        """Manage Ollama provider configuration."""
+    async def openrouter_config_group(self, ctx: commands.Context):
+        """Manage OpenRouter provider configuration."""
         pass
 
-    @ollama_config.command(name="settings")
+    @openrouter_config_group.command(name="settings")
     async def view_settings(self, ctx: commands.Context):
-        """View current Ollama configuration for this server."""
+        """View current OpenRouter configuration for this server."""
         guild_config = await self.get_guild_config(ctx.guild.id)
 
         embed = discord.Embed(
-            title="Ollama Configuration",
+            title="OpenRouter Configuration",
             color=discord.Color.blue(),
         )
         embed.add_field(
             name="Endpoint",
-            value=self.ollama_config.endpoint,
+            value=self.openrouter_config.base_url,
             inline=False,
         )
         embed.add_field(
             name="Health Check",
             value=(
-                f"Enabled: {self.ollama_config.health_check_enabled}\n"
-                f"Interval: {self.ollama_config.health_check_interval}s\n"
-                f"Status: {'✅ Healthy' if self.ollama_config.endpoint_healthy else '❌ Unhealthy'}"
+                f"Enabled: {self.openrouter_config.health_check_enabled}\n"
+                f"Interval: {self.openrouter_config.health_check_interval}s\n"
+                f"Status: {'✅ Healthy' if self.openrouter_config.endpoint_healthy else '❌ Unhealthy'}"
             ),
             inline=False,
         )
@@ -517,8 +476,8 @@ class ollama(commands.Cog):
         )
         embed.add_field(
             name="Available Models",
-            value=", ".join(self.ollama_config.available_models)
-            if self.ollama_config.available_models
+            value=", ".join(self.openrouter_config.available_models)
+            if self.openrouter_config.available_models
             else "None discovered",
             inline=False,
         )
@@ -537,23 +496,18 @@ class ollama(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    @ollama_config.command(name="endpoint")
-    async def set_endpoint(self, ctx: commands.Context, url: str):
-        """Set the Ollama endpoint URL."""
-        if not url.startswith(("http://", "https://")):
-            await ctx.send("Endpoint must start with http:// or https://")
-            return
+    @openrouter_config_group.command(name="apikey")
+    async def set_api_key(self, ctx: commands.Context, api_key: str):
+        """Set the OpenRouter API key."""
+        self.openrouter_config.api_key = api_key
+        await self.save_openrouter_config()
+        await ctx.send("OpenRouter API key updated.")
 
-        self.ollama_config.endpoint = url
-        await self.config.ollama_config.set(self.ollama_config.model_dump(exclude_defaults=False))
-        self.health_monitor.endpoint = url
-        await ctx.send(f"Ollama endpoint set to: {url}")
-
-    @ollama_config.command(name="healthcheck")
+    @openrouter_config_group.command(name="healthcheck")
     async def toggle_health_check(self, ctx: commands.Context, enabled: bool):
         """Enable or disable endpoint health monitoring."""
-        self.ollama_config.health_check_enabled = enabled
-        await self.config.ollama_config.set(self.ollama_config.model_dump(exclude_defaults=False))
+        self.openrouter_config.health_check_enabled = enabled
+        await self.save_openrouter_config()
 
         if enabled:
             if not self.health_monitor.health_loop.is_running():
@@ -564,77 +518,76 @@ class ollama(commands.Cog):
                 self.health_monitor.stop()
             await ctx.send("Health check disabled.")
 
-    @ollama_config.command(name="healthinterval")
+    @openrouter_config_group.command(name="healthinterval")
     async def set_health_interval(self, ctx: commands.Context, seconds: int):
         """Set health check interval in seconds."""
         if seconds < 10:
             await ctx.send("Interval must be at least 10 seconds.")
             return
 
-        self.ollama_config.health_check_interval = seconds
-        await self.config.ollama_config.set(self.ollama_config.model_dump(exclude_defaults=False))
+        self.openrouter_config.health_check_interval = seconds
+        await self.save_openrouter_config()
         self.health_monitor.health_loop.change_interval(seconds=seconds)
         await ctx.send(f"Health check interval set to {seconds} seconds.")
 
     async def model_autocomplete(self, interaction: discord.Interaction, current: str):
         """Autocomplete callback for model selection."""
-        models = self.ollama_config.available_models
+        models = self.openrouter_config.available_models
         if not models:
             return []
 
         filtered = [model for model in models if current.lower() in model.lower()]
         return [discord.app_commands.Choice(name=model, value=model) for model in filtered[:25]]
 
-    @ollama_config.command(name="chatmodel")
+    @openrouter_config_group.command(name="chatmodel")
     @discord.app_commands.autocomplete(model=model_autocomplete)
     async def set_chat_model(self, ctx: commands.Context, model: str):
         """Set the default chat model for this server."""
         await self.config.guild(ctx.guild).chat_model.set(model)
         await ctx.send(f"Chat model set to: {model}")
 
-    @ollama_config.command(name="embedmodel")
+    @openrouter_config_group.command(name="embedmodel")
     @discord.app_commands.autocomplete(model=model_autocomplete)
     async def set_embed_model(self, ctx: commands.Context, model: str):
         """Set the default embedding model for this server."""
         await self.config.guild(ctx.guild).embed_model.set(model)
         await ctx.send(f"Embed model set to: {model}")
 
-    @ollama_config.command(name="chatfallback")
+    @openrouter_config_group.command(name="chatfallback")
     @discord.app_commands.autocomplete(model=model_autocomplete)
     async def set_chat_fallback(self, ctx: commands.Context, model: str):
         """Set the fallback chat model."""
         await self.config.guild(ctx.guild).chat_fallback.set(model)
         await ctx.send(f"Chat fallback model set to: {model}")
 
-    @ollama_config.command(name="embedfallback")
+    @openrouter_config_group.command(name="embedfallback")
     @discord.app_commands.autocomplete(model=model_autocomplete)
     async def set_embed_fallback(self, ctx: commands.Context, model: str):
         """Set the fallback embedding model."""
         await self.config.guild(ctx.guild).embed_fallback.set(model)
         await ctx.send(f"Embed fallback model set to: {model}")
 
-    @ollama_config.command(name="listmodels")
+    @openrouter_config_group.command(name="listmodels")
     async def list_models(self, ctx: commands.Context):
-        """List all available models from Ollama endpoint."""
+        """List available models from OpenRouter."""
         try:
-            client = AsyncClient(host=self.ollama_config.endpoint)
-            response = await client.list()
-            models = response.get("models", [])
-            model_names = [model.get("model") or model.get("name") for model in models]
-            if not model_names:
-                await ctx.send("No models found.")
+            models = await self.health_monitor.discover_models()
+            self.openrouter_config.update_health(bool(models), models)
+            await self.save_openrouter_config()
+            if not models:
+                await ctx.send("No models found or unable to fetch models.")
                 return
 
             embed = discord.Embed(
-                title="Available Ollama Models",
-                description="\n".join(f"- {model}" for model in model_names),
+                title="Available OpenRouter Models",
+                description="\n".join(f"- {model}" for model in models),
                 color=discord.Color.green(),
             )
             await ctx.send(embed=embed)
         except Exception as exc:  # noqa: BLE001
             await ctx.send(f"Failed to fetch models: {exc}")
 
-    @ollama_config.group(name="roleoverride")
+    @openrouter_config_group.group(name="roleoverride")
     async def role_override_group(self, ctx: commands.Context):
         """Manage role-based model overrides."""
         pass
@@ -689,7 +642,7 @@ class ollama(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-    @ollama_config.command(name="toolscope")
+    @openrouter_config_group.command(name="toolscope")
     async def set_tool_scope(self, ctx: commands.Context, scope: str):
         """Set tool calling scope (core, extended, all)."""
         valid_scopes = ["core", "extended", "all"]

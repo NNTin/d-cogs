@@ -1,8 +1,8 @@
 {
     "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog.schema.json",
-    "name": "ollama",
-    "short": "implements ChainProvider for langcore",
-    "description": "Implements the ChainProvider abstraction from langcore, enabling agents to query LLMs.",
+    "name": "openrouter",
+    "short": "OpenRouter ChainProvider for langcore",
+    "description": "Implements the ChainProvider abstraction from langcore using OpenRouter chat and embeddings.",
     "end_user_data_statement": "Work in Progress",
     "install_msg": "Work in Progress",
     "author": [
@@ -10,11 +10,11 @@
     ],
     "required_cogs": {},
     "requirements": [
-        "langchain-ollama",
+        "langchain-openai",
         "cogchain"
     ],
     "tags": [
-        "ollama",
+        "openrouter",
         "ai",
         "agent",
         "llm"

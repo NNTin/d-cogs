@@ -6,14 +6,12 @@ from pydantic import Field
 
 from cogchain.models import BaseModel
 
-from .model_utils import resolve_model_name
 
-
-class OllamaGuildConfig(BaseModel):
-    chat_model: str = "gemma3"
-    embed_model: str = "qwen3-embedding"
-    chat_fallback: str = "llama3.1"
-    embed_fallback: str = "nomic-embed-text"
+class OpenRouterGuildConfig(BaseModel):
+    chat_model: str = "openai/gpt-4o-mini"
+    embed_model: str = "text-embedding-3-large"
+    chat_fallback: str = "openai/gpt-3.5-turbo"
+    embed_fallback: str = "text-embedding-3-large"
     tool_scope: str = "core"
     role_model_overrides: Dict[int, str] = Field(default_factory=dict)
 
@@ -29,14 +27,16 @@ class OllamaGuildConfig(BaseModel):
                     continue
                 if not models:
                     return override
+                from .model_utils import resolve_model_name  # local import to avoid cycles
+
                 resolved_override = resolve_model_name(override, models)
                 if resolved_override:
                     return resolved_override
-                # If override isn't resolvable, still honor it (it may exist but
-                # not be reported yet); failures are handled at call time.
                 return override
 
         if models:
+            from .model_utils import resolve_model_name
+
             resolved_primary = resolve_model_name(self.chat_model, models)
             if resolved_primary:
                 return resolved_primary
@@ -47,13 +47,18 @@ class OllamaGuildConfig(BaseModel):
         return self.chat_model
 
 
-class OllamaConfig(BaseModel):
-    endpoint: str = "http://localhost:11434"
+class OpenRouterConfig(BaseModel):
+    api_key: str = ""
+    base_url: str = "https://openrouter.ai/api/v1"
+    default_headers: Dict[str, str] = Field(default_factory=dict)
     available_models: List[str] = Field(default_factory=list)
     health_check_enabled: bool = False
     health_check_interval: int = 60
     last_health_check: float = 0.0
     endpoint_healthy: bool = False
+
+    def has_api_key(self) -> bool:
+        return bool(self.api_key)
 
     def is_healthy(self) -> bool:
         if not self.health_check_enabled:
