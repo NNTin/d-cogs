@@ -145,11 +145,13 @@ class spoilarr(commands.Cog):
             )
         except Exception as exc:
             self.logger.warning("Failed to inject Spoilarr data into conversation: %s", exc)
-            return "Langcore conversation injection failed; Spoilarr data not recorded."
+            # return "Langcore conversation injection failed; Spoilarr data not recorded."
 
         await self._handle_spoiler_instruction(ctx, settings["spoiler_mode"])
 
-        return "✅ Spoilarr retrieved TMDb data (toon-formatted JSON added to conversation context)."
+        # return "✅ Spoilarr retrieved TMDb data (toon-formatted JSON added to conversation context)."
+        # todo: see TODO.md
+        return toon_str
 
     @commands.group(name="spoilarr")
     @commands.admin_or_permissions(administrator=True)

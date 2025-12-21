@@ -50,6 +50,7 @@ class MyManager(SubAgent):
             callbacks=callbacks,
             guild_id=ctx.guild_id,
             member_id=ctx.member_id,
+            channel_id=ctx.channel_id,
             provider=ctx.get_provider(),
         )
 ```

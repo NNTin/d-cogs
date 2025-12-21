@@ -418,6 +418,7 @@ class SubAgent(ABC):
                     tools=[{"name": "render"}],
                     callbacks=callbacks,
                     guild_id=ctx.guild_id,
+                    channel_id=ctx.channel_id,
                     member_id=ctx.member_id,
                     provider=provider,
                 )
@@ -440,7 +441,9 @@ class SubAgent(ABC):
         tools: List[Dict[str, Any]],
         callbacks: Dict[str, Callable[..., Any]],
         guild_id: int,
+        channel_id: int,
         member_id: Optional[int] = None,
+        ctx: Optional[ExtensionContext] = None,
         provider: Optional[ChainProvider] = None,
         max_iterations: int = 10,
     ) -> str:
@@ -458,6 +461,65 @@ class SubAgent(ABC):
 
         llm = await provider_to_use.get_chat_llm(guild_id=guild_id, member_id=member_id)
         lc_messages = convert_to_messages(messages)
+
+        extension_ctx = ctx or ExtensionContext(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            member_id=member_id or 0,
+            langcore=self.langcore_cog,
+            default_provider=getattr(self.langcore_cog, "DEFAULT_PROVIDER_FALLBACK", None),
+        )
+
+        def _is_signature_type_error(exc: TypeError) -> bool:
+            msg = str(exc)
+            return (
+                "unexpected keyword argument" in msg
+                or "positional arguments but" in msg
+                or "required positional argument" in msg
+                or "positional argument" in msg
+            )
+
+        def build_wrapper(cb: Callable[..., Any]) -> Callable[..., Any]:
+            async def wrapper(**tool_args):
+                kw_with_ctx = dict(tool_args)
+                kw_with_ctx.setdefault("ctx", extension_ctx)
+                try:
+                    if asyncio.iscoroutinefunction(cb):
+                        return await cb(**kw_with_ctx)
+                    return cb(**kw_with_ctx)
+                except TypeError as exc:
+                    if not _is_signature_type_error(exc):
+                        raise
+                    self.logger.debug(
+                        "Tool %s rejected ExtensionContext injection: %s",
+                        getattr(cb, "__name__", cb),
+                        exc,
+                    )
+
+                kw_with_context = dict(tool_args)
+                kw_with_context.update(guild_id=guild_id, channel_id=extension_ctx.channel_id, member_id=extension_ctx.member_id)
+                try:
+                    if asyncio.iscoroutinefunction(cb):
+                        return await cb(**kw_with_context)
+                    return cb(**kw_with_context)
+                except TypeError as exc:
+                    if not _is_signature_type_error(exc):
+                        raise
+                    self.logger.debug(
+                        "Tool %s rejected context kwargs, falling back to raw args: %s",
+                        getattr(cb, "__name__", cb),
+                        exc,
+                    )
+
+                if asyncio.iscoroutinefunction(cb):
+                    return await cb(**tool_args)
+                return cb(**tool_args)
+
+            return wrapper
+
+        wrapped_callbacks: Dict[str, Callable[..., Any]] = {
+            name: build_wrapper(cb) for name, cb in callbacks.items()
+        }
 
         iteration = 0
         while iteration < max_iterations:
@@ -494,7 +556,7 @@ class SubAgent(ABC):
                 if tool_id is None:
                     tool_id = f"tool_call_{iteration}_{tool_index}"
 
-                callback = callbacks.get(tool_name, lambda **_: f"Tool '{tool_name}' not found")
+                callback = wrapped_callbacks.get(tool_name) or callbacks.get(tool_name) or (lambda **_: f"Tool '{tool_name}' not found")
 
                 try:
                     result = (

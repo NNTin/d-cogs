@@ -83,3 +83,9 @@ PyPI langchain-ollama and langchain-openai requested but not used (not using lan
 -> adjust the architectural images, throw out dependency
 
 ---
+
+todo:
+re-evaluate conversation handling in mermaid and spoilarr
+
+in mermaid the mermaid agent uploads image on discord -> adding to conversation so conversation agent is aware
+in spoilarr the spoiler agent does **not** interact with discord -> should not be added to the conversation
