@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Callable, Awaitable
 
 import discord
 from redbot.core import commands
@@ -24,6 +24,102 @@ from .utils import format_ollama_error
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
 log = logging.getLogger("red.tin.ollama")
+
+
+class RetryingChatOllama:
+    """Wrapper that retries ChatOllama calls across configured fallback models."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        candidates: List[str],
+        tools: Optional[Any] = None,
+        endpoint: str,
+        **kwargs: Any,
+    ) -> None:
+        if not candidates:
+            raise ValueError("No candidate models provided for ChatOllama")
+
+        self.base_url = base_url
+        self.candidates = [c for c in candidates if c]
+        self.kwargs = kwargs
+        self._tools = tools
+        self._endpoint = endpoint
+        self._current_model = self.candidates[0]
+        self._llm = self._build_llm(self._current_model)
+
+    def _build_llm(self, model: str) -> ChatOllama:
+        llm = ChatOllama(
+            base_url=self.base_url,
+            model=model,
+            **self.kwargs,
+        )
+        if self._tools:
+            llm = llm.bind_tools(self._tools)
+        return llm
+
+    def bind_tools(self, tools: Any) -> "RetryingChatOllama":
+        return RetryingChatOllama(
+            base_url=self.base_url,
+            candidates=self.candidates,
+            tools=tools,
+            endpoint=self._endpoint,
+            **self.kwargs,
+        )
+
+    async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._call_with_retries(lambda llm: llm.ainvoke(*args, **kwargs))
+
+    async def _call_with_retries(self, caller: Callable[[ChatOllama], Awaitable[Any]]) -> Any:
+        last_exc: Optional[Exception] = None
+
+        for idx, model in enumerate(self.candidates):
+            if idx > 0:
+                log.warning("Retrying Ollama chat with fallback '%s' (previous=%s)", model, self._current_model)
+                self._current_model = model
+                self._llm = self._build_llm(model)
+
+            try:
+                return await caller(self._llm)
+            except ResponseError as exc:
+                last_exc = exc
+                if not self._should_retry(exc):
+                    raise
+                continue
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                continue
+
+        if isinstance(last_exc, ResponseError):
+            raise commands.UserFeedbackCheckFailure(
+                format_ollama_error(
+                    last_exc,
+                    model=self._current_model,
+                    endpoint=self._endpoint,
+                )
+            ) from last_exc
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("RetryingChatOllama exhausted without attempts")
+
+    @staticmethod
+    def _should_retry(exc: ResponseError) -> bool:
+        status = exc.status_code or 0
+        message = str(exc).lower()
+        if status in (429, 500, 503):
+            return True
+        if "rate limit" in message:
+            return True
+        if status == 404 or "not found" in message:
+            return True
+        if status == 400 and "does not support chat" in message:
+            return True
+        return False
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._llm, item)
 
 
 class ollama(commands.Cog):
@@ -182,32 +278,38 @@ class ollama(commands.Cog):
         # TODO: Replace this with the proper end user data removal handling.
         super().red_delete_data_for_user(requester=requester, user_id=user_id)
 
-    def _select_model_with_fallback(
+    def _build_chat_candidates(
         self,
         preferred_model: str,
-        fallback_model: str,
+        fallback_models: List[str],
         available_models: List[str],
-    ) -> str:
-        if not available_models:
-            return preferred_model
+    ) -> List[str]:
+        candidates: List[str] = []
+        seen = set()
+
+        def add_candidate(model_name: Optional[str]) -> None:
+            if not model_name:
+                return
+            if model_name in seen:
+                return
+            seen.add(model_name)
+            candidates.append(model_name)
 
         resolved_preferred = resolve_model_name(preferred_model, available_models) or preferred_model
-        if resolved_preferred in available_models:
-            return resolved_preferred
+        add_candidate(resolved_preferred)
 
-        resolved_fallback = resolve_model_name(fallback_model, available_models) or fallback_model
-        if resolved_fallback in available_models:
-            log.warning("Preferred model '%s' unavailable; falling back to '%s'", preferred_model, resolved_fallback)
-            return resolved_fallback
+        for fb in fallback_models:
+            resolved_fb = resolve_model_name(fb, available_models) or fb
+            add_candidate(resolved_fb)
 
-        selected = select_default_chat_model(available_models) or available_models[0]
-        log.warning(
-            "Neither preferred model '%s' nor fallback '%s' available; using '%s'",
-            preferred_model,
-            fallback_model,
-            selected,
-        )
-        return selected
+        if available_models:
+            default_candidate = select_default_chat_model(available_models) or available_models[0]
+            add_candidate(default_candidate)
+            for candidate in available_models:
+                if candidate and not is_embedding_model(candidate):
+                    add_candidate(candidate)
+
+        return candidates or [preferred_model]
 
     async def chat(
         self,
@@ -220,7 +322,8 @@ class ollama(commands.Cog):
         available_models = self.ollama_config.available_models
 
         preferred_model = guild_config.get_user_model(member, available_models)
-        model = self._select_model_with_fallback(preferred_model, guild_config.chat_fallback, available_models)
+        fallback_models = guild_config.get_chat_fallbacks()
+        candidates = self._build_chat_candidates(preferred_model, fallback_models, available_models)
 
         langchain_messages: List[Any] = []
         for message in messages:
@@ -237,74 +340,32 @@ class ollama(commands.Cog):
         allowed_options = set(chat_model_fields.keys()) if chat_model_fields else {"temperature", "num_predict", "seed"}
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_options and v is not None}
 
-        async def invoke_chat(selected_model: str) -> str:
-            llm = ChatOllama(
+        try:
+            retrying_llm = RetryingChatOllama(
                 base_url=self.ollama_config.endpoint,
-                model=selected_model,
+                candidates=candidates,
+                endpoint=self.ollama_config.endpoint,
                 **filtered_kwargs,
             )
-            response = await llm.ainvoke(langchain_messages)
+            response = await retrying_llm.ainvoke(langchain_messages)
             return str(response.content)
-
-        try:
-            return await invoke_chat(model)
         except ResponseError as exc:
-            is_not_chat = exc.status_code == 400 and "does not support chat" in str(exc).lower()
-            if is_not_chat and available_models:
-                chat_candidates = [
-                    m for m in available_models if m and not is_embedding_model(m) and m != model
-                ]
-                # Prefer configured chat model name (tagless → resolved) if possible
-                configured = resolve_model_name(guild_config.chat_model, available_models)
-                if configured and configured in chat_candidates:
-                    chat_candidates.remove(configured)
-                    chat_candidates.insert(0, configured)
-
-                for candidate in chat_candidates[:5]:
-                    try:
-                        log.warning("Model '%s' does not support chat; retrying with '%s'", model, candidate)
-                        return await invoke_chat(candidate)
-                    except ResponseError as retry_exc:
-                        if retry_exc.status_code == 400 and "does not support chat" in str(retry_exc).lower():
-                            continue
-                        raise
-
-            is_not_found = exc.status_code == 404 or "not found" in str(exc).lower()
-            if is_not_found and model != guild_config.chat_fallback:
-                retry_model = self._select_model_with_fallback(
-                    guild_config.chat_fallback,
-                    guild_config.chat_fallback,
-                    available_models,
-                )
-                if retry_model != model:
-                    try:
-                        return await invoke_chat(retry_model)
-                    except ResponseError as retry_exc:
-                        log.warning("Ollama chat failed for guild %s model=%s: %s", guild.id, retry_model, retry_exc)
-                        raise commands.UserFeedbackCheckFailure(
-                            format_ollama_error(
-                                retry_exc,
-                                model=retry_model,
-                                endpoint=self.ollama_config.endpoint,
-                            )
-                        ) from retry_exc
-                    except Exception as retry_exc:  # noqa: BLE001
-                        log.exception("Unexpected Ollama chat error for guild %s model=%s", guild.id, retry_model)
-                        raise commands.UserFeedbackCheckFailure(
-                            format_ollama_error(
-                                retry_exc,
-                                model=retry_model,
-                                endpoint=self.ollama_config.endpoint,
-                            )
-                        ) from retry_exc
-            log.warning("Ollama chat failed for guild %s model=%s: %s", guild.id, model, exc)
+            log.warning("Ollama chat failed for guild %s: %s", guild.id, exc)
             raise commands.UserFeedbackCheckFailure(
-                format_ollama_error(exc, model=model, endpoint=self.ollama_config.endpoint)
+                format_ollama_error(
+                    exc,
+                    model=candidates[0] if candidates else preferred_model,
+                    endpoint=self.ollama_config.endpoint,
+                )
             ) from exc
         except Exception as exc:  # noqa: BLE001
-            log.exception("Unexpected Ollama chat error for guild %s model=%s", guild.id, model)
+            log.exception("Unexpected Ollama chat error for guild %s", guild.id)
             raise commands.UserFeedbackCheckFailure(
-                format_ollama_error(exc, model=model, endpoint=self.ollama_config.endpoint)
+                format_ollama_error(
+                    exc,
+                    model=candidates[0] if candidates else preferred_model,
+                    endpoint=self.ollama_config.endpoint,
+                )
             ) from exc
 
     async def embed(self, text: str, guild: discord.Guild, **kwargs: Any) -> List[float]:
@@ -425,20 +486,6 @@ class ollama(commands.Cog):
         Raises:
             commands.UserFeedbackCheckFailure: If model selection fails or endpoint unavailable.
         """
-        # If explicit model provided, use it directly (e.g., for classifier)
-        if model:
-            log.debug("Using explicit model override '%s' for guild %s", model, guild_id)
-            try:
-                return ChatOllama(
-                    base_url=self.ollama_config.endpoint,
-                    model=model,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.error("Failed to create ChatOllama with explicit model '%s': %s", model, exc)
-                raise commands.UserFeedbackCheckFailure(
-                    f"Failed to initialize chat model '{model}': {exc}"
-                ) from exc
-
         guild_config = await self.get_guild_config(guild_id)
         available_models = self.ollama_config.available_models
 
@@ -450,26 +497,24 @@ class ollama(commands.Cog):
                 member = guild.get_member(member_id)
 
         # Use same model selection logic as chat()
-        preferred_model = guild_config.get_user_model(member, available_models)
-        model = self._select_model_with_fallback(
-            preferred_model,
-            guild_config.chat_fallback,
-            available_models,
-        )
+        preferred_model = model or guild_config.get_user_model(member, available_models)
+        fallback_models = guild_config.get_chat_fallbacks()
+        candidates = self._build_chat_candidates(preferred_model, fallback_models, available_models)
 
         # Validate model availability
-        if available_models and model not in available_models:
+        if available_models and candidates and candidates[0] not in available_models:
             log.warning(
                 "Selected model '%s' not in available models for guild %s; using anyway",
-                model,
+                candidates[0],
                 guild_id,
             )
 
         # Return configured ChatOllama instance
         try:
-            return ChatOllama(
+            return RetryingChatOllama(
                 base_url=self.ollama_config.endpoint,
-                model=model,
+                candidates=candidates,
+                endpoint=self.ollama_config.endpoint,
             )
         except Exception as exc:  # noqa: BLE001
             log.error("Failed to create ChatOllama instance for guild %s: %s", guild_id, exc)
@@ -510,7 +555,7 @@ class ollama(commands.Cog):
             value=(
                 f"Chat: {guild_config.chat_model}\n"
                 f"Embed: {guild_config.embed_model}\n"
-                f"Chat Fallback: {guild_config.chat_fallback}\n"
+                f"Chat Fallbacks: {', '.join(guild_config.get_chat_fallbacks()) or 'None'}\n"
                 f"Embed Fallback: {guild_config.embed_fallback}"
             ),
             inline=False,
@@ -600,11 +645,18 @@ class ollama(commands.Cog):
         await ctx.send(f"Embed model set to: {model}")
 
     @ollama_config.command(name="chatfallback")
-    @discord.app_commands.autocomplete(model=model_autocomplete)
-    async def set_chat_fallback(self, ctx: commands.Context, model: str):
-        """Set the fallback chat model."""
-        await self.config.guild(ctx.guild).chat_fallback.set(model)
-        await ctx.send(f"Chat fallback model set to: {model}")
+    async def set_chat_fallback(self, ctx: commands.Context, *models: str):
+        """Set one or more fallback chat models (priority order)."""
+        if not models:
+            await ctx.send("Provide at least one fallback model.")
+            return
+
+        if len(models) == 1 and "," in models[0]:
+            models = tuple(m.strip() for m in models[0].split(",") if m.strip())
+
+        fallbacks = [m for m in models if m]
+        await self.config.guild(ctx.guild).chat_fallback.set(fallbacks)
+        await ctx.send(f"Chat fallback models set to: {', '.join(fallbacks)}")
 
     @ollama_config.command(name="embedfallback")
     @discord.app_commands.autocomplete(model=model_autocomplete)

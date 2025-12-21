@@ -237,7 +237,7 @@ class SpoilarrManager:
         try:
             messages = convert_to_messages(messages_dict)
             callbacks = self._build_callbacks(ctx.guild_id)
-            max_iterations = 10
+            max_iterations = 50
             iteration = 0
 
             while iteration < max_iterations:
@@ -245,24 +245,26 @@ class SpoilarrManager:
 
                 bound_llm = llm.bind_tools(self._tool_schemas)
                 ai_msg: AIMessage = await bound_llm.ainvoke(messages)
+                self.logger.info("Spoilarr agent iteration %s AI message: %s", iteration, ai_msg)
                 messages.append(ai_msg)
 
-                if not ai_msg.tool_calls:
-                    if not _is_json_like(ai_msg.content):
-                        self.logger.warning(
-                            "Spoilarr agent produced non-JSON response, requesting JSON-only output (iteration %s)",
-                            iteration,
-                        )
-                        messages.append(
-                            SystemMessage(
-                                content=(
-                                    "Final reply must be toon.dumps(JSON) only. If you still need data, call the tools "
-                                    "(search -> details -> credits). No prose—return the JSON string."
-                                )
-                            )
-                        )
-                        continue
-                    break
+                # TODO: disabled final response check for now to allow non-JSON replies, there is a bug with the conversion
+                # if not ai_msg.tool_calls:
+                #     if not _is_json_like(ai_msg.content):
+                #         self.logger.warning(
+                #             "Spoilarr agent produced non-JSON response, requesting JSON-only output (iteration %s)",
+                #             iteration,
+                #         )
+                #         messages.append(
+                #             SystemMessage(
+                #                 content=(
+                #                     "Final reply must be toon.dumps(JSON) only. If you still need data, call the tools "
+                #                     "(search -> details -> credits). No prose—return the JSON string."
+                #                 )
+                #             )
+                #         )
+                #         continue
+                #     break
 
                 for tool_index, tool_call in enumerate(ai_msg.tool_calls):
                     if isinstance(tool_call, dict):
@@ -302,6 +304,7 @@ class SpoilarrManager:
                             else callback(**tool_args)
                         )
                         tool_result = str(result)
+                        self.logger.info("Tool %s result: %s", tool_name, tool_result)
                     except Exception as exc:
                         self.logger.error("Tool %s execution failed: %s", tool_name, exc)
                         tool_result = f"Error executing {tool_name}: {exc}"
@@ -312,10 +315,10 @@ class SpoilarrManager:
                 self.logger.warning("Spoilarr agent loop reached max iterations (%s)", max_iterations)
         except Exception as exc:
             self.logger.error("Spoilarr agent loop failed: %s", exc)
-            try:
-                return toon_format.dumps({"error": f"Spoilarr agent failed: {exc}"}, indent=2)
-            except Exception:
-                return f'{{"error": "Spoilarr agent failed: {exc}"}}'
+            # We will not return error, instead we proceed and return everything we have from the loop            # try:
+            #     return toon_format.dumps({"error": f"Spoilarr agent failed: {exc}"}, indent=2)
+            # except Exception:
+            #     return f'{{"error": "Spoilarr agent failed: {exc}"}}'
 
         final_content: Any = ""
         for msg in reversed(messages):

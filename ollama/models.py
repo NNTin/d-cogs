@@ -1,10 +1,12 @@
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import discord
 from pydantic import Field
 
 from cogchain.models import BaseModel
+from pydantic import VERSION
+from typing import Any
 
 from .model_utils import resolve_model_name
 
@@ -12,10 +14,36 @@ from .model_utils import resolve_model_name
 class OllamaGuildConfig(BaseModel):
     chat_model: str = "gemma3"
     embed_model: str = "qwen3-embedding"
-    chat_fallback: str = "llama3.1"
+    chat_fallback: Union[str, List[str]] = Field(default_factory=lambda: ["llama3.1"])
     embed_fallback: str = "nomic-embed-text"
     tool_scope: str = "core"
     role_model_overrides: Dict[int, str] = Field(default_factory=dict)
+
+    if VERSION >= "2.0.1":
+        from pydantic import field_validator
+
+        @field_validator("chat_fallback", mode="before")
+        @classmethod
+        def _normalize_chat_fallback(cls, value: Any) -> List[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, (list, tuple)):
+                return [str(v) for v in value if v]
+            return [str(value)]
+    else:  # pragma: no cover - pydantic v1 fallback
+        from pydantic import validator
+
+        @validator("chat_fallback", pre=True, always=True)
+        def _normalize_chat_fallback(cls, value: Any) -> List[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, (list, tuple)):
+                return [str(v) for v in value if v]
+            return [str(value)]
 
     def get_user_model(
         self, member: Optional[discord.Member], available_models: Optional[List[str]]
@@ -40,11 +68,20 @@ class OllamaGuildConfig(BaseModel):
             resolved_primary = resolve_model_name(self.chat_model, models)
             if resolved_primary:
                 return resolved_primary
-            resolved_fallback = resolve_model_name(self.chat_fallback, models)
-            if resolved_fallback:
-                return resolved_fallback
+            for fallback in self.get_chat_fallbacks():
+                resolved_fallback = resolve_model_name(fallback, models)
+                if resolved_fallback:
+                    return resolved_fallback
 
         return self.chat_model
+
+    def get_chat_fallbacks(self) -> List[str]:
+        raw = self.chat_fallback
+        if isinstance(raw, list):
+            return [m for m in raw if m]
+        if isinstance(raw, str):
+            return [raw] if raw else []
+        return [str(raw)]
 
 
 class OllamaConfig(BaseModel):
