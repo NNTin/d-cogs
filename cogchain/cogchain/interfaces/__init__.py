@@ -9,7 +9,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 import discord
 from langchain_core.messages import AIMessage, ToolMessage, convert_to_messages
@@ -402,6 +402,7 @@ class ChainHubProtocol(Protocol):
         ...
 
 
+@runtime_checkable
 class LangcoreProtocol(Protocol):
     """High-level langcore interactions used by extension/provider cogs."""
 
