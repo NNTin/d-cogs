@@ -40,8 +40,9 @@ fix ollama/modelspy: from langcore.models import BaseModel
 ---
 
 implement common pitfalls for test check:
-- importing a python module from another cog
+- importing a python module from another cog (should use cogchain)
 - defining interface without doc string
+- usage of getattr
 
 ---
 

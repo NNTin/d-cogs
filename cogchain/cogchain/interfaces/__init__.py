@@ -9,7 +9,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol
 
 import discord
 from langchain_core.messages import AIMessage, ToolMessage, convert_to_messages
@@ -368,4 +368,70 @@ __all__ = [
     "MessageHandler",
     "ExtensionContext",
     "SubAgent",
+    "ConversationManagerProtocol",
+    "ChainHubProtocol",
+    "LangcoreProtocol",
 ]
+
+
+class ConversationManagerProtocol(Protocol):
+    """Minimal contract for registering/unregistering cog system prompts."""
+
+    def register_cog_system_prompt(self, cog_name: str, prompt: str) -> None:
+        ...
+
+    def unregister_cog_system_prompt(self, cog_name: str) -> None:
+        ...
+
+
+class ChainHubProtocol(Protocol):
+    """Contract for registering callable tool functions with langcore's hub."""
+
+    def register_function(
+        self,
+        cog_name: str,
+        schema: dict,
+        permission_level: str = "user",
+    ) -> bool:
+        ...
+
+    def unregister_function(self, cog_name: str, function_name: str) -> None:
+        ...
+
+    def unregister_cog(self, cog_name: str) -> None:
+        ...
+
+
+class LangcoreProtocol(Protocol):
+    """High-level langcore interactions used by extension/provider cogs."""
+
+    DEFAULT_PROVIDER_FALLBACK: Optional[str]
+    conversation_manager: ConversationManagerProtocol
+    hub: ChainHubProtocol
+
+    def register_message_handler(self, cog_name: str, handler: MessageHandler) -> bool:
+        ...
+
+    def unregister_message_handler(self, cog_name: str) -> None:
+        ...
+
+    def register_provider(self, name: str, provider: ChainProvider) -> bool:
+        ...
+
+    def unregister_provider(self, name: str) -> None:
+        ...
+
+    def get_provider(self, name: str) -> Optional[ChainProvider]:
+        ...
+
+    def get_providers(self) -> Dict[str, ChainProvider]:
+        ...
+
+    def register_chain_store(self, chain_store: ChainStore) -> bool:
+        ...
+
+    def unregister_chain_store(self) -> None:
+        ...
+
+    def get_store(self) -> ChainStore:
+        ...

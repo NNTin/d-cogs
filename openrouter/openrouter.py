@@ -10,6 +10,7 @@ from cogchain.interfaces import ChainProvider
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
+from cogchain.interfaces import ChainProvider, LangcoreProtocol
 from .health import HealthMonitor
 from .model_utils import (
     is_embedding_model,
@@ -175,7 +176,7 @@ class openrouter(commands.Cog):
     @commands.Cog.listener()
     async def on_langcore_cog_add(self, langcore_cog):
         """Register this cog as a ChainProvider when langcore loads."""
-        if getattr(langcore_cog, "qualified_name", "") != "langcore":
+        if not isinstance(langcore_cog, LangcoreProtocol):
             return
         self._refresh_provider()
         success = langcore_cog.register_provider(self.qualified_name, self.provider)

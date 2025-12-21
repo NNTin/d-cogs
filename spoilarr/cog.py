@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 import discord
 from redbot.core import Config, commands
 from redbot.core.bot import Red
-from cogchain.interfaces import ExtensionContext
+from cogchain.interfaces import ExtensionContext, LangcoreProtocol
 
 from .client import TMDbClient
 from .manager import SpoilarrManager
@@ -90,11 +90,9 @@ class spoilarr(commands.Cog):
         if spoiler_mode:
             return
         try:
-            add_conv = getattr(ctx, "add_to_conversation", None)
-            if add_conv:
-                await add_conv(
-                    "Note: Use Discord spoiler markup ||like this|| when presenting sensitive information like plot details, character deaths, or major reveals to the user."
-                )
+            await ctx.add_to_conversation(
+                "Note: Use Discord spoiler markup ||like this|| when presenting sensitive information like plot details, character deaths, or major reveals to the user."
+            )
         except Exception:
             # Non-blocking best-effort helper; logging stays minimal to avoid noisy tool failures.
             return
@@ -123,10 +121,10 @@ class spoilarr(commands.Cog):
                 channel_id=int(channel_id),
                 member_id=int(member_id),
                 langcore=langcore_cog,
-                default_provider=getattr(langcore_cog, "DEFAULT_PROVIDER_FALLBACK", None),
+                default_provider=langcore_cog.DEFAULT_PROVIDER_FALLBACK,
             )
 
-        settings = await self._get_settings(getattr(ctx, "guild_id", guild_id))
+        settings = await self._get_settings(ctx.guild_id)
         if not settings["api_key"]:
             return "TMDb API key not configured. Use [p]spoilarr apikey <key>"
 
@@ -139,18 +137,16 @@ class spoilarr(commands.Cog):
             self.logger.error("SpoilarrManager query failed: %s", exc)
             return f"Failed to query TMDb: {str(exc)}"
 
-        add_conv = getattr(ctx, "add_to_conversation", None)
-        if add_conv:
-            try:
-                await add_conv(
-                    content=toon_str,
-                    role="tool",
-                    tool_call_id="spoilarr_query",
-                    name="query_spoilarr",
-                )
-            except Exception as exc:
-                self.logger.warning("Failed to inject Spoilarr data into conversation: %s", exc)
-                return f"{toon_str}\n\n⚠️ Conversation context was not updated due to an injection error."
+        try:
+            await ctx.add_to_conversation(
+                content=toon_str,
+                role="tool",
+                tool_call_id="spoilarr_query",
+                name="query_spoilarr",
+            )
+        except Exception as exc:
+            self.logger.warning("Failed to inject Spoilarr data into conversation: %s", exc)
+            return f"{toon_str}\n\n⚠️ Conversation context was not updated due to an injection error."
 
         await self._handle_spoiler_instruction(ctx, settings["spoiler_mode"])
 
@@ -201,7 +197,7 @@ class spoilarr(commands.Cog):
     async def cog_unload(self) -> None:
         await super().cog_unload()
         langcore_cog = self.bot.get_cog("langcore")
-        if getattr(langcore_cog, "conversation_manager", None):
+        if isinstance(langcore_cog, LangcoreProtocol):
             try:
                 langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
             except Exception as exc:
@@ -213,7 +209,7 @@ class spoilarr(commands.Cog):
     async def on_langcore_cog_remove(self, langcore_cog=None) -> None:
         """Remove the Spoilarr system prompt if langcore unloads."""
         langcore_cog = langcore_cog or self.bot.get_cog("langcore")
-        if getattr(langcore_cog, "conversation_manager", None):
+        if isinstance(langcore_cog, LangcoreProtocol):
             try:
                 langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
                 self.logger.info("Unregistered Spoilarr system prompt after langcore removal")

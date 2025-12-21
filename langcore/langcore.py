@@ -13,6 +13,8 @@ from redbot.core.bot import Red
 from redbot.core.config import Config
 from redbot.core.utils.chat_formatting import pagify, text_to_file
 
+from cogchain.interfaces import ChainHubProtocol, ConversationManagerProtocol, LangcoreProtocol
+
 from .abc import ChainProvider, ChainStore, MessageHandler
 from .classifier import ClassifierManager
 from .conversation import ConversationManager
@@ -24,7 +26,7 @@ RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 log = logging.getLogger("red.tin.langcore")
 
 
-class langcore(commands.Cog):
+class langcore(commands.Cog, LangcoreProtocol):
     """
     core framework cog build on top of LangChain framework
     """
@@ -55,9 +57,9 @@ class langcore(commands.Cog):
             classifier_model=default_guild["classifier_model"],
         )
 
-        self.conversation_manager = ConversationManager(langcore_cog=self)
+        self.conversation_manager: ConversationManagerProtocol = ConversationManager(langcore_cog=self)
         self.classifier_manager = ClassifierManager()
-        self.hub = ChainHub(self.bot)
+        self.hub: ChainHubProtocol = ChainHub(self.bot)
         self.providers: Dict[str, ChainProvider] = {}
         self.message_handlers: Dict[str, MessageHandler] = {}
         self.chain_store: Optional[ChainStore] = None

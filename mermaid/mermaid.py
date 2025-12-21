@@ -13,7 +13,7 @@ from playwright.async_api import async_playwright
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
-from cogchain.interfaces import ExtensionContext, MessageHandler
+from cogchain.interfaces import ExtensionContext, LangcoreProtocol, MessageHandler
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
@@ -279,7 +279,7 @@ class mermaid(commands.Cog):
 
         # ChainHub will automatically unregister via langcore's on_cog_remove listener
         langcore_cog = self.bot.get_cog("langcore")
-        if getattr(langcore_cog, "conversation_manager", None):
+        if isinstance(langcore_cog, LangcoreProtocol):
             try:
                 langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
             except Exception as exc:
@@ -359,7 +359,7 @@ class mermaid(commands.Cog):
     async def on_langcore_cog_remove(self, langcore_cog=None):
         """Ensure the system prompt is removed when langcore unloads."""
         langcore_cog = langcore_cog or self.bot.get_cog("langcore")
-        if getattr(langcore_cog, "conversation_manager", None):
+        if isinstance(langcore_cog, LangcoreProtocol):
             try:
                 langcore_cog.conversation_manager.unregister_cog_system_prompt(self.qualified_name)
                 self.logger.info("Unregistered Mermaid system prompt after langcore removal")
@@ -517,9 +517,9 @@ class mermaid(commands.Cog):
             self.logger.warning("Langcore context unavailable; cannot generate diagram.")
             return "Langcore context unavailable; cannot generate diagram."
 
-        guild_obj = self.bot.get_guild(getattr(ctx, "guild_id", guild_id))
+        guild_obj = self.bot.get_guild(ctx.guild_id)
         if not guild_obj:
-            return f"Guild {getattr(ctx, 'guild_id', guild_id)} not found. Cannot upload diagram."
+            return f"Guild {ctx.guild_id} not found. Cannot upload diagram."
 
         try:
             syntax, file = await self.manager.create_diagram(
@@ -532,9 +532,9 @@ class mermaid(commands.Cog):
             self.logger.error("MermaidManager failed to create diagram: %s", e)
             return f"Failed to generate diagram: {str(e)}"
 
-        channel = guild_obj.get_channel(getattr(ctx, "channel_id", channel_id))
+        channel = guild_obj.get_channel(ctx.channel_id)
         if not channel:
-            return f"Channel {getattr(ctx, 'channel_id', channel_id)} not found in guild {guild_obj.name}. Cannot upload diagram."
+            return f"Channel {ctx.channel_id} not found in guild {guild_obj.name}. Cannot upload diagram."
 
         try:
             msg = await channel.send("Here's your Mermaid diagram:", file=file)
@@ -542,16 +542,14 @@ class mermaid(commands.Cog):
             self.logger.error("Failed to upload diagram to channel %s: %s", ctx.channel_id, e)
             return f"Failed to upload diagram: {str(e)}"
 
-        add_conv = getattr(ctx, "add_to_conversation", None)
-        if add_conv:
-            try:
-                await add_conv(f"```mermaid\n{syntax}\n```")
-            except Exception as exc:  # noqa: BLE001
-                self.logger.warning("Failed to inject Mermaid syntax into conversation: %s", exc)
-                return (
-                    f"✅ Diagram uploaded: {msg.jump_url} "
-                    "(Warning: syntax not added to conversation context)"
-                )
+        try:
+            await ctx.add_to_conversation(f"```mermaid\n{syntax}\n```")
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Failed to inject Mermaid syntax into conversation: %s", exc)
+            return (
+                f"✅ Diagram uploaded: {msg.jump_url} "
+                "(Warning: syntax not added to conversation context)"
+            )
 
         return f"✅ Diagram uploaded: {msg.jump_url}\nMermaid syntax added to conversation context."
 

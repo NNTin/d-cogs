@@ -9,7 +9,7 @@ from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.config import Config
 from redbot.core.utils.chat_formatting import box
-from cogchain.interfaces import ChainStore
+from cogchain.interfaces import ChainStore, LangcoreProtocol
 
 try:
     from qdrant_client import QdrantClient
@@ -482,7 +482,7 @@ class qdrant(commands.Cog):
 
     @commands.Cog.listener()
     async def on_langcore_cog_add(self, langcore_cog) -> None:
-        if getattr(langcore_cog, "qualified_name", "") != "langcore":
+        if not isinstance(langcore_cog, LangcoreProtocol):
             return
         self._refresh_provider()
         if self.chain_store_provider:
@@ -495,7 +495,7 @@ class qdrant(commands.Cog):
     @commands.Cog.listener()
     async def on_langcore_cog_remove(self, langcore_cog=None) -> None:
         langcore_cog = langcore_cog or self.bot.get_cog("langcore")
-        if getattr(langcore_cog, "qualified_name", "") != "langcore":
+        if not isinstance(langcore_cog, LangcoreProtocol):
             return
         try:
             langcore_cog.unregister_chain_store()
