@@ -11,32 +11,6 @@ Finally we have the hub that makes it easy to register/unregister functions and 
 Cogs that are implemented can bring their own sophisticated configuration.
 
 
-
----
-
-Analyze the plugin langcore. The langcore cog offers modularity by having the abstraction ChainProvider and ChainStore as well has the hub.py and conversation.py for registering/unregistering functions and sharing the conversation.  
-
-langcore is not aware of the plugins that will be installed. There should be no hard references to other plugins.  
-
-Review langcore and check if their means of exposing functions follow best practice.  
-Finally check the extension cogs mermaid and spoilarr if they integrate the functions using the best practice.  
-
-The code is working. We need architectural improvements so we have standardized means. ChainProvider and ChainStore have this fully abstracted. To the ExtensionCogs we need clear interfaces, not hacky solutions that require complicated code.  
-Note: It is not possible to import between the cogs!
-
----
-
-we need to define interfaces langcore offers
-- ChainProvider - done in abc.py
-- ChainStore    - done in abc.py
-- conversation.py
-- hub.py
-
----
-
-
-fix ollama/modelspy: from langcore.models import BaseModel
-
 ---
 
 implement common pitfalls for test check:
@@ -44,21 +18,28 @@ implement common pitfalls for test check:
 - defining interface without doc string
 - usage of getattr
 
----
+
+fix pipeline, add automatic tests, activate tests in pipeline
+
+
 
 Best practice of ruff, uv, ty, pydantic
 Note: mirrored cogs, e.g. hotreload, need to be exempt
 
 ---
 
-fix pipeline, add automatic tests, activate tests in pipeline
 
----
+- [x] Ollama
+  - [x] fallback models can be defined
+  - [x] when rate limited, has rate limit cooling
+  - [ ] multiple Ollama endpoints (e.g. 192.168.178.78:11434, 192.168.178.12:11434)
+- [ ] OpenRouter (implemented but untested)
+  - [ ] support multiple endpoints (e.g. https://openrouter.ai/api/v1, https://api.openai.com/v1)
+- [ ] Cross Provider behavior (configured in langcore cog)
+  - [ ] preferred provider?
+  - [ ] loadbalancing or fallback between providers?
+  - [ ] within a provider need to be able to set LLM selection strategy: fallback or loadbalancing?
 
-OpenRouter is untested. Created but I don't use API keys for it yet.
-
-later: Fallback strategy: OpenRouter (free) -> Ollama (cloud) -> Ollama (local hardware)
--> worth offloading as a cog since different people have different ideas of it
 
 ---
 

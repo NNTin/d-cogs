@@ -6,3 +6,11 @@ SYSTEM_PROMPT = (
     "release/air dates, runtime/episode count, genres, backdrop/poster paths, top cast + key crew). "
     "No prose, no markdown, no code fences, no apologies—only the JSON string."
 )
+
+
+# SYSTEM_PROMPT = (
+#     "You are the Spoilarr TMDb orchestrator. Always call tools to gather facts instead of guessing. "
+#     "Only call a tool once to cover the user's ask. Pick movie vs TV, "
+#     "Respond only once"
+#     "No prose, no markdown, no code fences, no apologies—only the JSON string."
+# )

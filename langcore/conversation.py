@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
@@ -287,6 +288,12 @@ class ConversationManager:
                         )
                         system_insert_index += 1
 
+            if provider is None and langcore_ref:
+                provider = await langcore_ref.get_default_provider(guild_id, member_id=member_id)
+
+            if provider is None:
+                return "No provider available for this guild."
+
             # Get LLM instance from provider
             try:
                 llm = await provider.get_chat_llm(guild_id=guild_id, member_id=member_id)
@@ -350,6 +357,51 @@ class ConversationManager:
             for tool_name, callback in callbacks.items():
                 wrapped_callbacks[tool_name] = build_wrapper(callback)
 
+            def _normalize_tool_call_arguments(msgs: List[BaseMessage]) -> None:
+                """Ensure tool_call arguments are JSON strings before sending to providers."""
+
+                def _coerce(val: Any) -> str:
+                    if isinstance(val, str):
+                        return val
+                    try:
+                        return json.dumps(val)
+                    except Exception:  # noqa: BLE001
+                        return json.dumps(str(val))
+
+                for candidate in msgs:
+                    tool_calls = getattr(candidate, "tool_calls", None)
+                    if not tool_calls:
+                        continue
+                    for tc in tool_calls:
+                        # Support dict-like or attribute access
+                        function = getattr(tc, "function", None)
+                        if function is None and hasattr(tc, "get"):
+                            function = tc.get("function")
+
+                        # Normalize args field
+                        args = getattr(tc, "args", None)
+                        if args is None and hasattr(tc, "get"):
+                            args = tc.get("args")
+
+                        json_args = _coerce(args) if args is not None else None
+
+                        # Update function.arguments when present
+                        if isinstance(function, dict):
+                            if "arguments" in function and function["arguments"] is not None:
+                                function["arguments"] = _coerce(function["arguments"])
+                            elif json_args is not None:
+                                function["arguments"] = json_args
+
+                        # Update args property for dicts/objects
+                        if json_args is not None:
+                            if hasattr(tc, "args"):
+                                try:
+                                    tc.args = json_args  # type: ignore[attr-defined]
+                                except Exception:  # noqa: BLE001
+                                    pass
+                            if isinstance(tc, dict):
+                                tc["args"] = json_args
+
             while iteration < max_iterations:
                 iteration += 1
                 log.debug("Agent iteration %d/%d", iteration, max_iterations)
@@ -362,6 +414,7 @@ class ConversationManager:
 
                 # Invoke LLM
                 try:
+                    _normalize_tool_call_arguments(messages)
                     ai_msg: AIMessage = await bound_llm.ainvoke(messages)
                 except Exception as e:
                     log.error("LLM invocation failed at iteration %d: %s", iteration, e)
@@ -472,13 +525,37 @@ class ConversationManager:
 
             # Get the last AI message content
             final_response = ""
+            last_ai_message: Optional[AIMessage] = None
             for msg in reversed(messages):
                 if isinstance(msg, AIMessage):
+                    last_ai_message = msg
                     final_response = str(msg.content) if msg.content else ""
                     break
 
             if not final_response:
-                log.warning("No AI response content found in agent loop")
+                provider_name = getattr(provider, "qualified_name", None) or provider.__class__.__name__
+                tool_calls = getattr(last_ai_message, "tool_calls", None) if last_ai_message else None
+                tool_names: List[str] = []
+                if tool_calls:
+                    for tool_call in tool_calls:
+                        name = getattr(tool_call, "name", None)
+                        if name is None and hasattr(tool_call, "get"):
+                            name = tool_call.get("name")
+                        tool_names.append(name or "unknown")
+
+                content_type = type(getattr(last_ai_message, "content", None)).__name__ if last_ai_message else None
+                kwargs_keys = (
+                    list(getattr(last_ai_message, "additional_kwargs", {}).keys()) if last_ai_message else []
+                )
+
+                log.warning(
+                    "No AI response content found in agent loop (provider=%s iteration=%d content_type=%s tools=%s kwargs=%s)",
+                    provider_name,
+                    iteration,
+                    content_type,
+                    tool_names,
+                    kwargs_keys,
+                )
                 final_response = "I apologize, but I couldn't generate a response."
 
             return final_response

@@ -3,6 +3,7 @@ import logging
 import json
 import ast
 import base64
+import random
 from io import BytesIO
 from datetime import datetime
 from typing import Dict, List, Literal, Optional, Union
@@ -19,7 +20,7 @@ from .abc import ChainProvider, ChainStore, MessageHandler
 from .classifier import ClassifierManager
 from .conversation import ConversationManager
 from .hub import ChainHub
-from .models import GuildConfig
+from .models import GuildConfig, ProviderSelectionConfig
 
 RequestType = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
@@ -44,6 +45,7 @@ class langcore(commands.Cog):
         self.config.register_guild(
             enabled=default_guild["enabled"],
             default_provider=default_guild["default_provider"],
+            provider_selection=default_guild["provider_selection"],
             max_retention=default_guild["max_retention"],
             max_retention_time=default_guild["max_retention_time"],
             blacklist=default_guild["blacklist"],
@@ -63,6 +65,7 @@ class langcore(commands.Cog):
         self.providers: Dict[str, ChainProvider] = {}
         self.message_handlers: Dict[str, MessageHandler] = {}
         self.chain_store: Optional[ChainStore] = None
+        self._lb_counters: Dict[int, int] = {}
 
     def register_provider(self, name: str, provider: ChainProvider) -> bool:
         """Register a ChainProvider implementation.
@@ -125,14 +128,98 @@ class langcore(commands.Cog):
     async def get_default_provider_name(self, guild_id: int) -> str:
         """Return the configured default provider name for a guild."""
         config = await self.get_guild_config(guild_id)
-        return config.default_provider or self.DEFAULT_PROVIDER_FALLBACK
+        preferred = config.provider_selection.preferred_provider or config.default_provider
+        return preferred or self.DEFAULT_PROVIDER_FALLBACK
 
-    async def get_default_provider(self, guild_id: int) -> Optional[ChainProvider]:
-        """Retrieve the default provider for a guild, if registered."""
-        provider_name = await self.get_default_provider_name(guild_id)
-        provider = self.get_provider(provider_name)
+    async def _provider_available(
+        self,
+        name: str,
+        provider: ChainProvider,
+        guild_id: int,
+        member_id: Optional[int] = None,
+    ) -> bool:
+        try:
+            return bool(await provider.is_available(guild_id=guild_id, member_id=member_id))
+        except Exception:  # noqa: BLE001
+            log.debug("Provider availability check failed for %s", name, exc_info=True)
+            return False
+
+    async def _select_fallback_provider(
+        self,
+        guild_id: int,
+        member_id: Optional[int],
+        candidates: List[str],
+    ) -> Optional[ChainProvider]:
+        for name in candidates:
+            provider = self.get_provider(name)
+            if not provider:
+                continue
+            available = await self._provider_available(name, provider, guild_id, member_id)
+            if available:
+                return provider
+        return None
+
+    async def _select_load_balanced_provider(
+        self,
+        guild_id: int,
+        member_id: Optional[int],
+        candidates: List[str],
+        strategy: ProviderSelectionConfig,
+    ) -> Optional[ChainProvider]:
+        available: List[str] = []
+        weights: List[float] = []
+        for name in candidates:
+            provider = self.get_provider(name)
+            if not provider:
+                continue
+            if not await self._provider_available(name, provider, guild_id, member_id):
+                continue
+            available.append(name)
+            weights.append(strategy.load_balance.get_weight(name) * provider.get_load_balance_weight(guild_id))
+
+        if not available:
+            return None
+
+        mode = strategy.load_balance.mode
+        if mode == "random":
+            choice = random.choice(available)
+        elif mode == "weighted" and any(w != 1.0 for w in weights):
+            total = sum(weights) or len(weights)
+            pick = random.uniform(0, total)
+            cumulative = 0.0
+            choice = available[-1]
+            for name, weight in zip(available, weights):
+                cumulative += weight
+                if pick <= cumulative:
+                    choice = name
+                    break
+        else:  # roundrobin
+            counter = self._lb_counters.get(guild_id, 0)
+            choice = available[counter % len(available)]
+            self._lb_counters[guild_id] = counter + 1
+
+        return self.get_provider(choice)
+
+    async def get_default_provider(self, guild_id: int, member_id: Optional[int] = None) -> Optional[ChainProvider]:
+        """Retrieve a provider based on guild strategy."""
+        config = await self.get_guild_config(guild_id)
+        strategy = config.provider_selection or ProviderSelectionConfig()
+        candidates = strategy.build_candidates(config.default_provider, self.DEFAULT_PROVIDER_FALLBACK)
+
+        if strategy.mode == "loadbalance":
+            provider = await self._select_load_balanced_provider(guild_id, member_id, candidates, strategy)
+        elif strategy.mode == "fallback":
+            provider = await self._select_fallback_provider(guild_id, member_id, candidates)
+        else:
+            name = candidates[0] if candidates else self.DEFAULT_PROVIDER_FALLBACK
+            provider = self.get_provider(name)
+            if provider:
+                available = await self._provider_available(name, provider, guild_id, member_id)
+                if not available:
+                    provider = None
+
         if not provider:
-            log.warning("Default provider '%s' is not registered for guild %s", provider_name, guild_id)
+            log.warning("No provider available for guild %s using strategy %s", guild_id, strategy.mode)
         return provider
 
     def register_message_handler(self, name: str, handler: MessageHandler) -> bool:
@@ -350,7 +437,12 @@ class langcore(commands.Cog):
         )
         embed.add_field(
             name="Provider",
-            value=f"Default: `{config.default_provider}`",
+            value=(
+                f"Preferred: `{config.provider_selection.preferred_provider or config.default_provider}`\n"
+                f"Mode: `{config.provider_selection.mode}`\n"
+                f"Fallbacks: {', '.join(config.provider_selection.fallback_providers) or 'none'}\n"
+                f"LB Mode: `{config.provider_selection.load_balance.mode}`"
+            ),
             inline=False,
         )
         embed.add_field(
@@ -420,10 +512,99 @@ class langcore(commands.Cog):
     async def set_default_provider(self, ctx: commands.Context, provider_name: str):
         """Set the default provider name for this server."""
         await self.config.guild(ctx.guild).default_provider.set(provider_name)
+        try:
+            config = await self.get_guild_config(ctx.guild.id)
+            config.provider_selection.preferred_provider = provider_name  # type: ignore[attr-defined]
+            await self.save_guild_config(ctx.guild.id, config)
+        except Exception:  # noqa: BLE001
+            log.debug("Unable to sync provider selection with default provider", exc_info=True)
         suffix = ""
         if provider_name not in self.providers:
             suffix = " (not currently registered)"
         await ctx.send(f"Default provider set to `{provider_name}`{suffix}.")
+
+    @langcore_config.group(name="provider", invoke_without_command=True)
+    async def provider_group(self, ctx: commands.Context):
+        """Manage provider selection strategy."""
+        await ctx.send("Use subcommands: strategy, preferred, fallback, loadbalance, weight.")
+
+    @provider_group.command(name="strategy")
+    async def provider_strategy(self, ctx: commands.Context, mode: str):
+        """Set provider selection mode: single, fallback, loadbalance."""
+        mode = mode.lower()
+        if mode not in {"single", "fallback", "loadbalance"}:
+            await ctx.send("Mode must be one of: single, fallback, loadbalance.")
+            return
+        config = await self.get_guild_config(ctx.guild.id)
+        config.provider_selection.mode = mode  # type: ignore[attr-defined]
+        await self.save_guild_config(ctx.guild.id, config)
+        await ctx.send(f"Provider strategy set to `{mode}`.")
+
+    @provider_group.command(name="preferred")
+    async def provider_preferred(self, ctx: commands.Context, provider_name: str):
+        """Set preferred provider for selection strategy."""
+        config = await self.get_guild_config(ctx.guild.id)
+        config.provider_selection.preferred_provider = provider_name  # type: ignore[attr-defined]
+        config.default_provider = provider_name
+        await self.save_guild_config(ctx.guild.id, config)
+        await ctx.send(f"Preferred provider set to `{provider_name}`.")
+
+    @provider_group.group(name="fallback")
+    async def provider_fallback_group(self, ctx: commands.Context):
+        """Manage fallback providers."""
+        pass
+
+    @provider_fallback_group.command(name="add")
+    async def provider_fallback_add(self, ctx: commands.Context, provider_name: str):
+        config = await self.get_guild_config(ctx.guild.id)
+        fallbacks = list(config.provider_selection.fallback_providers)  # type: ignore[attr-defined]
+        if provider_name in fallbacks:
+            await ctx.send("Provider already in fallback list.")
+            return
+        fallbacks.append(provider_name)
+        config.provider_selection.fallback_providers = fallbacks  # type: ignore[attr-defined]
+        await self.save_guild_config(ctx.guild.id, config)
+        await ctx.send(f"Added `{provider_name}` to fallback providers.")
+
+    @provider_fallback_group.command(name="remove")
+    async def provider_fallback_remove(self, ctx: commands.Context, provider_name: str):
+        config = await self.get_guild_config(ctx.guild.id)
+        fallbacks = [p for p in config.provider_selection.fallback_providers if p != provider_name]  # type: ignore[attr-defined]
+        config.provider_selection.fallback_providers = fallbacks  # type: ignore[attr-defined]
+        await self.save_guild_config(ctx.guild.id, config)
+        await ctx.send(f"Removed `{provider_name}` from fallback providers.")
+
+    @provider_fallback_group.command(name="clear")
+    async def provider_fallback_clear(self, ctx: commands.Context):
+        config = await self.get_guild_config(ctx.guild.id)
+        config.provider_selection.fallback_providers = []  # type: ignore[attr-defined]
+        await self.save_guild_config(ctx.guild.id, config)
+        await ctx.send("Cleared fallback providers.")
+
+    @provider_group.command(name="loadbalance")
+    async def provider_loadbalance(self, ctx: commands.Context, mode: str):
+        """Set load balancing mode: roundrobin, random, weighted."""
+        mode = mode.lower()
+        if mode not in {"roundrobin", "random", "weighted"}:
+            await ctx.send("Load balance mode must be roundrobin, random, or weighted.")
+            return
+        config = await self.get_guild_config(ctx.guild.id)
+        config.provider_selection.load_balance.mode = mode  # type: ignore[attr-defined]
+        await self.save_guild_config(ctx.guild.id, config)
+        await ctx.send(f"Load balancing mode set to `{mode}`.")
+
+    @provider_group.command(name="weight")
+    async def provider_weight(self, ctx: commands.Context, provider_name: str, weight: float):
+        """Set weight for weighted load balancing."""
+        if weight <= 0:
+            await ctx.send("Weight must be greater than zero.")
+            return
+        config = await self.get_guild_config(ctx.guild.id)
+        weights = dict(config.provider_selection.load_balance.weights)  # type: ignore[attr-defined]
+        weights[provider_name] = weight
+        config.provider_selection.load_balance.weights = weights  # type: ignore[attr-defined]
+        await self.save_guild_config(ctx.guild.id, config)
+        await ctx.send(f"Set weight for `{provider_name}` to {weight}.")
 
     @langcore_config.command(name="handlers")
     async def view_handlers(self, ctx: commands.Context):
@@ -860,7 +1041,7 @@ class langcore(commands.Cog):
         conversation.update_messages(question, "user")
         conversation.cleanup(max_retention, max_retention_time)
 
-        provider = await self.get_default_provider(ctx.guild.id)
+        provider = await self.get_default_provider(ctx.guild.id, member_id=ctx.author.id)
         if not provider:
             await ctx.send(
                 "No AI provider is available. Load a provider cog and set it with "
@@ -969,7 +1150,7 @@ class langcore(commands.Cog):
         if not should_respond:
             return
 
-        provider = await self.get_default_provider(guild.id)
+        provider = await self.get_default_provider(guild.id, member_id=message.author.id)
         if not provider:
             await message.reply(
                 "No AI provider is available. Load a provider cog and set it with "
