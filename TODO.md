@@ -13,33 +13,26 @@ Cogs that are implemented can bring their own sophisticated configuration.
 
 ---
 
+
+
+add automatic tests for the cogs: 
+python module: cogchain
+core: langcore
+providers: ollama and ollama
+store: qdrant
+extensions: mermaid and spoilarr
+
 implement common pitfalls for test check:
-- importing a python module from another cog (should use cogchain)
-- defining interface without doc string
-- usage of getattr
+- tests runs on entire code base
+  - importing a python module from another cog (should use cogchain)
+  - defining interface without doc string
+- tests run on only diff (allowed to fail, needs to be vetted)
+  - usage of getattr
 
-
-fix pipeline, add automatic tests, activate tests in pipeline
-
-
+the defined interfaces and models (see cogchain, utilized by the cogs) needs to be tested
 
 Best practice of ruff, uv, ty, pydantic
 Note: mirrored cogs, e.g. hotreload, need to be exempt
-
----
-
-
-- [x] Ollama
-  - [x] fallback models can be defined
-  - [x] when rate limited, has rate limit cooling
-  - [ ] multiple Ollama endpoints (e.g. 192.168.178.78:11434, 192.168.178.12:11434)
-- [ ] OpenRouter (implemented but untested)
-  - [ ] support multiple endpoints (e.g. https://openrouter.ai/api/v1, https://api.openai.com/v1)
-- [ ] Cross Provider behavior (configured in langcore cog)
-  - [ ] preferred provider?
-  - [ ] loadbalancing or fallback between providers?
-  - [ ] within a provider need to be able to set LLM selection strategy: fallback or loadbalancing?
-
 
 ---
 

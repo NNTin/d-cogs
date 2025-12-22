@@ -1,0 +1,80 @@
+site_name: d-cogs Documentation
+site_description: AI automation cogs for Red-DiscordBot
+site_url: https://nntin.github.io/d-cogs/
+repo_url: https://github.com/nntin/d-cogs
+repo_name: nntin/d-cogs
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: deep purple
+  icon:
+    repo: fontawesome/brands/github
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/nntin/d-cogs
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+
+plugins:
+  - search
+  - mermaid2
+
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Shared Interfaces: architecture/cogchain.md
+      - LangCore Integration: architecture/langcore.md
+      - Tool Registration: architecture/tools.md
+  - Core Components:
+      - cogchain Package: core/cogchain.md
+      - langcore Cog: core/langcore.md
+      - Extension Guide: core/extension-guide.md
+  - Cogs:
+      - Overview: cogs/index.md
+      - Providers:
+          - ollama: cogs/providers/ollama.md
+          - openrouter: cogs/providers/openrouter.md
+      - Stores:
+          - qdrant: cogs/stores/qdrant.md
+      - Extensions:
+          - mermaid: cogs/extensions/mermaid.md
+          - spoilarr: cogs/extensions/spoilarr.md
+          - embed: cogs/extensions/embed.md
+          - memory: cogs/extensions/memory.md
+          - ragutils: cogs/extensions/ragutils.md
+  - Setup & Installation: setup.md
+  - Credits: credits.md
+
+exclude_docs: |
+  langchain/**
+  TODO.md
+  BACKUP.md
+  *.ps1
+  sync-shared.sh
+  .github/**
