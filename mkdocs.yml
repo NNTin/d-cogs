@@ -34,6 +34,7 @@ markdown_extensions:
       custom_fences:
         - name: mermaid
           class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed
   - pymdownx.highlight
   - pymdownx.inlinehilite
@@ -70,10 +71,10 @@ nav:
   - Setup & Installation: setup.md
   - Credits: credits.md
 
-exclude_docs:
-  - langchain/**
-  - TODO.md
-  - BACKUP.md
-  - "*.ps1"
-  - sync-shared.sh
-  - .github/**
+exclude_docs: |
+  langchain/**
+  TODO.md
+  BACKUP.md
+  *.ps1
+  sync-shared.sh
+  .github/**
