@@ -28,12 +28,18 @@ Note: mirrored cogs, e.g. hotreload, need to be exempt
 
 ---
 
-OpenRouter is untested. Created but I don't use API keys for it yet.
 
----
+- [x] Ollama
+  - [x] fallback models can be defined
+  - [x] when rate limited, has rate limit cooling
+  - [ ] multiple Ollama endpoints (e.g. 192.168.178.78:11434, 192.168.178.12:11434)
+- [ ] OpenRouter (implemented but untested)
+  - [ ] support multiple endpoints (e.g. https://openrouter.ai/api/v1, https://api.openai.com/v1)
+- [ ] Cross Provider behavior (configured in langcore cog)
+  - [ ] preferred provider?
+  - [ ] loadbalancing or fallback between providers?
+  - [ ] within a provider need to be able to set LLM selection strategy: fallback or loadbalancing?
 
-later: Fallback strategy: OpenRouter (free) -> Ollama (cloud) -> Ollama (local hardware)
--> worth offloading as a cog since different people have different ideas of it
 
 ---
 

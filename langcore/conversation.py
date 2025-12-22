@@ -287,6 +287,12 @@ class ConversationManager:
                         )
                         system_insert_index += 1
 
+            if provider is None and langcore_ref:
+                provider = await langcore_ref.get_default_provider(guild_id, member_id=member_id)
+
+            if provider is None:
+                return "No provider available for this guild."
+
             # Get LLM instance from provider
             try:
                 llm = await provider.get_chat_llm(guild_id=guild_id, member_id=member_id)

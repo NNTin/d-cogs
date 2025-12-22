@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import discord
 import orjson
@@ -17,6 +17,67 @@ class BaseModel(PydanticBaseModel):
         if VERSION >= "2.0.1":
             return super().model_dump(mode="json", exclude_defaults=exclude_defaults)  # type: ignore
         return orjson.loads(super().json(exclude_defaults=exclude_defaults))
+
+
+class LoadBalanceConfig(BaseModel):
+    mode: Literal["roundrobin", "random", "weighted"] = "roundrobin"
+    weights: Dict[str, float] = Field(default_factory=dict)
+
+    def get_weight(self, provider: str) -> float:
+        try:
+            weight = float(self.weights.get(provider, 1.0))
+        except (TypeError, ValueError):
+            weight = 1.0
+        return weight if weight > 0 else 1.0
+
+
+class ProviderSelectionConfig(BaseModel):
+    mode: Literal["single", "fallback", "loadbalance"] = "single"
+    preferred_provider: Optional[str] = None
+    fallback_providers: List[str] = Field(default_factory=list)
+    load_balance: LoadBalanceConfig = Field(default_factory=LoadBalanceConfig)
+
+    if VERSION >= "2.0.1":
+        from pydantic import model_validator
+
+        @model_validator(mode="before")
+        @classmethod
+        def _migrate(cls, data: Any) -> Any:
+            if not isinstance(data, dict):
+                return data
+            migrated = dict(data)
+            if migrated.get("preferred") and "preferred_provider" not in migrated:
+                migrated["preferred_provider"] = migrated.get("preferred")
+            if migrated.get("fallbacks") and "fallback_providers" not in migrated:
+                migrated["fallback_providers"] = migrated.get("fallbacks")
+            return migrated
+    else:  # pragma: no cover - pydantic v1 fallback
+        from pydantic import root_validator
+
+        @root_validator(pre=True)
+        def _migrate(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+            migrated = dict(values)
+            if migrated.get("preferred") and "preferred_provider" not in migrated:
+                migrated["preferred_provider"] = migrated.get("preferred")
+            if migrated.get("fallbacks") and "fallback_providers" not in migrated:
+                migrated["fallback_providers"] = migrated.get("fallbacks")
+            return migrated
+
+    def build_candidates(self, default_provider: str, fallback: str) -> List[str]:
+        """Return provider list ordered by preference."""
+        candidates: List[str] = []
+        seen = set()
+        for name in [
+            self.preferred_provider or default_provider,
+            *self.fallback_providers,
+            default_provider,
+            fallback,
+        ]:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            candidates.append(name)
+        return candidates
 
 
 class Conversation(BaseModel):
@@ -85,6 +146,7 @@ class Conversation(BaseModel):
 class GuildConfig(BaseModel):
     enabled: bool = True
     default_provider: str = "ollama"
+    provider_selection: ProviderSelectionConfig = Field(default_factory=ProviderSelectionConfig)
     max_retention: int = 50
     max_retention_time: int = 1800
     blacklist: List[int] = Field(default_factory=list)
@@ -126,4 +188,10 @@ class GuildConfig(BaseModel):
         return self.max_retention_time
 
 
-__all__ = ["BaseModel", "Conversation", "GuildConfig"]
+__all__ = [
+    "BaseModel",
+    "Conversation",
+    "GuildConfig",
+    "LoadBalanceConfig",
+    "ProviderSelectionConfig",
+]

@@ -48,6 +48,14 @@ class ChainProvider(ABC):
         """Get a bindable LangChain chat model instance for advanced workflows."""
         raise NotImplementedError
 
+    async def is_available(self, guild_id: Optional[int] = None, member_id: Optional[int] = None) -> bool:
+        """Hint whether this provider is currently available for selection."""
+        return True
+
+    def get_load_balance_weight(self, guild_id: Optional[int] = None) -> float:
+        """Weight used when selecting providers in load-balancing mode."""
+        return 1.0
+
 
 class ChainStore(ABC):
     """Interface for vector storage backends (e.g., Qdrant)."""
