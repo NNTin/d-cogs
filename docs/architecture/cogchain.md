@@ -7,7 +7,7 @@ The `cogchain` package holds cross-cog contracts so providers, stores, and exten
 ```mermaid
 flowchart LR
     subgraph PyPI Package
-        CC[cogchain\n(interfaces + models)]
+        CC["cogchain\n(interfaces + models)"]
     end
 
     subgraph Core Cog

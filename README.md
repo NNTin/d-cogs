@@ -9,7 +9,7 @@ Cross-cog contracts live in the `cogchain` package so features can evolve withou
 ```mermaid
 flowchart LR
     subgraph PyPI Package
-        CC[cogchain\n(interfaces + models)]
+        CC["cogchain\n(interfaces + models)"]
     end
 
     subgraph Core Cog
