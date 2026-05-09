@@ -222,12 +222,10 @@ class pixelagents(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        # GUILD_MEMBER_UPDATE carries nick/roles/timeout — not status or activities.
         if not await self.config.guild(after.guild).enabled():
             return
-        status_changed = before.status != after.status
-        name_changed = before.display_name != after.display_name
-        activity_changed = before.activities != after.activities
-        if not status_changed and not name_changed and not activity_changed:
+        if before.display_name == after.display_name:
             return
         include_bots = await self.config.guild(after.guild).include_bots()
         base = await self._base()
@@ -237,6 +235,24 @@ class pixelagents(commands.Cog):
                 await self._reconcile_member(session, base, headers, after, include_bots)
             except Exception as exc:
                 log.error("on_member_update error for %s: %s", after.id, exc)
+
+    @commands.Cog.listener()
+    async def on_presence_update(self, before: discord.Member, after: discord.Member) -> None:
+        # PRESENCE_UPDATE carries status and activities changes.
+        if not await self.config.guild(after.guild).enabled():
+            return
+        status_changed = before.status != after.status
+        activity_changed = before.activities != after.activities
+        if not status_changed and not activity_changed:
+            return
+        include_bots = await self.config.guild(after.guild).include_bots()
+        base = await self._base()
+        headers = await self._headers()
+        async with aiohttp.ClientSession() as session:
+            try:
+                await self._reconcile_member(session, base, headers, after, include_bots)
+            except Exception as exc:
+                log.error("on_presence_update error for %s: %s", after.id, exc)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:

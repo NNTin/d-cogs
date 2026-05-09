@@ -359,5 +359,80 @@ class TestReconcile(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn((100, 99), self.cog._cache)
 
 
+# ---------------------------------------------------------------------------
+# Tests: listener routing
+# ---------------------------------------------------------------------------
+
+def _make_enabled_cog():
+    """Cog with a guild already marked enabled in its config."""
+    cog = _make_cog()
+    # Patch guild config to return enabled=True
+    cog.config._guilds_enabled = True
+
+    class _EnabledGuildConfig:
+        def __getattr__(self, name):
+            from pixelagents.tests.conftest import _FakeGuildConfigAttr
+            data = {"enabled": True, "include_bots": True}
+            return _FakeGuildConfigAttr(data, name)
+
+    original_guild = cog.config.guild
+
+    def _guild(guild):
+        return _EnabledGuildConfig()
+
+    cog.config.guild = _guild
+    return cog
+
+
+class TestMemberUpdateListener(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.cog = _make_enabled_cog()
+        self.cog._reconcile_member = AsyncMock()
+
+    async def test_name_change_reconciles(self):
+        before = _member(display_name="Old")
+        after = _member(display_name="New")
+        await self.cog.on_member_update(before, after)
+        self.cog._reconcile_member.assert_awaited_once()
+
+    async def test_no_name_change_skips(self):
+        before = _member(display_name="Same", status="online")
+        after = _member(display_name="Same", status="dnd")
+        await self.cog.on_member_update(before, after)
+        self.cog._reconcile_member.assert_not_awaited()
+
+
+class TestPresenceUpdateListener(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.cog = _make_enabled_cog()
+        self.cog._reconcile_member = AsyncMock()
+
+    async def test_status_change_reconciles(self):
+        before = _member(status="online")
+        after = _member(status="idle")
+        await self.cog.on_presence_update(before, after)
+        self.cog._reconcile_member.assert_awaited_once()
+
+    async def test_activity_change_reconciles(self):
+        before = _member(activities=[])
+        after = _member(activities=[_activity(discord.ActivityType.playing)])
+        await self.cog.on_presence_update(before, after)
+        self.cog._reconcile_member.assert_awaited_once()
+
+    async def test_no_change_skips(self):
+        before = _member(status="online", activities=[])
+        after = _member(status="online", activities=[])
+        await self.cog.on_presence_update(before, after)
+        self.cog._reconcile_member.assert_not_awaited()
+
+    async def test_disabled_guild_skips(self):
+        cog = _make_cog()  # guild enabled=False by default
+        cog._reconcile_member = AsyncMock()
+        before = _member(status="online")
+        after = _member(status="dnd")
+        await cog.on_presence_update(before, after)
+        cog._reconcile_member.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()
