@@ -12,9 +12,10 @@ from pixelagents.pixelagents import (
     _agent_key,
     _normalize_base_url,
     _VISIBLE_STATUSES,
+    PixelAgentsKeyModal,
     pixelagents as PixelAgentsCog,
 )
-from pixelagents.tests.conftest import _FakeConfig
+from pixelagents.tests.conftest import _FakeConfig, _FakeInteraction, _FakeInteractionResponse
 
 import discord  # stubbed by conftest
 
@@ -484,6 +485,7 @@ class TestToolClearDelayCommand(unittest.IsolatedAsyncioTestCase):
 
     async def test_set_valid_delay(self):
         ctx = MagicMock()
+        ctx.interaction = None
         ctx.send = AsyncMock()
         await self.cog.cmd_toolcleardelay(ctx, 5.0)
         self.assertEqual(await self.cog.config.message_tool_clear_delay(), 5.0)
@@ -492,12 +494,14 @@ class TestToolClearDelayCommand(unittest.IsolatedAsyncioTestCase):
 
     async def test_set_zero_delay_allowed(self):
         ctx = MagicMock()
+        ctx.interaction = None
         ctx.send = AsyncMock()
         await self.cog.cmd_toolcleardelay(ctx, 0.0)
         self.assertEqual(await self.cog.config.message_tool_clear_delay(), 0.0)
 
     async def test_negative_delay_rejected(self):
         ctx = MagicMock()
+        ctx.interaction = None
         ctx.send = AsyncMock()
         await self.cog.cmd_toolcleardelay(ctx, -1.0)
         # config should remain unchanged
@@ -666,6 +670,265 @@ class TestOnMessage(unittest.IsolatedAsyncioTestCase):
 
         status_sent = cog._tool_start.call_args[0][7]
         self.assertEqual(status_sent, exact_msg)
+
+
+# ---------------------------------------------------------------------------
+# Tests: hybrid_group loading
+# ---------------------------------------------------------------------------
+
+class TestHybridGroupLoads(unittest.TestCase):
+    def test_cog_class_exists(self):
+        """PixelAgentsCog class is importable after conversion to hybrid_group."""
+        self.assertTrue(callable(PixelAgentsCog))
+
+    def test_modal_class_exists(self):
+        """PixelAgentsKeyModal is importable."""
+        self.assertTrue(callable(PixelAgentsKeyModal))
+
+    def test_cog_instantiates(self):
+        """Cog instantiates without error with hybrid_group in place."""
+        cog = _make_cog()
+        self.assertIsNotNone(cog)
+
+    def test_command_methods_present(self):
+        """All expected command handler methods are present on the cog."""
+        cog = _make_cog()
+        for name in ("cmd_status", "cmd_baseurl", "cmd_key", "cmd_toolcleardelay",
+                     "cmd_enable", "cmd_disable", "cmd_includebots", "cmd_sync", "cmd_despawnall"):
+            self.assertTrue(hasattr(cog, name), f"Missing method: {name}")
+
+
+# ---------------------------------------------------------------------------
+# Tests: PixelAgentsKeyModal
+# ---------------------------------------------------------------------------
+
+def _make_guild_member(is_admin=True):
+    member = MagicMock()
+    member.guild_permissions = MagicMock()
+    member.guild_permissions.administrator = is_admin
+    return member
+
+
+def _make_interaction(has_guild=True, is_admin=True):
+    guild = MagicMock() if has_guild else None
+    user = _make_guild_member(is_admin=is_admin)
+    return _FakeInteraction(guild=guild, user=user)
+
+
+class TestPixelAgentsKeyModal(unittest.IsolatedAsyncioTestCase):
+    def _make_modal(self, token_value="secret-token"):
+        cog = _make_cog()
+        modal = PixelAgentsKeyModal(cog)
+        modal.token = MagicMock()
+        modal.token.value = token_value
+        return modal, cog
+
+    async def test_submit_saves_api_key(self):
+        modal, cog = self._make_modal("my-secret-key")
+        interaction = _make_interaction(has_guild=True, is_admin=True)
+        await modal.on_submit(interaction)
+        saved = await cog.config.api_key()
+        self.assertEqual(saved, "my-secret-key")
+
+    async def test_submit_replies_ephemerally(self):
+        modal, cog = self._make_modal("my-secret-key")
+        interaction = _make_interaction(has_guild=True, is_admin=True)
+        sent_messages = []
+        orig_send = interaction.response.send_message
+
+        async def _capture(*args, **kwargs):
+            sent_messages.append((args, kwargs))
+            await orig_send(*args, **kwargs)
+
+        interaction.response.send_message = _capture
+        await modal.on_submit(interaction)
+        self.assertEqual(len(sent_messages), 1)
+        _, kwargs = sent_messages[0]
+        self.assertTrue(kwargs.get("ephemeral"), "Response must be ephemeral")
+
+    async def test_submit_replies_api_key_set(self):
+        modal, cog = self._make_modal("my-secret-key")
+        interaction = _make_interaction(has_guild=True, is_admin=True)
+        sent = []
+
+        async def _capture(*args, **kwargs):
+            sent.append(args[0] if args else kwargs.get("content", ""))
+
+        interaction.response.send_message = _capture
+        await modal.on_submit(interaction)
+        self.assertIn("API key set", sent[0])
+
+    async def test_submit_rejects_missing_guild(self):
+        modal, cog = self._make_modal("token")
+        interaction = _make_interaction(has_guild=False, is_admin=True)
+        await modal.on_submit(interaction)
+        # API key must NOT be saved
+        saved = await cog.config.api_key()
+        self.assertNotEqual(saved, "token")
+
+    async def test_submit_rejects_missing_guild_sends_error(self):
+        modal, cog = self._make_modal("token")
+        interaction = _make_interaction(has_guild=False)
+        sent = []
+
+        async def _capture(*args, **kwargs):
+            sent.append((args, kwargs))
+
+        interaction.response.send_message = _capture
+        await modal.on_submit(interaction)
+        self.assertEqual(len(sent), 1)
+        _, kwargs = sent[0]
+        self.assertTrue(kwargs.get("ephemeral"))
+
+    async def test_submit_rejects_non_admin(self):
+        modal, cog = self._make_modal("secret")
+        interaction = _make_interaction(has_guild=True, is_admin=False)
+        await modal.on_submit(interaction)
+        saved = await cog.config.api_key()
+        self.assertNotEqual(saved, "secret")
+
+    async def test_submit_non_admin_sends_error(self):
+        modal, cog = self._make_modal("secret")
+        interaction = _make_interaction(has_guild=True, is_admin=False)
+        sent = []
+
+        async def _capture(*args, **kwargs):
+            sent.append((args, kwargs))
+
+        interaction.response.send_message = _capture
+        await modal.on_submit(interaction)
+        self.assertEqual(len(sent), 1)
+        _, kwargs = sent[0]
+        self.assertTrue(kwargs.get("ephemeral"))
+
+    async def test_token_not_echoed_in_reply(self):
+        token = "super-secret-bearer-token-xyz"
+        modal, cog = self._make_modal(token)
+        interaction = _make_interaction(has_guild=True, is_admin=True)
+        sent = []
+
+        async def _capture(*args, **kwargs):
+            sent.append(args[0] if args else "")
+
+        interaction.response.send_message = _capture
+        await modal.on_submit(interaction)
+        for msg in sent:
+            self.assertNotIn(token, str(msg), "Token must not appear in any response")
+
+    async def test_on_error_does_not_raise(self):
+        modal, _ = self._make_modal()
+        interaction = _make_interaction()
+        # on_error must not raise even when response.send_message fails
+        async def _fail(*args, **kwargs):
+            raise RuntimeError("discord error")
+        interaction.response.send_message = _fail
+        try:
+            await modal.on_error(interaction, ValueError("test error"))
+        except Exception as exc:
+            self.fail(f"on_error raised unexpectedly: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Tests: cmd_key slash vs prefix routing
+# ---------------------------------------------------------------------------
+
+class TestCmdKeyRouting(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+
+    async def test_slash_opens_modal(self):
+        ctx = MagicMock()
+        ctx.interaction = _FakeInteraction(guild=MagicMock(), user=_make_guild_member())
+        opened_modals = []
+
+        async def _capture_modal(modal):
+            opened_modals.append(modal)
+            ctx.interaction.response._done = True
+
+        ctx.interaction.response.send_modal = _capture_modal
+        await self.cog.cmd_key(ctx)
+        self.assertEqual(len(opened_modals), 1)
+        self.assertIsInstance(opened_modals[0], PixelAgentsKeyModal)
+
+    async def test_prefix_without_token_shows_usage(self):
+        ctx = MagicMock()
+        ctx.interaction = None
+        ctx.send = AsyncMock()
+        await self.cog.cmd_key(ctx, token=None)
+        ctx.send.assert_awaited_once()
+        msg = ctx.send.call_args[0][0]
+        self.assertIn("pixelagents key", msg)
+
+    async def test_prefix_with_token_saves_key(self):
+        ctx = MagicMock()
+        ctx.interaction = None
+        ctx.send = AsyncMock()
+        ctx.message = MagicMock()
+        ctx.message.delete = AsyncMock()
+        await self.cog.cmd_key(ctx, token="mytoken")
+        saved = await self.cog.config.api_key()
+        self.assertEqual(saved, "mytoken")
+        ctx.send.assert_awaited_once_with("API key set.")
+
+    async def test_prefix_token_not_echoed(self):
+        ctx = MagicMock()
+        ctx.interaction = None
+        ctx.send = AsyncMock()
+        ctx.message = MagicMock()
+        ctx.message.delete = AsyncMock()
+        await self.cog.cmd_key(ctx, token="top-secret-token")
+        for call_args in ctx.send.call_args_list:
+            args, kwargs = call_args
+            for a in args:
+                self.assertNotIn("top-secret-token", str(a))
+
+
+# ---------------------------------------------------------------------------
+# Tests: ephemeral reply helper
+# ---------------------------------------------------------------------------
+
+class TestReplyHelper(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+
+    async def test_prefix_uses_ctx_send(self):
+        ctx = MagicMock()
+        ctx.interaction = None
+        ctx.send = AsyncMock()
+        await self.cog._reply(ctx, "hello")
+        ctx.send.assert_awaited_once_with("hello")
+
+    async def test_slash_uses_response_send_message(self):
+        ctx = MagicMock()
+        interaction = _FakeInteraction(guild=MagicMock())
+        ctx.interaction = interaction
+        sent = []
+
+        async def _capture(*args, **kwargs):
+            sent.append((args, kwargs))
+            interaction.response._done = True
+
+        interaction.response.send_message = _capture
+        await self.cog._reply(ctx, "hello")
+        self.assertEqual(len(sent), 1)
+        _, kwargs = sent[0]
+        self.assertTrue(kwargs.get("ephemeral"))
+
+    async def test_slash_after_defer_uses_followup(self):
+        ctx = MagicMock()
+        interaction = _FakeInteraction(guild=MagicMock())
+        interaction.response._done = True  # simulate deferred
+        ctx.interaction = interaction
+        sent = []
+
+        async def _capture(*args, **kwargs):
+            sent.append((args, kwargs))
+
+        interaction.followup.send = _capture
+        await self.cog._reply(ctx, "after defer")
+        self.assertEqual(len(sent), 1)
+        _, kwargs = sent[0]
+        self.assertTrue(kwargs.get("ephemeral"))
 
 
 if __name__ == "__main__":

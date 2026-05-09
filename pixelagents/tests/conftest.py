@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sys
 import types
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 
 def _make_stub_module(name: str, **attrs) -> types.ModuleType:
@@ -20,6 +20,7 @@ _discord.Guild = MagicMock
 _discord.Color = MagicMock(blurple=MagicMock(return_value=None))
 _discord.Embed = MagicMock
 _discord.HTTPException = Exception
+_discord.Message = MagicMock
 
 
 class _ActivityType:
@@ -32,6 +33,87 @@ class _ActivityType:
 
 
 _discord.ActivityType = _ActivityType
+
+
+# discord.Interaction stub
+class _FakeInteractionResponse:
+    def __init__(self):
+        self._done = False
+
+    def is_done(self):
+        return self._done
+
+    async def send_message(self, *args, **kwargs):
+        self._done = True
+
+    async def send_modal(self, modal):
+        self._done = True
+
+    async def defer(self, **kwargs):
+        self._done = True
+
+
+class _FakeInteractionFollowup:
+    async def send(self, *args, **kwargs):
+        pass
+
+
+class _FakeInteraction:
+    def __init__(self, guild=None, user=None):
+        self.guild = guild
+        self.user = user or MagicMock()
+        self.response = _FakeInteractionResponse()
+        self.followup = _FakeInteractionFollowup()
+
+
+_discord.Interaction = _FakeInteraction
+
+
+# discord.ui stub
+class _MockModal:
+    title: str = ""
+
+    def __init_subclass__(cls, title: str = "", **kwargs):
+        cls.title = title
+        super().__init_subclass__(**kwargs)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    async def on_submit(self, interaction):
+        pass
+
+    async def on_error(self, interaction, error):
+        pass
+
+
+class _MockTextInput:
+    def __init__(self, *, label: str = "", placeholder: str = "", required: bool = True,
+                 min_length: int = 0, max_length: int = 4000, **kwargs):
+        self.label = label
+        self.placeholder = placeholder
+        self.required = required
+        self.min_length = min_length
+        self.max_length = max_length
+        self.value = ""
+
+    def __set_name__(self, owner, name):
+        self._name = name
+
+
+_discord_ui = _make_stub_module("discord.ui")
+_discord_ui.Modal = _MockModal
+_discord_ui.TextInput = _MockTextInput
+_discord.ui = _discord_ui
+sys.modules["discord.ui"] = _discord_ui
+
+
+# discord.app_commands stub
+_discord_app_commands = _make_stub_module("discord.app_commands")
+_discord_app_commands.describe = lambda **kwargs: (lambda f: f)
+_discord.app_commands = _discord_app_commands
+sys.modules["discord.app_commands"] = _discord_app_commands
+
 sys.modules["discord"] = _discord
 
 
@@ -139,7 +221,7 @@ class _FakeCommands:
     Cog = _FakeCog
 
     class Context:
-        pass
+        interaction = None
 
     @staticmethod
     def admin_or_permissions(**kw):
@@ -153,6 +235,12 @@ class _FakeCommands:
 
     @staticmethod
     def group(**kw):
+        def deco(f):
+            return _FakeGroup(f)
+        return deco
+
+    @staticmethod
+    def hybrid_group(**kw):
         def deco(f):
             return _FakeGroup(f)
         return deco

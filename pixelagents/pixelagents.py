@@ -7,6 +7,7 @@ from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import discord
+from discord import app_commands
 from redbot.core import Config, commands
 from redbot.core.bot import Red
 
@@ -28,6 +29,47 @@ def _normalize_base_url(url: str) -> str:
     return parsed._replace(path=path).geturl()
 
 
+class PixelAgentsKeyModal(discord.ui.Modal, title="Set API Key"):
+    token: discord.ui.TextInput = discord.ui.TextInput(
+        label="Bearer Token",
+        placeholder="Paste your API bearer token here",
+        required=True,
+        min_length=1,
+        max_length=512,
+    )
+
+    def __init__(self, cog: "pixelagents") -> None:
+        super().__init__()
+        self._cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+        member = interaction.user
+        if not member.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "You need the Administrator permission to set the API key.", ephemeral=True
+            )
+            return
+        try:
+            await self._cog.config.api_key.set(self.token.value)
+        except Exception as exc:
+            log.error("PixelAgentsKeyModal: error saving key: %s", type(exc).__name__)
+            await interaction.response.send_message("Failed to save API key.", ephemeral=True)
+            return
+        await interaction.response.send_message("API key set.", ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.error("PixelAgentsKeyModal.on_error: %s", type(error).__name__)
+        try:
+            await interaction.response.send_message("An error occurred.", ephemeral=True)
+        except Exception:
+            pass
+
+
 class pixelagents(commands.Cog):
     """Mirror Discord guild presence into Pixelpipes via the Agent Control API."""
 
@@ -45,6 +87,21 @@ class pixelagents(commands.Cog):
             include_bots=True,
         )
         self._cache: _Cache = {}
+
+    # ------------------------------------------------------------------
+    # Reply helper
+    # ------------------------------------------------------------------
+
+    async def _reply(self, ctx: commands.Context, content=None, **kwargs) -> None:
+        """Send a message ephemerally for slash invocations, normally for prefix."""
+        if ctx.interaction:
+            kwargs["ephemeral"] = True
+            if not ctx.interaction.response.is_done():
+                await ctx.interaction.response.send_message(content, **kwargs)
+            else:
+                await ctx.interaction.followup.send(content, **kwargs)
+        else:
+            await ctx.send(content, **kwargs)
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -348,7 +405,7 @@ class pixelagents(commands.Cog):
     # Commands
     # ------------------------------------------------------------------
 
-    @commands.group(name="pixelagents", invoke_without_command=True)
+    @commands.hybrid_group(name="pixelagents", invoke_without_command=True)
     @commands.admin_or_permissions(administrator=True)
     @commands.guild_only()
     async def pixelagents_group(self, ctx: commands.Context) -> None:
@@ -387,26 +444,35 @@ class pixelagents(commands.Cog):
         except Exception:
             embed.add_field(name="Remote Agent Count", value="error", inline=True)
 
-        await ctx.send(embed=embed)
+        await self._reply(ctx, embed=embed)
 
     @pixelagents_group.command(name="baseurl")
+    @app_commands.describe(url="Node-RED Agent Control API base URL")
     async def cmd_baseurl(self, ctx: commands.Context, url: str) -> None:
         """Set the Node-RED base URL."""
         await self.config.base_url.set(url)
-        await ctx.send(f"Base URL set to `{url}`.")
+        await self._reply(ctx, f"Base URL set to `{url}`.")
 
     @pixelagents_group.command(name="toolcleardelay")
+    @app_commands.describe(seconds="Seconds to keep the message activity indicator visible")
     async def cmd_toolcleardelay(self, ctx: commands.Context, seconds: float) -> None:
         """Set how long (in seconds) a message tool indicator stays visible (default: 2.0)."""
         if seconds < 0:
-            await ctx.send("Delay must be 0 or greater.")
+            await self._reply(ctx, "Delay must be 0 or greater.")
             return
         await self.config.message_tool_clear_delay.set(seconds)
-        await ctx.send(f"Message tool clear delay set to `{seconds}s`.")
+        await self._reply(ctx, f"Message tool clear delay set to `{seconds}s`.")
 
     @pixelagents_group.command(name="key")
-    async def cmd_key(self, ctx: commands.Context, token: str) -> None:
-        """Set the Agent Control API bearer token."""
+    async def cmd_key(self, ctx: commands.Context, token: Optional[str] = None) -> None:
+        """Set the Agent Control API bearer token. Slash: opens a secure modal. Prefix: [p]pixelagents key <token>"""
+        if ctx.interaction:
+            modal = PixelAgentsKeyModal(self)
+            await ctx.interaction.response.send_modal(modal)
+            return
+        if not token:
+            await ctx.send("Please provide the API key: `[p]pixelagents key <token>`")
+            return
         await self.config.api_key.set(token)
         try:
             await ctx.message.delete()
@@ -417,44 +483,53 @@ class pixelagents(commands.Cog):
     @pixelagents_group.command(name="enable")
     async def cmd_enable(self, ctx: commands.Context) -> None:
         """Enable Pixelpipes presence mirroring for this guild and run a full sync."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
         await self.config.guild(ctx.guild).enabled.set(True)
-        await ctx.send("Enabled. Running full sync…")
+        await self._reply(ctx, "Enabled. Running full sync…")
         result = await self._full_sync(ctx.guild)
-        await ctx.send(result)
+        await self._reply(ctx, result)
 
     @pixelagents_group.command(name="disable")
     async def cmd_disable(self, ctx: commands.Context) -> None:
         """Disable Pixelpipes presence mirroring for this guild and despawn all agents."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
         await self.config.guild(ctx.guild).enabled.set(False)
-        await ctx.send("Disabled. Despawning all tracked agents…")
+        await self._reply(ctx, "Disabled. Despawning all tracked agents…")
         await self._despawn_guild(ctx.guild)
-        await ctx.send("Done.")
+        await self._reply(ctx, "Done.")
 
     @pixelagents_group.command(name="includebots")
+    @app_commands.describe(value="Whether bot users should be mirrored")
     async def cmd_includebots(self, ctx: commands.Context, value: bool) -> None:
         """Set whether bot users are mirrored (true/false)."""
         await self.config.guild(ctx.guild).include_bots.set(value)
-        await ctx.send(f"include_bots set to `{value}`. Running sync…")
+        await self._reply(ctx, f"include_bots set to `{value}`. Running sync…")
         if await self.config.guild(ctx.guild).enabled():
             result = await self._full_sync(ctx.guild)
-            await ctx.send(result)
+            await self._reply(ctx, result)
 
     @pixelagents_group.command(name="sync")
     async def cmd_sync(self, ctx: commands.Context) -> None:
         """Manually reconcile all guild members against their current Discord presence."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
         if not await self.config.guild(ctx.guild).enabled():
-            await ctx.send("Guild is not enabled. Use `[p]pixelagents enable` first.")
+            await self._reply(ctx, "Guild is not enabled. Use `[p]pixelagents enable` first.")
             return
-        await ctx.send("Syncing…")
+        await self._reply(ctx, "Syncing…")
         result = await self._full_sync(ctx.guild)
-        await ctx.send(result)
+        await self._reply(ctx, result)
 
     @pixelagents_group.command(name="despawnall")
     async def cmd_despawnall(self, ctx: commands.Context) -> None:
         """Despawn all tracked agents for this guild without disabling the cog."""
-        await ctx.send("Despawning all tracked agents for this guild…")
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+        await self._reply(ctx, "Despawning all tracked agents for this guild…")
         await self._despawn_guild(ctx.guild)
-        await ctx.send("Done.")
+        await self._reply(ctx, "Done.")
 
     async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
         pass
