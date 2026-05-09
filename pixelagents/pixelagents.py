@@ -13,8 +13,8 @@ log = logging.getLogger("red.d_cogs.pixelagents")
 
 _VISIBLE_STATUSES = {"online", "idle", "dnd"}
 
-# (folderName, agentName) per guild/member
-_Cache = Dict[Tuple[int, int], Tuple[str, str]]
+# (folderName, agentName, agentStatus) per guild/member
+_Cache = Dict[Tuple[int, int], Tuple[str, str, str]]
 
 
 def _agent_key(guild_id: int, user_id: int) -> str:
@@ -58,21 +58,15 @@ class pixelagents(commands.Cog):
     async def _base(self) -> str:
         return _normalize_base_url(await self.config.base_url())
 
-    def _url(self, base: str, *parts: str) -> str:
-        url = base
-        for part in parts:
-            url = urljoin(url, part.lstrip("/"))
-            if not url.endswith("/") and part != parts[-1]:
-                url += "/"
-        return url
-
     async def _spawn(self, session: aiohttp.ClientSession, base: str, headers: dict,
-                     guild_id: int, user_id: int, name: str, folder: str) -> int:
+                     guild_id: int, user_id: int, name: str, folder: str,
+                     agent_status: str) -> int:
         url = urljoin(base, "api/agents")
         payload = {
             "agentKey": _agent_key(guild_id, user_id),
             "agentName": name,
             "folderName": folder,
+            "status": agent_status,
             "selected": False,
         }
         timeout = aiohttp.ClientTimeout(total=await self.config.timeout_seconds())
@@ -82,10 +76,13 @@ class pixelagents(commands.Cog):
             return resp.status
 
     async def _patch(self, session: aiohttp.ClientSession, base: str, headers: dict,
-                     guild_id: int, user_id: int, name: str) -> int:
+                     guild_id: int, user_id: int, name: str,
+                     agent_status: Optional[str] = None) -> int:
         key = _agent_key(guild_id, user_id)
         url = urljoin(base, f"api/agents/{key}/state")
-        payload = {"agentName": name}
+        payload: dict = {"agentName": name}
+        if agent_status is not None:
+            payload["status"] = agent_status
         timeout = aiohttp.ClientTimeout(total=await self.config.timeout_seconds())
         async with session.patch(url, json=payload, headers=headers, timeout=timeout) as resp:
             if resp.status != 200:
@@ -128,6 +125,15 @@ class pixelagents(commands.Cog):
             return False
         return True
 
+    def _has_rich_presence(self, member: discord.Member) -> bool:
+        return any(
+            a.type != discord.ActivityType.custom
+            for a in member.activities
+        )
+
+    def _agent_status(self, member: discord.Member) -> str:
+        return "active" if self._has_rich_presence(member) else "waiting"
+
     async def _reconcile_member(self, session: aiohttp.ClientSession, base: str, headers: dict,
                                  member: discord.Member, include_bots: bool) -> None:
         guild_id = member.guild.id
@@ -142,28 +148,33 @@ class pixelagents(commands.Cog):
                 self._cache.pop(cache_key, None)
             return
 
+        agent_status = self._agent_status(member)
         cached = self._cache.get(cache_key)
         if cached is None:
             # Not tracked — spawn fresh
-            status = await self._spawn(session, base, headers, guild_id, user_id, name, folder)
-            if status in (200, 409):
-                # Already exists; patch name in case it changed
-                await self._patch(session, base, headers, guild_id, user_id, name)
-            self._cache[cache_key] = (folder, name)
+            http_status = await self._spawn(session, base, headers, guild_id, user_id, name, folder, agent_status)
+            if http_status in (200, 409):
+                # Already exists; patch mutable fields
+                await self._patch(session, base, headers, guild_id, user_id, name, agent_status)
+            self._cache[cache_key] = (folder, name, agent_status)
             return
 
-        cached_folder, cached_name = cached
+        cached_folder, cached_name, cached_status = cached
         folder_changed = folder != cached_folder
         name_changed = name != cached_name
+        status_changed = agent_status != cached_status
 
         if folder_changed:
             # folderName is immutable via PATCH; delete then respawn
             await self._despawn(session, base, headers, guild_id, user_id)
-            await self._spawn(session, base, headers, guild_id, user_id, name, folder)
-            self._cache[cache_key] = (folder, name)
-        elif name_changed:
-            await self._patch(session, base, headers, guild_id, user_id, name)
-            self._cache[cache_key] = (folder, name)
+            await self._spawn(session, base, headers, guild_id, user_id, name, folder, agent_status)
+            self._cache[cache_key] = (folder, name, agent_status)
+        elif name_changed or status_changed:
+            await self._patch(
+                session, base, headers, guild_id, user_id, name,
+                agent_status if status_changed else None,
+            )
+            self._cache[cache_key] = (folder, name, agent_status)
 
     async def _full_sync(self, guild: discord.Guild) -> str:
         include_bots = await self.config.guild(guild).include_bots()
@@ -215,7 +226,8 @@ class pixelagents(commands.Cog):
             return
         status_changed = before.status != after.status
         name_changed = before.display_name != after.display_name
-        if not status_changed and not name_changed:
+        activity_changed = before.activities != after.activities
+        if not status_changed and not name_changed and not activity_changed:
             return
         include_bots = await self.config.guild(after.guild).include_bots()
         base = await self._base()

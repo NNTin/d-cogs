@@ -20,6 +20,18 @@ _discord.Guild = MagicMock
 _discord.Color = MagicMock(blurple=MagicMock(return_value=None))
 _discord.Embed = MagicMock
 _discord.HTTPException = Exception
+
+
+class _ActivityType:
+    playing = 0
+    streaming = 1
+    listening = 2
+    watching = 3
+    custom = 4
+    competing = 5
+
+
+_discord.ActivityType = _ActivityType
 sys.modules["discord"] = _discord
 
 

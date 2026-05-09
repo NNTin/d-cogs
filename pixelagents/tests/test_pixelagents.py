@@ -5,7 +5,7 @@ Stubs for discord / redbot are installed by conftest.py before collection.
 from __future__ import annotations
 
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 # conftest.py has already patched sys.modules so this import resolves cleanly.
 from pixelagents.pixelagents import (
@@ -16,18 +16,28 @@ from pixelagents.pixelagents import (
 )
 from pixelagents.tests.conftest import _FakeConfig
 
+import discord  # stubbed by conftest
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _member(guild_id=100, user_id=1, display_name="Tin", status="online", is_bot=False):
+def _activity(activity_type):
+    a = MagicMock()
+    a.type = activity_type
+    return a
+
+
+def _member(guild_id=100, user_id=1, display_name="Tin", status="online",
+            is_bot=False, activities=()):
     m = MagicMock()
     m.guild.id = guild_id
     m.id = user_id
     m.display_name = display_name
     m.status = status
     m.bot = is_bot
+    m.activities = list(activities)
     return m
 
 
@@ -137,6 +147,42 @@ class TestBotInclusion(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Tests: rich presence detection
+# ---------------------------------------------------------------------------
+
+class TestRichPresence(unittest.TestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+
+    def test_no_activities_is_waiting(self):
+        m = _member(activities=[])
+        self.assertEqual(self.cog._agent_status(m), "waiting")
+
+    def test_game_activity_is_active(self):
+        m = _member(activities=[_activity(discord.ActivityType.playing)])
+        self.assertEqual(self.cog._agent_status(m), "active")
+
+    def test_streaming_is_active(self):
+        m = _member(activities=[_activity(discord.ActivityType.streaming)])
+        self.assertEqual(self.cog._agent_status(m), "active")
+
+    def test_listening_is_active(self):
+        m = _member(activities=[_activity(discord.ActivityType.listening)])
+        self.assertEqual(self.cog._agent_status(m), "active")
+
+    def test_custom_activity_only_is_waiting(self):
+        m = _member(activities=[_activity(discord.ActivityType.custom)])
+        self.assertEqual(self.cog._agent_status(m), "waiting")
+
+    def test_custom_plus_game_is_active(self):
+        m = _member(activities=[
+            _activity(discord.ActivityType.custom),
+            _activity(discord.ActivityType.playing),
+        ])
+        self.assertEqual(self.cog._agent_status(m), "active")
+
+
+# ---------------------------------------------------------------------------
 # Tests: HTTP responses (mocked sessions)
 # ---------------------------------------------------------------------------
 
@@ -148,15 +194,38 @@ class TestHttpSpawn(unittest.IsolatedAsyncioTestCase):
 
     async def test_spawn_201(self):
         session = _make_mock_session({"post": _make_mock_response(201)})
-        self.assertEqual(await self.cog._spawn(session, self.base, self.headers, 100, 1, "Tin", "online"), 201)
+        self.assertEqual(
+            await self.cog._spawn(session, self.base, self.headers, 100, 1, "Tin", "online", "waiting"), 201
+        )
+
+    async def test_spawn_sends_status_field(self):
+        session = _make_mock_session({"post": _make_mock_response(201)})
+        await self.cog._spawn(session, self.base, self.headers, 100, 1, "Tin", "online", "active")
+        _, kwargs = session.post.call_args
+        self.assertEqual(kwargs["json"]["status"], "active")
 
     async def test_spawn_409_duplicate(self):
         session = _make_mock_session({"post": _make_mock_response(409)})
-        self.assertEqual(await self.cog._spawn(session, self.base, self.headers, 100, 1, "Tin", "online"), 409)
+        self.assertEqual(
+            await self.cog._spawn(session, self.base, self.headers, 100, 1, "Tin", "online", "waiting"), 409
+        )
 
     async def test_patch_200(self):
         session = _make_mock_session({"patch": _make_mock_response(200)})
         self.assertEqual(await self.cog._patch(session, self.base, self.headers, 100, 1, "NewName"), 200)
+
+    async def test_patch_with_status(self):
+        session = _make_mock_session({"patch": _make_mock_response(200)})
+        await self.cog._patch(session, self.base, self.headers, 100, 1, "Tin", "active")
+        _, kwargs = session.patch.call_args
+        self.assertEqual(kwargs["json"]["status"], "active")
+        self.assertEqual(kwargs["json"]["agentName"], "Tin")
+
+    async def test_patch_without_status_omits_field(self):
+        session = _make_mock_session({"patch": _make_mock_response(200)})
+        await self.cog._patch(session, self.base, self.headers, 100, 1, "Tin")
+        _, kwargs = session.patch.call_args
+        self.assertNotIn("status", kwargs["json"])
 
     async def test_despawn_204(self):
         session = _make_mock_session({"delete": _make_mock_response(204)})
@@ -174,7 +243,7 @@ class TestHttpSpawn(unittest.IsolatedAsyncioTestCase):
     async def test_spawn_401_logged(self):
         session = _make_mock_session({"post": _make_mock_response(401)})
         with self.assertLogs("red.d_cogs.pixelagents", level="WARNING"):
-            status = await self.cog._spawn(session, self.base, self.headers, 100, 1, "Tin", "online")
+            status = await self.cog._spawn(session, self.base, self.headers, 100, 1, "Tin", "online", "waiting")
         self.assertEqual(status, 401)
 
 
@@ -202,6 +271,18 @@ class TestReconcile(unittest.IsolatedAsyncioTestCase):
         session = await self._reconcile(_member(status="online"))
         session.post.assert_called_once()
 
+    async def test_spawn_includes_agent_status(self):
+        m = _member(status="online", activities=[_activity(discord.ActivityType.playing)])
+        session = await self._reconcile(m)
+        _, kwargs = session.post.call_args
+        self.assertEqual(kwargs["json"]["status"], "active")
+
+    async def test_spawn_waiting_when_no_rich_presence(self):
+        m = _member(status="online", activities=[])
+        session = await self._reconcile(m)
+        _, kwargs = session.post.call_args
+        self.assertEqual(kwargs["json"]["status"], "waiting")
+
     async def test_409_fallback_to_patch(self):
         session = await self._reconcile(_member(status="online"), spawn_status=409)
         session.post.assert_called_once()
@@ -217,27 +298,52 @@ class TestReconcile(unittest.IsolatedAsyncioTestCase):
         session.post.assert_not_called()
 
     async def test_offline_member_in_cache_is_despawned(self):
-        self.cog._cache[(100, 1)] = ("online", "Tin")
+        self.cog._cache[(100, 1)] = ("online", "Tin", "waiting")
         session = await self._reconcile(_member(status="offline"))
         session.delete.assert_called_once()
         self.assertNotIn((100, 1), self.cog._cache)
 
     async def test_folder_change_uses_delete_then_spawn(self):
-        self.cog._cache[(100, 1)] = ("online", "Tin")
+        self.cog._cache[(100, 1)] = ("online", "Tin", "waiting")
         session = await self._reconcile(_member(status="dnd"))
         session.delete.assert_called_once()
         session.post.assert_called_once()
 
+    async def test_folder_and_status_change_respawns_with_new_status(self):
+        self.cog._cache[(100, 1)] = ("online", "Tin", "waiting")
+        m = _member(status="dnd", activities=[_activity(discord.ActivityType.playing)])
+        session = await self._reconcile(m)
+        session.delete.assert_called_once()
+        _, kwargs = session.post.call_args
+        self.assertEqual(kwargs["json"]["status"], "active")
+        self.assertEqual(kwargs["json"]["folderName"], "dnd")
+
     async def test_name_change_only_patches(self):
-        self.cog._cache[(100, 1)] = ("online", "Tin")
+        self.cog._cache[(100, 1)] = ("online", "Tin", "waiting")
         session = await self._reconcile(_member(status="online", display_name="Newname"))
         session.delete.assert_not_called()
         session.post.assert_not_called()
         session.patch.assert_called_once()
 
+    async def test_agent_status_change_only_patches(self):
+        self.cog._cache[(100, 1)] = ("online", "Tin", "waiting")
+        m = _member(status="online", activities=[_activity(discord.ActivityType.playing)])
+        session = await self._reconcile(m)
+        session.delete.assert_not_called()
+        session.post.assert_not_called()
+        session.patch.assert_called_once()
+        _, kwargs = session.patch.call_args
+        self.assertEqual(kwargs["json"]["status"], "active")
+
+    async def test_name_change_no_status_change_omits_status_from_patch(self):
+        self.cog._cache[(100, 1)] = ("online", "Tin", "waiting")
+        session = await self._reconcile(_member(status="online", display_name="Newname", activities=[]))
+        _, kwargs = session.patch.call_args
+        self.assertNotIn("status", kwargs["json"])
+
     async def test_no_change_no_http(self):
-        self.cog._cache[(100, 1)] = ("online", "Tin")
-        session = await self._reconcile(_member(status="online", display_name="Tin"))
+        self.cog._cache[(100, 1)] = ("online", "Tin", "waiting")
+        session = await self._reconcile(_member(status="online", display_name="Tin", activities=[]))
         session.post.assert_not_called()
         session.patch.assert_not_called()
         session.delete.assert_not_called()
@@ -247,7 +353,7 @@ class TestReconcile(unittest.IsolatedAsyncioTestCase):
         session.post.assert_not_called()
 
     async def test_bot_excluded_despawns_if_cached(self):
-        self.cog._cache[(100, 99)] = ("online", "BotName")
+        self.cog._cache[(100, 99)] = ("online", "BotName", "waiting")
         session = await self._reconcile(_member(user_id=99, status="online", is_bot=True), include_bots=False)
         session.delete.assert_called_once()
         self.assertNotIn((100, 99), self.cog._cache)
