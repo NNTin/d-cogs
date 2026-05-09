@@ -518,19 +518,13 @@ class TestOnMessage(unittest.IsolatedAsyncioTestCase):
         await cog.on_message(msg)
         cog._tool_start.assert_not_awaited()
 
-    async def test_on_message_tracked_sends_tool_start(self):
+    def _make_message_with_content(self, content, guild_id=100, user_id=1):
+        msg = self._make_message(guild_id=guild_id, user_id=user_id)
+        msg.content = content
+        return msg
+
+    async def _run_on_message(self, cog, msg):
         import asyncio as _asyncio
-        cog = _make_cog()
-        cog.config.guild = MagicMock(return_value=MagicMock(
-            enabled=AsyncMock(return_value=True),
-        ))
-        cog._cache[(100, 1)] = ("online", "Tin", "waiting")
-        cog._tool_start = AsyncMock(return_value=200)
-        cog._clear_tool_after_delay = AsyncMock()
-
-        msg = self._make_message(guild_id=100, user_id=1)
-
-        # Patch create_task so the delay coroutine is cancelled immediately
         tasks = []
         loop = _asyncio.get_event_loop()
         orig_create_task = loop.create_task
@@ -552,6 +546,17 @@ class TestOnMessage(unittest.IsolatedAsyncioTestCase):
                 except (_asyncio.CancelledError, Exception):
                     pass
 
+    async def test_on_message_tracked_sends_tool_start(self):
+        cog = _make_cog()
+        cog.config.guild = MagicMock(return_value=MagicMock(
+            enabled=AsyncMock(return_value=True),
+        ))
+        cog._cache[(100, 1)] = ("online", "Tin", "waiting")
+        cog._tool_start = AsyncMock(return_value=200)
+
+        msg = self._make_message_with_content("hello world", guild_id=100, user_id=1)
+        await self._run_on_message(cog, msg)
+
         cog._tool_start.assert_awaited_once()
         call_args = cog._tool_start.call_args
         # positional: session, base, headers, guild_id, user_id, tool_id, tool_name, status
@@ -559,7 +564,37 @@ class TestOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_args[0][4], 1)
         self.assertEqual(call_args[0][5], "incoming-message")
         self.assertEqual(call_args[0][6], "Message")
-        self.assertEqual(call_args[0][7], "discord message")
+        self.assertEqual(call_args[0][7], "hello world")
+
+    async def test_on_message_truncates_long_content(self):
+        cog = _make_cog()
+        cog.config.guild = MagicMock(return_value=MagicMock(
+            enabled=AsyncMock(return_value=True),
+        ))
+        cog._cache[(100, 1)] = ("online", "Tin", "waiting")
+        cog._tool_start = AsyncMock(return_value=200)
+
+        long_msg = "a" * 80
+        msg = self._make_message_with_content(long_msg, guild_id=100, user_id=1)
+        await self._run_on_message(cog, msg)
+
+        status_sent = cog._tool_start.call_args[0][7]
+        self.assertEqual(status_sent, "a" * 40 + "…")
+
+    async def test_on_message_exact_40_chars_not_truncated(self):
+        cog = _make_cog()
+        cog.config.guild = MagicMock(return_value=MagicMock(
+            enabled=AsyncMock(return_value=True),
+        ))
+        cog._cache[(100, 1)] = ("online", "Tin", "waiting")
+        cog._tool_start = AsyncMock(return_value=200)
+
+        exact_msg = "b" * 40
+        msg = self._make_message_with_content(exact_msg, guild_id=100, user_id=1)
+        await self._run_on_message(cog, msg)
+
+        status_sent = cog._tool_start.call_args[0][7]
+        self.assertEqual(status_sent, exact_msg)
 
 
 if __name__ == "__main__":

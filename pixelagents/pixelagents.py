@@ -327,12 +327,15 @@ class pixelagents(commands.Cog):
         user_id = message.author.id
         if (guild_id, user_id) not in self._cache:
             return
+        content = message.content or ""
+        if len(content) > 40:
+            content = content[:40] + "…"
         base = await self._base()
         headers = await self._headers()
         async with aiohttp.ClientSession() as session:
             try:
                 await self._tool_start(session, base, headers, guild_id, user_id,
-                                       "incoming-message", "Message", "discord message")
+                                       "incoming-message", "Message", content)
             except Exception as exc:
                 log.error("on_message tool_start error for %s: %s", user_id, exc)
         asyncio.get_event_loop().create_task(
