@@ -10,7 +10,7 @@
 <link href="../.." rel="prev"/>
 <link href="../cogchain/" rel="next"/>
 <link href="../../assets/images/favicon.png" rel="icon"/>
-<meta content="mkdocs-1.6.1, mkdocs-material-9.7.1" name="generator"/>
+<meta content="mkdocs-1.6.1, mkdocs-material-9.7.6" name="generator"/>
 <title>Overview - d-cogs Documentation</title>
 <link href="../../assets/stylesheets/main.484c7ddc.min.css" rel="stylesheet"/>
 <link href="../../assets/stylesheets/palette.ab4e12ef.min.css" rel="stylesheet"/>
@@ -694,7 +694,7 @@
 <p>Cross-cog contracts live in the <code>cogchain</code> package so features can evolve without tight coupling. Langcore, providers, stores, and extension cogs all import the same interfaces instead of reaching into each other.</p>
 <pre class="mermaid"><code>flowchart LR
     subgraph PyPI Package
-        CC[cogchain\n(interfaces + models)]
+        CC["cogchain\n(interfaces + models)"]
     end
 
     subgraph Core Cog
