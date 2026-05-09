@@ -77,7 +77,7 @@ class pixelagents(commands.Cog):
         }
         timeout = aiohttp.ClientTimeout(total=await self.config.timeout_seconds())
         async with session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-            if resp.status not in (201, 409):
+            if resp.status not in (200, 201, 409):
                 log.warning("spawn %s -> HTTP %s", _agent_key(guild_id, user_id), resp.status)
             return resp.status
 
@@ -146,7 +146,7 @@ class pixelagents(commands.Cog):
         if cached is None:
             # Not tracked — spawn fresh
             status = await self._spawn(session, base, headers, guild_id, user_id, name, folder)
-            if status == 409:
+            if status in (200, 409):
                 # Already exists; patch name in case it changed
                 await self._patch(session, base, headers, guild_id, user_id, name)
             self._cache[cache_key] = (folder, name)

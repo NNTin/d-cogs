@@ -207,6 +207,11 @@ class TestReconcile(unittest.IsolatedAsyncioTestCase):
         session.post.assert_called_once()
         session.patch.assert_called_once()
 
+    async def test_200_spawn_fallback_to_patch(self):
+        session = await self._reconcile(_member(status="online"), spawn_status=200)
+        session.post.assert_called_once()
+        session.patch.assert_called_once()
+
     async def test_offline_member_not_spawned(self):
         session = await self._reconcile(_member(status="offline"))
         session.post.assert_not_called()
