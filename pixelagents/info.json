@@ -1,0 +1,25 @@
+{
+    "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog.schema.json",
+    "name": "pixelagents",
+    "short": "Mirror Discord presence into Pixelpipes via the Agent Control API",
+    "description": "Observes Discord guild presence and drives agent lifecycle in Pixelpipes through the pixel-agents-node-red Agent Control API.",
+    "end_user_data_statement": "This cog transmits Discord user IDs, guild IDs, display names, and presence status to a configured Node-RED endpoint.",
+    "install_msg": "Configure the cog with `[p]pixelagents baseurl` and `[p]pixelagents key`, then enable a guild with `[p]pixelagents enable`.",
+    "author": [
+        "Tin Nguyen"
+    ],
+    "required_cogs": {},
+    "requirements": [
+        "aiohttp"
+    ],
+    "tags": [
+        "pixelpipes",
+        "presence",
+        "agents",
+        "node-red"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}
