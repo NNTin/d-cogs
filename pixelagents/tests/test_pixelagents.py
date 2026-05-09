@@ -434,5 +434,133 @@ class TestPresenceUpdateListener(unittest.IsolatedAsyncioTestCase):
         cog._reconcile_member.assert_not_awaited()
 
 
+# ---------------------------------------------------------------------------
+# Tests: _tool_start / _tool_clear
+# ---------------------------------------------------------------------------
+
+class TestToolHelpers(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+        self.cog.config.guild = MagicMock(return_value=MagicMock(
+            enabled=AsyncMock(return_value=True),
+            include_bots=AsyncMock(return_value=True),
+        ))
+
+    async def test_tool_start_200(self):
+        resp = _make_mock_response(200)
+        session = _make_mock_session({"post": resp})
+        status = await self.cog._tool_start(
+            session, "https://pp.lair.nntin.xyz/",
+            {"Authorization": "Bearer test-token", "Content-Type": "application/json"},
+            100, 1, "incoming-message", "Message", "discord message",
+        )
+        self.assertEqual(status, 200)
+        session.post.assert_called_once()
+        call_kwargs = session.post.call_args
+        self.assertIn("api/agents/discord:100:1/tool", call_kwargs[0][0])
+
+    async def test_tool_clear_200(self):
+        resp = _make_mock_response(200)
+        session = _make_mock_session({"post": resp})
+        status = await self.cog._tool_clear(
+            session, "https://pp.lair.nntin.xyz/",
+            {"Authorization": "Bearer test-token", "Content-Type": "application/json"},
+            100, 1,
+        )
+        self.assertEqual(status, 200)
+        session.post.assert_called_once()
+        payload = session.post.call_args[1]["json"]
+        self.assertEqual(payload["type"], "agentToolsClear")
+
+
+# ---------------------------------------------------------------------------
+# Tests: on_message
+# ---------------------------------------------------------------------------
+
+class TestOnMessage(unittest.IsolatedAsyncioTestCase):
+    def _make_message(self, guild_id=100, user_id=1, has_guild=True):
+        msg = MagicMock()
+        if has_guild:
+            msg.guild = MagicMock()
+            msg.guild.id = guild_id
+        else:
+            msg.guild = None
+        msg.author = MagicMock()
+        msg.author.id = user_id
+        return msg
+
+    async def test_on_message_untracked_skips(self):
+        cog = _make_cog()
+        cog.config.guild = MagicMock(return_value=MagicMock(
+            enabled=AsyncMock(return_value=True),
+        ))
+        cog._tool_start = AsyncMock()
+        msg = self._make_message(guild_id=100, user_id=99)
+        # cache is empty — user 99 not tracked
+        await cog.on_message(msg)
+        cog._tool_start.assert_not_awaited()
+
+    async def test_on_message_no_guild_skips(self):
+        cog = _make_cog()
+        cog._tool_start = AsyncMock()
+        msg = self._make_message(has_guild=False)
+        await cog.on_message(msg)
+        cog._tool_start.assert_not_awaited()
+
+    async def test_on_message_disabled_guild_skips(self):
+        cog = _make_cog()
+        cog.config.guild = MagicMock(return_value=MagicMock(
+            enabled=AsyncMock(return_value=False),
+        ))
+        cog._tool_start = AsyncMock()
+        cog._cache[(100, 1)] = ("online", "Tin", "waiting")
+        msg = self._make_message(guild_id=100, user_id=1)
+        await cog.on_message(msg)
+        cog._tool_start.assert_not_awaited()
+
+    async def test_on_message_tracked_sends_tool_start(self):
+        import asyncio as _asyncio
+        cog = _make_cog()
+        cog.config.guild = MagicMock(return_value=MagicMock(
+            enabled=AsyncMock(return_value=True),
+        ))
+        cog._cache[(100, 1)] = ("online", "Tin", "waiting")
+        cog._tool_start = AsyncMock(return_value=200)
+        cog._clear_tool_after_delay = AsyncMock()
+
+        msg = self._make_message(guild_id=100, user_id=1)
+
+        # Patch create_task so the delay coroutine is cancelled immediately
+        tasks = []
+        loop = _asyncio.get_event_loop()
+        orig_create_task = loop.create_task
+
+        def _capture_task(coro, **kw):
+            t = orig_create_task(coro, **kw)
+            tasks.append(t)
+            return t
+
+        loop.create_task = _capture_task
+        try:
+            await cog.on_message(msg)
+        finally:
+            loop.create_task = orig_create_task
+            for t in tasks:
+                t.cancel()
+                try:
+                    await t
+                except (_asyncio.CancelledError, Exception):
+                    pass
+
+        cog._tool_start.assert_awaited_once()
+        call_args = cog._tool_start.call_args
+        # positional: session, base, headers, guild_id, user_id, tool_id, tool_name, status
+        self.assertEqual(call_args[0][3], 100)
+        self.assertEqual(call_args[0][4], 1)
+        self.assertEqual(call_args[0][5], "incoming-message")
+        self.assertEqual(call_args[0][6], "Message")
+        self.assertEqual(call_args[0][7], "discord message")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Dict, Optional, Tuple
 from urllib.parse import urljoin, urlparse
@@ -98,6 +99,40 @@ class pixelagents(commands.Cog):
             if resp.status not in (204, 404):
                 log.warning("despawn %s -> HTTP %s", key, resp.status)
             return resp.status
+
+    async def _tool_start(self, session: aiohttp.ClientSession, base: str, headers: dict,
+                          guild_id: int, user_id: int, tool_id: str, tool_name: str,
+                          status: str) -> int:
+        key = _agent_key(guild_id, user_id)
+        url = urljoin(base, f"api/agents/{key}/tool")
+        payload = {"type": "agentToolStart", "toolId": tool_id,
+                   "toolName": tool_name, "status": status}
+        timeout = aiohttp.ClientTimeout(total=await self.config.timeout_seconds())
+        async with session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+            if resp.status != 200:
+                log.warning("tool_start %s -> HTTP %s", key, resp.status)
+            return resp.status
+
+    async def _tool_clear(self, session: aiohttp.ClientSession, base: str, headers: dict,
+                          guild_id: int, user_id: int) -> int:
+        key = _agent_key(guild_id, user_id)
+        url = urljoin(base, f"api/agents/{key}/tool")
+        payload = {"type": "agentToolsClear"}
+        timeout = aiohttp.ClientTimeout(total=await self.config.timeout_seconds())
+        async with session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+            if resp.status != 200:
+                log.warning("tool_clear %s -> HTTP %s", key, resp.status)
+            return resp.status
+
+    async def _clear_tool_after_delay(self, guild_id: int, user_id: int, delay: float = 2.0) -> None:
+        await asyncio.sleep(delay)
+        base = await self._base()
+        headers = await self._headers()
+        async with aiohttp.ClientSession() as session:
+            try:
+                await self._tool_clear(session, base, headers, guild_id, user_id)
+            except Exception as exc:
+                log.error("tool_clear error for %s: %s", user_id, exc)
 
     async def _list_agents(self, session: aiohttp.ClientSession, base: str, headers: dict) -> Optional[list]:
         url = urljoin(base, "api/agents")
@@ -281,6 +316,28 @@ class pixelagents(commands.Cog):
             except Exception as exc:
                 log.error("on_member_remove error for %s: %s", member.id, exc)
         self._cache.pop((member.guild.id, member.id), None)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if message.guild is None:
+            return
+        if not await self.config.guild(message.guild).enabled():
+            return
+        guild_id = message.guild.id
+        user_id = message.author.id
+        if (guild_id, user_id) not in self._cache:
+            return
+        base = await self._base()
+        headers = await self._headers()
+        async with aiohttp.ClientSession() as session:
+            try:
+                await self._tool_start(session, base, headers, guild_id, user_id,
+                                       "incoming-message", "Message", "discord message")
+            except Exception as exc:
+                log.error("on_message tool_start error for %s: %s", user_id, exc)
+        asyncio.get_event_loop().create_task(
+            self._clear_tool_after_delay(guild_id, user_id, delay=2.0)
+        )
 
     # ------------------------------------------------------------------
     # Commands
