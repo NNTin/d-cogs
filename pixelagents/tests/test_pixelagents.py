@@ -51,6 +51,7 @@ def _make_cog():
         "base_url": "https://pp.lair.nntin.xyz/",
         "api_key": "test-token",
         "timeout_seconds": 10,
+        "message_tool_clear_delay": 2.0,
     }
     cog.config = cfg
     cog._cache = {}
@@ -474,6 +475,37 @@ class TestToolHelpers(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Tests: toolcleardelay command
+# ---------------------------------------------------------------------------
+
+class TestToolClearDelayCommand(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+
+    async def test_set_valid_delay(self):
+        ctx = MagicMock()
+        ctx.send = AsyncMock()
+        await self.cog.cmd_toolcleardelay(ctx, 5.0)
+        self.assertEqual(await self.cog.config.message_tool_clear_delay(), 5.0)
+        ctx.send.assert_awaited_once()
+        self.assertIn("5.0", ctx.send.call_args[0][0])
+
+    async def test_set_zero_delay_allowed(self):
+        ctx = MagicMock()
+        ctx.send = AsyncMock()
+        await self.cog.cmd_toolcleardelay(ctx, 0.0)
+        self.assertEqual(await self.cog.config.message_tool_clear_delay(), 0.0)
+
+    async def test_negative_delay_rejected(self):
+        ctx = MagicMock()
+        ctx.send = AsyncMock()
+        await self.cog.cmd_toolcleardelay(ctx, -1.0)
+        # config should remain unchanged
+        self.assertEqual(await self.cog.config.message_tool_clear_delay(), 2.0)
+        ctx.send.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # Tests: on_message
 # ---------------------------------------------------------------------------
 
@@ -565,6 +597,45 @@ class TestOnMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_args[0][5], "incoming-message")
         self.assertEqual(call_args[0][6], "Message")
         self.assertEqual(call_args[0][7], "hello world")
+
+    async def test_on_message_uses_configured_delay(self):
+        cog = _make_cog()
+        cog.config._global["message_tool_clear_delay"] = 7.5
+        cog.config.guild = MagicMock(return_value=MagicMock(
+            enabled=AsyncMock(return_value=True),
+        ))
+        cog._cache[(100, 1)] = ("online", "Tin", "waiting")
+        cog._tool_start = AsyncMock(return_value=200)
+
+        captured_delays = []
+        orig_clear = cog._clear_tool_after_delay
+
+        async def _fake_clear(guild_id, user_id, delay=2.0):
+            captured_delays.append(delay)
+
+        cog._clear_tool_after_delay = _fake_clear
+
+        import asyncio as _asyncio
+        tasks = []
+        loop = _asyncio.get_event_loop()
+        orig_create_task = loop.create_task
+
+        def _capture(coro, **kw):
+            t = orig_create_task(coro, **kw)
+            tasks.append(t)
+            return t
+
+        loop.create_task = _capture
+        try:
+            msg = self._make_message_with_content("hi", guild_id=100, user_id=1)
+            await cog.on_message(msg)
+            # drain the task
+            for t in tasks:
+                await t
+        finally:
+            loop.create_task = orig_create_task
+
+        self.assertEqual(captured_delays, [7.5])
 
     async def test_on_message_truncates_long_content(self):
         cog = _make_cog()

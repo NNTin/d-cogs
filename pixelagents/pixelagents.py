@@ -38,6 +38,7 @@ class pixelagents(commands.Cog):
             base_url="https://pp.lair.nntin.xyz/",
             api_key="",
             timeout_seconds=10,
+            message_tool_clear_delay=2.0,
         )
         self.config.register_guild(
             enabled=False,
@@ -338,8 +339,9 @@ class pixelagents(commands.Cog):
                                        "incoming-message", "Message", content)
             except Exception as exc:
                 log.error("on_message tool_start error for %s: %s", user_id, exc)
+        delay = await self.config.message_tool_clear_delay()
         asyncio.get_event_loop().create_task(
-            self._clear_tool_after_delay(guild_id, user_id, delay=2.0)
+            self._clear_tool_after_delay(guild_id, user_id, delay=delay)
         )
 
     # ------------------------------------------------------------------
@@ -359,6 +361,7 @@ class pixelagents(commands.Cog):
         base_url = await self.config.base_url()
         api_key = await self.config.api_key()
         timeout = await self.config.timeout_seconds()
+        clear_delay = await self.config.message_tool_clear_delay()
         enabled = await self.config.guild(ctx.guild).enabled()
         include_bots = await self.config.guild(ctx.guild).include_bots()
         tracked = sum(1 for (gid, _) in self._cache if gid == ctx.guild.id)
@@ -367,6 +370,7 @@ class pixelagents(commands.Cog):
         embed.add_field(name="Base URL", value=base_url, inline=False)
         embed.add_field(name="API Key", value="Set" if api_key else "Not set", inline=True)
         embed.add_field(name="Timeout", value=f"{timeout}s", inline=True)
+        embed.add_field(name="Msg Tool Clear Delay", value=f"{clear_delay}s", inline=True)
         embed.add_field(name="Guild Enabled", value="Yes" if enabled else "No", inline=True)
         embed.add_field(name="Include Bots", value="Yes" if include_bots else "No", inline=True)
         embed.add_field(name="Tracked Agents", value=str(tracked), inline=True)
@@ -390,6 +394,15 @@ class pixelagents(commands.Cog):
         """Set the Node-RED base URL."""
         await self.config.base_url.set(url)
         await ctx.send(f"Base URL set to `{url}`.")
+
+    @pixelagents_group.command(name="toolcleardelay")
+    async def cmd_toolcleardelay(self, ctx: commands.Context, seconds: float) -> None:
+        """Set how long (in seconds) a message tool indicator stays visible (default: 2.0)."""
+        if seconds < 0:
+            await ctx.send("Delay must be 0 or greater.")
+            return
+        await self.config.message_tool_clear_delay.set(seconds)
+        await ctx.send(f"Message tool clear delay set to `{seconds}s`.")
 
     @pixelagents_group.command(name="key")
     async def cmd_key(self, ctx: commands.Context, token: str) -> None:

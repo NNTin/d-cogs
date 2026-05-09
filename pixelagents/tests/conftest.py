@@ -41,14 +41,15 @@ _redbot_core = _make_stub_module("redbot.core")
 
 
 class _FakeConfigAttr:
-    def __init__(self, value):
-        self._value = value
+    def __init__(self, data, key):
+        self._data = data
+        self._key = key
 
     async def __call__(self):
-        return self._value
+        return self._data.get(self._key)
 
     async def set(self, value):
-        self._value = value
+        self._data[self._key] = value
 
 
 class _FakeGuildConfigAttr:
@@ -95,7 +96,7 @@ class _FakeConfig:
         return _FakeGuildConfig(guild_id)
 
     def __getattr__(self, name):
-        return _FakeConfigAttr(self._global.get(name))
+        return _FakeConfigAttr(self._global, name)
 
 
 class _FakeGroup:
