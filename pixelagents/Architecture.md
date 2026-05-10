@@ -59,12 +59,13 @@ Properties:
 On connection the cog sends:
 
 ```json
-{ "type": "producerHello", "capabilities": ["auth-check"] }
+{ "type": "producerHello", "capabilities": ["auth-check", "layout-control"] }
 ```
 
 This registers the cog as a Discord producer. The standalone host routes
 `producerAuthCheckRequest` messages only to producers that advertise the
-`auth-check` capability.
+`auth-check` capability, and layout snapshot/load requests only to producers
+that advertise `layout-control`.
 
 ### Bootstrap
 
@@ -107,6 +108,30 @@ After `message_tool_clear_delay` seconds:
 { "type": "agentToolsClear", "id": <agentId> }
 ```
 
+### Layout Control
+
+Authorized Discord users can save the standalone host's persisted
+`layout.json`, load one of their saved layouts into the single shared frontend
+layout, delete saved layouts, list saved layouts, and share saved layout JSON
+as a Discord attachment.
+
+Save requests use:
+
+```json
+{ "type": "producerLayoutSnapshotRequest", "requestId": "<uuid>" }
+```
+
+The host replies with `producerLayoutSnapshotReply` containing the current
+valid layout or an error. Load requests use:
+
+```json
+{ "type": "producerLayoutLoadRequest", "requestId": "<uuid>", "layout": { "...": "..." } }
+```
+
+The host validates the layout, writes it to the persisted layout file, and
+broadcasts `layoutLoaded` with `force: true` so all viewers replace their
+current layout immediately.
+
 ## Editor Authorization
 
 The standalone host sends auth-check requests when a browser completes Discord
@@ -119,9 +144,10 @@ OAuth login:
 
 The cog checks:
 1. Is the Discord user a bot owner (`bot.is_owner`)? → allow
-2. Is the `editor_role_id` configured and does the user have that role in any
+2. Is the user an administrator in an enabled guild? → allow
+3. Is the `editor_role_id` configured and does the user have that role in any
    enabled guild? → allow
-3. Otherwise → deny
+4. Otherwise → deny
 
 ```json
 { "type": "producerAuthCheckReply", "requestId": "<uuid>", "allowed": true }
@@ -129,9 +155,10 @@ The cog checks:
 
 The auth policy:
 - **Allow** bot owners.
+- **Allow** administrators in enabled guilds.
 - **Allow** members with the configured editor role.
-- **Deny** everyone else, including if the role is not configured, the user is
-  not in any enabled guild, or Discord lookup fails.
+- **Deny** everyone else, including if the user is not in any enabled guild or
+  Discord lookup fails.
 
 ## Connection and Reconnect
 
@@ -168,6 +195,11 @@ Docker Compose template includes both `redstack` and `pixel-agents` networks.
 | `[p]pixelagents producerurl <url>` | Override the producer WebSocket URL |
 | `[p]pixelagents toolcleardelay <seconds>` | Set message indicator duration |
 | `[p]pixelagents editorrole [role]` | Set or clear the editor role |
+| `[p]pixelagents layout save <name> [overwrite]` | Save the host's current persisted layout under your Discord user |
+| `[p]pixelagents layout load <name>` | Force-load one of your saved layouts into the shared frontend |
+| `[p]pixelagents layout delete <name>` | Delete one of your saved layouts |
+| `[p]pixelagents layout list` | List your saved layouts |
+| `[p]pixelagents layout share <name>` | Upload one of your saved layouts as JSON in the channel |
 
 ## End-to-End Verification
 
@@ -180,5 +212,7 @@ Docker Compose template includes both `redstack` and `pixel-agents` networks.
 6. Set a user offline — confirm their agent despawns.
 7. Send a Discord message from a tracked user — confirm the tool bubble appears.
 8. For editor auth: complete Discord OAuth at `/api/discord/auth/start`. Bot
-   owners and configured role members should be able to save layouts; others
-   should be denied.
+   owners, administrators in enabled guilds, and configured role members should
+   be able to edit layouts; others should be denied.
+9. Save, list, load, delete, and share a layout through the Discord layout
+   commands.

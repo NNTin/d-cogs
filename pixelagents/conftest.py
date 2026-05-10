@@ -20,6 +20,7 @@ _discord.Guild = MagicMock
 _discord.Color = MagicMock(blurple=MagicMock(return_value=None))
 _discord.Embed = MagicMock
 _discord.HTTPException = Exception
+_discord.File = MagicMock
 
 
 class _ActivityType:
@@ -71,11 +72,21 @@ class _FakeGuildConfig:
         return _FakeGuildConfigAttr(self._data, name)
 
 
+class _FakeUserConfig:
+    def __init__(self, data):
+        self._data = data
+
+    def __getattr__(self, name):
+        return _FakeGuildConfigAttr(self._data, name)
+
+
 class _FakeConfig:
     _global: dict
 
     def __init__(self):
         self._global = {}
+        self._user_defaults = {}
+        self._users = {}
 
     @classmethod
     def get_conf(cls, cog, identifier=0, force_registration=False):
@@ -88,11 +99,29 @@ class _FakeConfig:
     def register_guild(self, **defaults):
         pass
 
+    def register_user(self, **defaults):
+        self._user_defaults.update(defaults)
+
     def guild(self, guild):
         return _FakeGuildConfig(guild.id if hasattr(guild, "id") else guild)
 
     def guild_from_id(self, guild_id):
         return _FakeGuildConfig(guild_id)
+
+    def user(self, user):
+        user_id = user.id if hasattr(user, "id") else int(user)
+        data = self._users.setdefault(
+            user_id,
+            {key: (value.copy() if isinstance(value, dict) else value) for key, value in self._user_defaults.items()},
+        )
+        return _FakeUserConfig(data)
+
+    def user_from_id(self, user_id):
+        data = self._users.setdefault(
+            user_id,
+            {key: (value.copy() if isinstance(value, dict) else value) for key, value in self._user_defaults.items()},
+        )
+        return _FakeUserConfig(data)
 
     def __getattr__(self, name):
         return _FakeConfigAttr(self._global.get(name))
@@ -112,6 +141,11 @@ class _FakeGroup:
     def command(self, **kw):
         def deco(f):
             return f
+        return deco
+
+    def group(self, **kw):
+        def deco(f):
+            return _FakeGroup(f)
         return deco
 
 

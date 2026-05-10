@@ -5,6 +5,7 @@ Stubs for discord / redbot / aiohttp are installed by conftest.py.
 from __future__ import annotations
 
 import json
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -67,6 +68,7 @@ def _make_cog():
     cog._ws = None
     cog._ws_session = None
     cog._connect_task = None
+    cog._pending_layout_requests = {}
     cog._closing = False
     return cog
 
@@ -82,6 +84,25 @@ def _make_enabled_cog():
 
     cog.config.guild = lambda guild: _EnabledGuildConfig()
     return cog
+
+
+def _valid_layout():
+    return {
+        "version": 1,
+        "cols": 2,
+        "rows": 2,
+        "tiles": [1, 1, 1, 1],
+        "furniture": [],
+    }
+
+
+def _layout_ctx(user_id=12345):
+    ctx = MagicMock()
+    ctx.interaction = None
+    ctx.send = AsyncMock()
+    ctx.author.id = user_id
+    ctx.guild.id = 100
+    return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +248,7 @@ class TestSendHello(unittest.IsolatedAsyncioTestCase):
         msg = json.loads(self.ws._sent[0])
         self.assertEqual(msg["type"], "producerHello")
         self.assertIn("auth-check", msg["capabilities"])
+        self.assertIn("layout-control", msg["capabilities"])
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +443,24 @@ class TestCheckAuth(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(await self.cog._check_auth(12345))
 
+    async def test_enabled_guild_admin_allows(self):
+        member = MagicMock()
+        member.guild_permissions.administrator = True
+        member.roles = []
+
+        guild = MagicMock()
+        guild.get_member = MagicMock(return_value=member)
+        self.cog.bot.guilds = [guild]
+
+        async def _enabled():
+            return True
+
+        guild_cfg = MagicMock()
+        guild_cfg.enabled = _enabled
+        self.cog.config.guild = MagicMock(return_value=guild_cfg)
+
+        self.assertTrue(await self.cog._check_auth(12345))
+
     async def test_no_role_match_denied(self):
         role_id = 999
         self.cog.config._global["editor_role_id"] = role_id
@@ -491,6 +531,63 @@ class TestHandleServerMessage(unittest.IsolatedAsyncioTestCase):
         })
         reply = json.loads(self.ws._sent[0])
         self.assertFalse(reply["allowed"])
+
+    async def test_layout_reply_resolves_pending_request(self):
+        future = asyncio.get_event_loop().create_future()
+        self.cog._pending_layout_requests["layout-1"] = future
+
+        await self.cog._handle_server_message({
+            "type": "producerLayoutSnapshotReply",
+            "requestId": "layout-1",
+            "ok": True,
+            "layout": _valid_layout(),
+        })
+
+        self.assertTrue(future.done())
+        self.assertTrue(future.result()["ok"])
+
+
+class TestLayoutControlRequests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.cog = _make_cog()
+        self.ws = _FakeClientWebSocketResponse()
+        self.cog._ws = self.ws
+
+    async def test_snapshot_request_sends_request_id_and_returns_reply(self):
+        task = asyncio.create_task(self.cog._request_layout_snapshot())
+        await asyncio.sleep(0)
+
+        sent = json.loads(self.ws._sent[0])
+        self.assertEqual(sent["type"], "producerLayoutSnapshotRequest")
+        self.assertIn("requestId", sent)
+
+        await self.cog._handle_server_message({
+            "type": "producerLayoutSnapshotReply",
+            "requestId": sent["requestId"],
+            "ok": True,
+            "layout": _valid_layout(),
+        })
+
+        reply = await task
+        self.assertTrue(reply["ok"])
+
+    async def test_load_request_sends_layout(self):
+        layout = _valid_layout()
+        task = asyncio.create_task(self.cog._request_layout_load(layout))
+        await asyncio.sleep(0)
+
+        sent = json.loads(self.ws._sent[0])
+        self.assertEqual(sent["type"], "producerLayoutLoadRequest")
+        self.assertEqual(sent["layout"], layout)
+
+        await self.cog._handle_server_message({
+            "type": "producerLayoutLoadReply",
+            "requestId": sent["requestId"],
+            "ok": True,
+        })
+
+        reply = await task
+        self.assertTrue(reply["ok"])
 
 
 # ---------------------------------------------------------------------------
@@ -658,6 +755,85 @@ class TestProducerUrlCommand(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await self.cog.config.producer_url(), "ws://newhost:3210/ws/producer"
         )
+
+
+class TestLayoutCommands(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+        self.cog.bot.is_owner = AsyncMock(return_value=True)
+
+    async def test_save_stores_snapshot(self):
+        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": _valid_layout()})
+        ctx = _layout_ctx()
+
+        await self.cog.cmd_layout_save(ctx, "Office")
+
+        layouts = await self.cog.config.user(ctx.author).layouts()
+        self.assertIn("office", layouts)
+        self.assertEqual(layouts["office"]["display_name"], "Office")
+        ctx.send.assert_awaited()
+
+    async def test_save_rejects_duplicate_without_overwrite(self):
+        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": _valid_layout()})
+        ctx = _layout_ctx()
+
+        await self.cog.cmd_layout_save(ctx, "Office")
+        await self.cog.cmd_layout_save(ctx, "office")
+
+        self.assertIn("already exists", ctx.send.call_args[0][0])
+
+    async def test_save_overwrites_existing(self):
+        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": _valid_layout()})
+        ctx = _layout_ctx()
+
+        await self.cog.cmd_layout_save(ctx, "Office")
+        await self.cog.cmd_layout_save(ctx, "Office", overwrite=True)
+
+        layouts = await self.cog.config.user(ctx.author).layouts()
+        self.assertEqual(len(layouts), 1)
+        self.assertIn("Overwrote", ctx.send.call_args[0][0])
+
+    async def test_load_sends_saved_layout_to_host(self):
+        layout = _valid_layout()
+        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": layout})
+        self.cog._request_layout_load = AsyncMock(return_value={"ok": True})
+        ctx = _layout_ctx()
+
+        await self.cog.cmd_layout_save(ctx, "Office")
+        await self.cog.cmd_layout_load(ctx, "Office")
+
+        self.cog._request_layout_load.assert_awaited_once_with(layout)
+        self.assertIn("Loaded", ctx.send.call_args[0][0])
+
+    async def test_delete_removes_only_requested_layout(self):
+        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": _valid_layout()})
+        ctx = _layout_ctx()
+
+        await self.cog.cmd_layout_save(ctx, "Office")
+        await self.cog.cmd_layout_delete(ctx, "Office")
+
+        layouts = await self.cog.config.user(ctx.author).layouts()
+        self.assertEqual(layouts, {})
+
+    async def test_share_uploads_public_file(self):
+        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": _valid_layout()})
+        ctx = _layout_ctx()
+
+        await self.cog.cmd_layout_save(ctx, "Office")
+        await self.cog.cmd_layout_share(ctx, "Office")
+
+        _, kwargs = ctx.send.call_args
+        self.assertIn("file", kwargs)
+
+    async def test_unauthorized_user_cannot_save(self):
+        self.cog.bot.is_owner = AsyncMock(return_value=False)
+        self.cog._request_layout_snapshot = AsyncMock()
+        ctx = _layout_ctx()
+
+        await self.cog.cmd_layout_save(ctx, "Office")
+
+        self.cog._request_layout_snapshot.assert_not_awaited()
+        self.assertIn("not authorized", ctx.send.call_args[0][0])
 
 
 class TestReplyHelper(unittest.IsolatedAsyncioTestCase):

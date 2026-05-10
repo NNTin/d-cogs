@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
+import re
+import time
 import uuid
-from typing import Dict, Optional, Set, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 import aiohttp
 import discord
@@ -15,6 +18,10 @@ from redbot.core.bot import Red
 log = logging.getLogger("red.d_cogs.pixelagents")
 
 _VISIBLE_STATUSES = {"online", "idle", "dnd"}
+_LAYOUT_REQUEST_TIMEOUT = 10.0
+_MAX_LAYOUTS_PER_USER = 20
+_MAX_LAYOUT_BYTES = 1024 * 1024
+_LAYOUT_NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 
 # JavaScript Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991
 _JS_MAX_SAFE = (1 << 53) - 1
@@ -46,6 +53,9 @@ class pixelagents(commands.Cog):
             enabled=False,
             include_bots=True,
         )
+        self.config.register_user(
+            layouts={},
+        )
         # Active agents: (guild_id, user_id) -> (folder_name, display_name)
         self._agents: Dict[Tuple[int, int], Tuple[str, str]] = {}
         # Known collisions (agent_id) already logged
@@ -54,6 +64,7 @@ class pixelagents(commands.Cog):
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._ws_session: Optional[aiohttp.ClientSession] = None
         self._connect_task: Optional[asyncio.Task] = None
+        self._pending_layout_requests: Dict[str, asyncio.Future] = {}
         self._closing = False
 
     # ------------------------------------------------------------------
@@ -91,7 +102,7 @@ class pixelagents(commands.Cog):
     # ------------------------------------------------------------------
 
     async def _send_hello(self) -> None:
-        await self._send({"type": "producerHello", "capabilities": ["auth-check"]})
+        await self._send({"type": "producerHello", "capabilities": ["auth-check", "layout-control"]})
 
     async def _send_existing_agents(self) -> None:
         seen: Set[int] = set()
@@ -111,6 +122,59 @@ class pixelagents(commands.Cog):
             "folderNames": folder_names,
             "externalAgents": {},
         })
+
+    async def _request_layout_snapshot(self) -> dict:
+        return await self._request_layout_control({"type": "producerLayoutSnapshotRequest"})
+
+    async def _request_layout_load(self, layout: dict) -> dict:
+        return await self._request_layout_control({"type": "producerLayoutLoadRequest", "layout": layout})
+
+    async def _request_layout_control(self, message: dict) -> dict:
+        if self._ws is None or self._ws.closed:
+            raise RuntimeError("Pixelpipes producer WebSocket is not connected.")
+
+        request_id = str(uuid.uuid4())
+        message["requestId"] = request_id
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self._pending_layout_requests[request_id] = future
+        await self._send(message)
+        try:
+            return await asyncio.wait_for(future, timeout=_LAYOUT_REQUEST_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            self._pending_layout_requests.pop(request_id, None)
+            raise RuntimeError("Timed out waiting for Pixelpipes layout reply.") from exc
+
+    def _normalize_layout_name(self, name: str) -> Optional[str]:
+        clean = name.strip()
+        if not _LAYOUT_NAME_RE.fullmatch(clean):
+            return None
+        return clean.casefold()
+
+    def _layout_size(self, layout: dict) -> int:
+        return len(json.dumps(layout, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+
+    def _validate_layout(self, layout: Any) -> bool:
+        if not isinstance(layout, dict):
+            return False
+        if layout.get("version") != 1:
+            return False
+        cols = layout.get("cols")
+        rows = layout.get("rows")
+        tiles = layout.get("tiles")
+        furniture = layout.get("furniture")
+        if not isinstance(cols, int) or cols <= 0:
+            return False
+        if not isinstance(rows, int) or rows <= 0:
+            return False
+        if not isinstance(tiles, list) or len(tiles) != cols * rows:
+            return False
+        if not isinstance(furniture, list):
+            return False
+        tile_colors = layout.get("tileColors")
+        if tile_colors is not None and (not isinstance(tile_colors, list) or len(tile_colors) != cols * rows):
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -132,6 +196,10 @@ class pixelagents(commands.Cog):
             await self._ws.close()
         if self._ws_session is not None:
             await self._ws_session.close()
+        for future in self._pending_layout_requests.values():
+            if not future.done():
+                future.set_exception(RuntimeError("pixelagents cog unloaded"))
+        self._pending_layout_requests.clear()
 
     async def _connect_loop(self) -> None:
         delay = 1.0
@@ -196,28 +264,42 @@ class pixelagents(commands.Cog):
                 "requestId": request_id,
                 "allowed": allowed,
             })
+        elif msg_type in ("producerLayoutSnapshotReply", "producerLayoutLoadReply"):
+            request_id = data.get("requestId", "")
+            future = self._pending_layout_requests.pop(request_id, None)
+            if future is not None and not future.done():
+                future.set_result(data)
 
     # ------------------------------------------------------------------
     # Editor authorization
     # ------------------------------------------------------------------
 
     async def _check_auth(self, user_id: int) -> bool:
+        return await self._can_edit_layout_user(user_id)
+
+    async def _can_edit_layout_user(self, user_id: int) -> bool:
         if user_id == 0:
             return False
         if await self.bot.is_owner(discord.Object(id=user_id)):
             return True
         role_id = await self.config.editor_role_id()
-        if role_id is None:
-            return False
         for guild in self.bot.guilds:
             if not await self.config.guild(guild).enabled():
                 continue
             member = guild.get_member(user_id)
             if member is None:
                 continue
-            if any(r.id == role_id for r in member.roles):
+            permissions = getattr(member, "guild_permissions", None)
+            if getattr(permissions, "administrator", False) is True:
+                return True
+            if role_id is not None and any(r.id == role_id for r in getattr(member, "roles", [])):
                 return True
         return False
+
+    async def _can_edit_layout_ctx(self, ctx: commands.Context) -> bool:
+        author = getattr(ctx, "author", None)
+        user_id = getattr(author, "id", 0)
+        return await self._can_edit_layout_user(user_id)
 
     # ------------------------------------------------------------------
     # Presence sync
@@ -283,7 +365,10 @@ class pixelagents(commands.Cog):
         if folder != cached_folder:
             self._agents[(guild_id, user_id)] = (folder, name)
             agent_id = self._agent_id(user_id)
+            await self._send({"type": "agentClosed", "id": agent_id})
             await self._send({"type": "agentCreated", "id": agent_id, "folderName": folder})
+            if name != cached_name:
+                await self._send({"type": "agentTeamInfo", "id": agent_id, "agentName": name})
             await self._send_existing_agents()
         elif name != cached_name:
             self._agents[(guild_id, user_id)] = (folder, name)
@@ -332,6 +417,16 @@ class pixelagents(commands.Cog):
     async def _reply(self, ctx: commands.Context, content=None, **kwargs) -> None:
         if ctx.interaction:
             kwargs["ephemeral"] = True
+            if not ctx.interaction.response.is_done():
+                await ctx.interaction.response.send_message(content, **kwargs)
+            else:
+                await ctx.interaction.followup.send(content, **kwargs)
+        else:
+            await ctx.send(content, **kwargs)
+
+    async def _send_public(self, ctx: commands.Context, content=None, **kwargs) -> None:
+        if ctx.interaction:
+            kwargs["ephemeral"] = False
             if not ctx.interaction.response.is_done():
                 await ctx.interaction.response.send_message(content, **kwargs)
             else:
@@ -418,13 +513,13 @@ class pixelagents(commands.Cog):
     # ------------------------------------------------------------------
 
     @commands.hybrid_group(name="pixelagents", invoke_without_command=True)
-    @commands.admin_or_permissions(administrator=True)
     @commands.guild_only()
     async def pixelagents_group(self, ctx: commands.Context) -> None:
         """Manage Pixelagents presence mirroring."""
         await ctx.send_help()
 
     @pixelagents_group.command(name="status")
+    @commands.admin_or_permissions(administrator=True)
     async def cmd_status(self, ctx: commands.Context) -> None:
         """Show current Pixelagents configuration and connection status."""
         producer_url = await self.config.producer_url()
@@ -451,6 +546,7 @@ class pixelagents(commands.Cog):
         await self._reply(ctx, embed=embed)
 
     @pixelagents_group.command(name="producerurl")
+    @commands.admin_or_permissions(administrator=True)
     @app_commands.describe(url="Producer WebSocket URL (default: ws://standalone:3210/ws/producer)")
     async def cmd_producerurl(self, ctx: commands.Context, url: str) -> None:
         """Set the producer WebSocket URL."""
@@ -458,6 +554,7 @@ class pixelagents(commands.Cog):
         await self._reply(ctx, f"Producer URL set to `{url}`.")
 
     @pixelagents_group.command(name="toolcleardelay")
+    @commands.admin_or_permissions(administrator=True)
     @app_commands.describe(seconds="Seconds to keep the message activity indicator visible")
     async def cmd_toolcleardelay(self, ctx: commands.Context, seconds: float) -> None:
         """Set how long (in seconds) a message tool indicator stays visible (default: 2.0)."""
@@ -468,6 +565,7 @@ class pixelagents(commands.Cog):
         await self._reply(ctx, f"Message tool clear delay set to `{seconds}s`.")
 
     @pixelagents_group.command(name="editorrole")
+    @commands.admin_or_permissions(administrator=True)
     @app_commands.describe(role="Discord role that grants webview editor access (omit to clear)")
     async def cmd_editorrole(self, ctx: commands.Context, role: Optional[discord.Role] = None) -> None:
         """Set the Discord role that grants webview editor access. Omit to clear."""
@@ -479,6 +577,7 @@ class pixelagents(commands.Cog):
             await self._reply(ctx, f"Editor role set to `{role.name}` (ID: {role.id}).")
 
     @pixelagents_group.command(name="enable")
+    @commands.admin_or_permissions(administrator=True)
     async def cmd_enable(self, ctx: commands.Context) -> None:
         """Enable Pixelpipes presence mirroring for this guild and run a full sync."""
         if ctx.interaction:
@@ -489,6 +588,7 @@ class pixelagents(commands.Cog):
         await self._reply(ctx, result)
 
     @pixelagents_group.command(name="disable")
+    @commands.admin_or_permissions(administrator=True)
     async def cmd_disable(self, ctx: commands.Context) -> None:
         """Disable Pixelpipes presence mirroring for this guild and despawn all agents."""
         if ctx.interaction:
@@ -499,6 +599,7 @@ class pixelagents(commands.Cog):
         await self._reply(ctx, "Done.")
 
     @pixelagents_group.command(name="includebots")
+    @commands.admin_or_permissions(administrator=True)
     @app_commands.describe(value="Whether bot users should be mirrored")
     async def cmd_includebots(self, ctx: commands.Context, value: bool) -> None:
         """Set whether bot users are mirrored (true/false)."""
@@ -509,6 +610,7 @@ class pixelagents(commands.Cog):
             await self._reply(ctx, result)
 
     @pixelagents_group.command(name="sync")
+    @commands.admin_or_permissions(administrator=True)
     async def cmd_sync(self, ctx: commands.Context) -> None:
         """Manually reconcile all guild members against their current Discord presence."""
         if ctx.interaction:
@@ -521,6 +623,7 @@ class pixelagents(commands.Cog):
         await self._reply(ctx, result)
 
     @pixelagents_group.command(name="despawnall")
+    @commands.admin_or_permissions(administrator=True)
     async def cmd_despawnall(self, ctx: commands.Context) -> None:
         """Despawn all tracked agents for this guild without disabling the cog."""
         if ctx.interaction:
@@ -529,5 +632,179 @@ class pixelagents(commands.Cog):
         await self._despawn_guild(ctx.guild)
         await self._reply(ctx, "Done.")
 
+    @pixelagents_group.group(name="layout", invoke_without_command=True)
+    async def pixelagents_layout_group(self, ctx: commands.Context) -> None:
+        """Manage saved Pixelpipes layouts."""
+        await ctx.send_help()
+
+    async def _require_layout_editor(self, ctx: commands.Context) -> bool:
+        if await self._can_edit_layout_ctx(ctx):
+            return True
+        await self._reply(ctx, "You are not authorized to manage Pixel Agents layouts.")
+        return False
+
+    async def _get_user_layouts(self, user) -> dict:
+        layouts = await self.config.user(user).layouts()
+        return dict(layouts or {})
+
+    async def _set_user_layouts(self, user, layouts: dict) -> None:
+        await self.config.user(user).layouts.set(layouts)
+
+    @pixelagents_layout_group.command(name="save")
+    @app_commands.describe(
+        name="Saved layout name",
+        overwrite="Overwrite an existing saved layout with this name",
+    )
+    async def cmd_layout_save(self, ctx: commands.Context, name: str, overwrite: bool = False) -> None:
+        """Save the standalone host's current persisted layout."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+        if not await self._require_layout_editor(ctx):
+            return
+
+        key = self._normalize_layout_name(name)
+        if key is None:
+            await self._reply(ctx, "Layout names must be 1-64 characters and may only use letters, numbers, spaces, `_`, `-`, and `.`.")
+            return
+
+        layouts = await self._get_user_layouts(ctx.author)
+        if key in layouts and not overwrite:
+            await self._reply(ctx, "A layout with that name already exists. Re-run with `overwrite: true` to replace it.")
+            return
+        if key not in layouts and len(layouts) >= _MAX_LAYOUTS_PER_USER:
+            await self._reply(ctx, f"You can save at most {_MAX_LAYOUTS_PER_USER} layouts. Delete one first.")
+            return
+
+        try:
+            reply = await self._request_layout_snapshot()
+        except RuntimeError as exc:
+            await self._reply(ctx, str(exc))
+            return
+
+        if not reply.get("ok"):
+            await self._reply(ctx, f"Could not read the current Pixelpipes layout: {reply.get('error', 'unknown error')}")
+            return
+
+        layout = reply.get("layout")
+        if not self._validate_layout(layout):
+            await self._reply(ctx, "Pixelpipes returned an invalid layout.")
+            return
+
+        size = self._layout_size(layout)
+        if size > _MAX_LAYOUT_BYTES:
+            await self._reply(ctx, f"Layout is too large to save ({size} bytes, limit {_MAX_LAYOUT_BYTES} bytes).")
+            return
+
+        now = int(time.time())
+        existing = layouts.get(key, {})
+        display_name = name.strip()
+        layouts[key] = {
+            "display_name": display_name,
+            "created_at": existing.get("created_at", now),
+            "updated_at": now,
+            "size": size,
+            "layout": layout,
+        }
+        await self._set_user_layouts(ctx.author, layouts)
+        action = "Overwrote" if existing else "Saved"
+        await self._reply(ctx, f"{action} layout `{display_name}` ({size} bytes).")
+
+    @pixelagents_layout_group.command(name="load")
+    @app_commands.describe(name="Saved layout name")
+    async def cmd_layout_load(self, ctx: commands.Context, name: str) -> None:
+        """Load one of your saved layouts into the shared frontend."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+        if not await self._require_layout_editor(ctx):
+            return
+
+        key = self._normalize_layout_name(name)
+        layouts = await self._get_user_layouts(ctx.author)
+        record = layouts.get(key or "")
+        if record is None:
+            await self._reply(ctx, "No saved layout found with that name.")
+            return
+
+        layout = record.get("layout")
+        if not self._validate_layout(layout):
+            await self._reply(ctx, "Saved layout is invalid and cannot be loaded.")
+            return
+
+        try:
+            reply = await self._request_layout_load(layout)
+        except RuntimeError as exc:
+            await self._reply(ctx, str(exc))
+            return
+
+        if not reply.get("ok"):
+            await self._reply(ctx, f"Could not load layout: {reply.get('error', 'unknown error')}")
+            return
+        await self._reply(ctx, f"Loaded layout `{record.get('display_name', name.strip())}`.")
+
+    @pixelagents_layout_group.command(name="delete")
+    @app_commands.describe(name="Saved layout name")
+    async def cmd_layout_delete(self, ctx: commands.Context, name: str) -> None:
+        """Delete one of your saved layouts."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+        if not await self._require_layout_editor(ctx):
+            return
+
+        key = self._normalize_layout_name(name)
+        layouts = await self._get_user_layouts(ctx.author)
+        record = layouts.pop(key or "", None)
+        if record is None:
+            await self._reply(ctx, "No saved layout found with that name.")
+            return
+        await self._set_user_layouts(ctx.author, layouts)
+        await self._reply(ctx, f"Deleted layout `{record.get('display_name', name.strip())}`.")
+
+    @pixelagents_layout_group.command(name="list")
+    async def cmd_layout_list(self, ctx: commands.Context) -> None:
+        """List your saved layouts."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+        if not await self._require_layout_editor(ctx):
+            return
+
+        layouts = await self._get_user_layouts(ctx.author)
+        if not layouts:
+            await self._reply(ctx, "You have no saved layouts.")
+            return
+
+        records = sorted(layouts.values(), key=lambda item: item.get("updated_at", 0), reverse=True)
+        lines = []
+        for record in records:
+            updated_at = int(record.get("updated_at", 0))
+            timestamp = f"<t:{updated_at}:R>" if updated_at else "unknown time"
+            lines.append(f"- `{record.get('display_name', 'unnamed')}` ({record.get('size', 0)} bytes, updated {timestamp})")
+        await self._reply(ctx, "\n".join(lines))
+
+    @pixelagents_layout_group.command(name="share")
+    @app_commands.describe(name="Saved layout name")
+    async def cmd_layout_share(self, ctx: commands.Context, name: str) -> None:
+        """Upload one of your saved layouts as layout.json."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=False)
+        if not await self._require_layout_editor(ctx):
+            return
+
+        key = self._normalize_layout_name(name)
+        layouts = await self._get_user_layouts(ctx.author)
+        record = layouts.get(key or "")
+        if record is None:
+            await self._reply(ctx, "No saved layout found with that name.")
+            return
+
+        layout = record.get("layout")
+        if not self._validate_layout(layout):
+            await self._reply(ctx, "Saved layout is invalid and cannot be shared.")
+            return
+
+        payload = json.dumps(layout, indent=2, sort_keys=True).encode("utf-8")
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", record.get("display_name", name.strip())).strip("-") or "layout"
+        file = discord.File(io.BytesIO(payload), filename=f"{safe_name}.layout.json")
+        await self._send_public(ctx, f"Shared Pixel Agents layout `{record.get('display_name', name.strip())}`.", file=file)
+
     async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
-        pass
+        await self.config.user_from_id(user_id).layouts.set({})
