@@ -175,6 +175,14 @@ class pixelagents(commands.Cog):
         msg_type = data.get("type")
         if msg_type == "producerBootstrapRequest":
             await self._send_existing_agents()
+            # Resend display names so the server has current data after a reconnect or restart.
+            # _send_existing_agents only sends IDs and folderNames; agentTeamInfo carries the name.
+            seen: Set[int] = set()
+            for (_, uid), (_, name) in sorted(self._agents.items()):
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                await self._send({"type": "agentTeamInfo", "id": self._agent_id(uid), "agentName": name})
         elif msg_type == "producerAuthCheckRequest":
             request_id = data.get("requestId", "")
             user_id_str = data.get("discordUserId", "")
@@ -273,8 +281,10 @@ class pixelagents(commands.Cog):
 
         cached_folder, cached_name = cached
         if folder != cached_folder:
-            await self._close_agent(guild_id, user_id)
-            await self._spawn_agent(guild_id, user_id, name, folder, member)
+            self._agents[(guild_id, user_id)] = (folder, name)
+            agent_id = self._agent_id(user_id)
+            await self._send({"type": "agentCreated", "id": agent_id, "folderName": folder})
+            await self._send_existing_agents()
         elif name != cached_name:
             self._agents[(guild_id, user_id)] = (folder, name)
             await self._send({"type": "agentTeamInfo", "id": self._agent_id(user_id), "agentName": name})
