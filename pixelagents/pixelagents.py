@@ -357,6 +357,10 @@ class pixelagents(commands.Cog):
         return activity.name or None
 
     def _status_str(self, member: discord.Member) -> Optional[str]:
+        # Discord never sends PRESENCE_UPDATE for the bot's own user, so member.status
+        # stays at its default ("offline"). Treat the bot itself as always "online".
+        if self.bot.user is not None and member.id == self.bot.user.id:
+            return "online"
         s = str(member.status)
         return s if s in _VISIBLE_STATUSES else None
 
