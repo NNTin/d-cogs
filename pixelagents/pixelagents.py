@@ -48,6 +48,8 @@ class pixelagents(commands.Cog):
             producer_url="ws://standalone:3210/ws/producer",
             message_tool_clear_delay=2.0,
             editor_role_id=None,
+            broadcast_rich_presence=True,
+            broadcast_messages=True,
         )
         self.config.register_guild(
             enabled=False,
@@ -414,10 +416,11 @@ class pixelagents(commands.Cog):
             status = self._agent_status(member)
             await self._send({"type": "agentStatus", "id": agent_id, "status": status})
         await self._send_existing_agents()
-        label = self._build_presence_label(member)
-        if label:
-            self._presence_cache[(guild_id, user_id)] = label
-            await self._send_presence_tool(agent_id, label)
+        if await self.config.broadcast_rich_presence():
+            label = self._build_presence_label(member)
+            if label:
+                self._presence_cache[(guild_id, user_id)] = label
+                await self._send_presence_tool(agent_id, label)
 
     async def _close_agent(self, guild_id: int, user_id: int) -> None:
         if (guild_id, user_id) not in self._agents:
@@ -446,6 +449,8 @@ class pixelagents(commands.Cog):
     async def _update_presence_tool(
         self, guild_id: int, user_id: int, member: discord.Member
     ) -> None:
+        if not await self.config.broadcast_rich_presence():
+            return
         agent_id = self._agent_id(user_id)
         label = self._build_presence_label(member)
         cached = self._presence_cache.get((guild_id, user_id))
@@ -551,6 +556,8 @@ class pixelagents(commands.Cog):
         user_id = message.author.id
         if (guild_id, user_id) not in self._agents:
             return
+        if not await self.config.broadcast_messages():
+            return
         agent_id = self._agent_id(user_id)
         content = message.content or ""
         if len(content) > 40:
@@ -585,23 +592,30 @@ class pixelagents(commands.Cog):
         producer_url = await self.config.producer_url()
         clear_delay = await self.config.message_tool_clear_delay()
         editor_role_id = await self.config.editor_role_id()
+        broadcast_rp = await self.config.broadcast_rich_presence()
+        broadcast_msg = await self.config.broadcast_messages()
         enabled = await self.config.guild(ctx.guild).enabled()
         include_bots = await self.config.guild(ctx.guild).include_bots()
         tracked = sum(1 for (gid, _) in self._agents if gid == ctx.guild.id)
         connected = self._ws is not None and not self._ws.closed
 
+        def yn(value: bool) -> str:
+            return "✅" if value else "🛑"
+
         embed = discord.Embed(title="Pixelagents Status", color=discord.Color.blurple())
         embed.add_field(name="Producer URL", value=producer_url, inline=False)
-        embed.add_field(name="Connected", value="Yes" if connected else "No", inline=True)
+        embed.add_field(name="Connected", value=yn(connected), inline=True)
         embed.add_field(name="Msg Tool Clear Delay", value=f"{clear_delay}s", inline=True)
         embed.add_field(
             name="Editor Role ID",
-            value=str(editor_role_id) if editor_role_id else "Not set",
+            value=str(editor_role_id) if editor_role_id else "⚠️ Not set",
             inline=True,
         )
-        embed.add_field(name="Guild Enabled", value="Yes" if enabled else "No", inline=True)
-        embed.add_field(name="Include Bots", value="Yes" if include_bots else "No", inline=True)
+        embed.add_field(name="Guild Enabled", value=yn(enabled), inline=True)
+        embed.add_field(name="Include Bots", value=yn(include_bots), inline=True)
         embed.add_field(name="Tracked Agents", value=str(tracked), inline=True)
+        embed.add_field(name="Broadcast Rich Presence", value=yn(broadcast_rp), inline=True)
+        embed.add_field(name="Broadcast Messages", value=yn(broadcast_msg), inline=True)
 
         await self._reply(ctx, embed=embed)
 
@@ -623,6 +637,22 @@ class pixelagents(commands.Cog):
             return
         await self.config.message_tool_clear_delay.set(seconds)
         await self._reply(ctx, f"Message tool clear delay set to `{seconds}s`.")
+
+    @pixelagents_group.command(name="richpresence")
+    @commands.admin_or_permissions(administrator=True)
+    @app_commands.describe(value="Whether rich presence (Spotify, games, etc.) is shown in the webview")
+    async def cmd_richpresence(self, ctx: commands.Context, value: bool) -> None:
+        """Set whether rich presence activity is broadcast to the webview (true/false)."""
+        await self.config.broadcast_rich_presence.set(value)
+        await self._reply(ctx, f"Rich presence broadcasting set to `{value}`.")
+
+    @pixelagents_group.command(name="messages")
+    @commands.admin_or_permissions(administrator=True)
+    @app_commands.describe(value="Whether Discord messages are shown as tool bubbles in the webview")
+    async def cmd_messages(self, ctx: commands.Context, value: bool) -> None:
+        """Set whether Discord messages are broadcast as tool bubbles to the webview (true/false)."""
+        await self.config.broadcast_messages.set(value)
+        await self._reply(ctx, f"Message broadcasting set to `{value}`.")
 
     @pixelagents_group.command(name="editorrole")
     @commands.admin_or_permissions(administrator=True)
