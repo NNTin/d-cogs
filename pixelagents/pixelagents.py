@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from typing import Dict, Optional, Tuple
-from urllib.parse import urljoin, urlparse
+import uuid
+from typing import Dict, Optional, Set, Tuple
 
 import aiohttp
 import discord
@@ -15,85 +16,310 @@ log = logging.getLogger("red.d_cogs.pixelagents")
 
 _VISIBLE_STATUSES = {"online", "idle", "dnd"}
 
-# (folderName, agentName, agentStatus) per guild/member
-_Cache = Dict[Tuple[int, int], Tuple[str, str, str]]
+# JavaScript Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991
+_JS_MAX_SAFE = (1 << 53) - 1
 
 
-def _agent_key(guild_id: int, user_id: int) -> str:
-    return f"discord:{guild_id}:{user_id}"
+def _discord_id_to_agent_id(user_id: int) -> int:
+    """Map a Discord user ID to a stable negative JavaScript-safe integer.
 
-
-def _normalize_base_url(url: str) -> str:
-    parsed = urlparse(url)
-    path = parsed.path if parsed.path.endswith("/") else parsed.path + "/"
-    return parsed._replace(path=path).geturl()
-
-
-class PixelAgentsKeyModal(discord.ui.Modal, title="Set API Key"):
-    token: discord.ui.TextInput = discord.ui.TextInput(
-        label="Bearer Token",
-        placeholder="Paste your API bearer token here",
-        required=True,
-        min_length=1,
-        max_length=512,
-    )
-
-    def __init__(self, cog: "pixelagents") -> None:
-        super().__init__()
-        self._cog = cog
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "This command must be used in a server.", ephemeral=True
-            )
-            return
-        member = interaction.user
-        if not member.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "You need the Administrator permission to set the API key.", ephemeral=True
-            )
-            return
-        try:
-            await self._cog.config.api_key.set(self.token.value)
-        except Exception as exc:
-            log.error("PixelAgentsKeyModal: error saving key: %s", type(exc).__name__)
-            await interaction.response.send_message("Failed to save API key.", ephemeral=True)
-            return
-        await interaction.response.send_message("API key set.", ephemeral=True)
-
-    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        log.error("PixelAgentsKeyModal.on_error: %s", type(error).__name__)
-        try:
-            await interaction.response.send_message("An error occurred.", ephemeral=True)
-        except Exception:
-            pass
+    Discord snowflakes are up to 64 bits. We take user_id modulo JS_MAX_SAFE
+    and negate. If the result is 0 (user_id is a multiple of JS_MAX_SAFE),
+    we use -JS_MAX_SAFE to guarantee negativity.
+    """
+    mapped = user_id % _JS_MAX_SAFE
+    return -(mapped if mapped != 0 else _JS_MAX_SAFE)
 
 
 class pixelagents(commands.Cog):
-    """Mirror Discord guild presence into Pixelpipes via the Agent Control API."""
+    """Mirror Discord guild presence into Pixelpipes via the producer WebSocket."""
 
     def __init__(self, bot: Red) -> None:
         self.bot = bot
         self.config = Config.get_conf(self, identifier=0x706978656C61, force_registration=True)
         self.config.register_global(
-            base_url="https://pp.lair.nntin.xyz/",
-            api_key="",
-            timeout_seconds=10,
+            producer_url="ws://standalone:3210/ws/producer",
             message_tool_clear_delay=2.0,
+            editor_role_id=None,
         )
         self.config.register_guild(
             enabled=False,
             include_bots=True,
         )
-        self._cache: _Cache = {}
+        # Active agents: (guild_id, user_id) -> (folder_name, display_name)
+        self._agents: Dict[Tuple[int, int], Tuple[str, str]] = {}
+        # Known collisions (agent_id) already logged
+        self._logged_collisions: Set[int] = set()
+        # WebSocket state
+        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._ws_session: Optional[aiohttp.ClientSession] = None
+        self._connect_task: Optional[asyncio.Task] = None
+        self._closing = False
+
+    # ------------------------------------------------------------------
+    # ID helpers
+    # ------------------------------------------------------------------
+
+    def _agent_id(self, user_id: int) -> int:
+        return _discord_id_to_agent_id(user_id)
+
+    def _detect_collision(self, user_id: int) -> None:
+        agent_id = self._agent_id(user_id)
+        for (_, uid) in self._agents:
+            if uid != user_id and self._agent_id(uid) == agent_id:
+                if agent_id not in self._logged_collisions:
+                    self._logged_collisions.add(agent_id)
+                    log.warning(
+                        "pixelagents: agent ID collision — user %d and user %d both map to %d",
+                        user_id, uid, agent_id,
+                    )
+                break
+
+    # ------------------------------------------------------------------
+    # WebSocket send helper
+    # ------------------------------------------------------------------
+
+    async def _send(self, message: dict) -> None:
+        if self._ws is not None and not self._ws.closed:
+            try:
+                await self._ws.send_str(json.dumps(message))
+            except Exception as exc:
+                log.error("pixelagents: send error: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Producer protocol messages
+    # ------------------------------------------------------------------
+
+    async def _send_hello(self) -> None:
+        await self._send({"type": "producerHello", "capabilities": ["auth-check"]})
+
+    async def _send_existing_agents(self) -> None:
+        seen: Set[int] = set()
+        agent_ids = []
+        folder_names: Dict[int, str] = {}
+        for (_, uid), (folder, _) in sorted(self._agents.items()):
+            if uid in seen:
+                continue
+            seen.add(uid)
+            aid = self._agent_id(uid)
+            agent_ids.append(aid)
+            folder_names[aid] = folder
+        await self._send({
+            "type": "existingAgents",
+            "agents": agent_ids,
+            "agentMeta": {},
+            "folderNames": folder_names,
+            "externalAgents": {},
+        })
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle
+    # ------------------------------------------------------------------
+
+    async def cog_load(self) -> None:
+        self._closing = False
+        self._connect_task = asyncio.get_event_loop().create_task(self._connect_loop())
+
+    async def cog_unload(self) -> None:
+        self._closing = True
+        if self._connect_task is not None:
+            self._connect_task.cancel()
+            try:
+                await self._connect_task
+            except asyncio.CancelledError:
+                pass
+        if self._ws is not None and not self._ws.closed:
+            await self._ws.close()
+        if self._ws_session is not None:
+            await self._ws_session.close()
+
+    async def _connect_loop(self) -> None:
+        delay = 1.0
+        while not self._closing:
+            try:
+                url = await self.config.producer_url()
+                self._ws_session = aiohttp.ClientSession()
+                self._ws = await self._ws_session.ws_connect(url)
+                log.info("pixelagents: connected to %s", url)
+                delay = 1.0
+
+                await self._send_hello()
+                await self._sync_all_guilds()
+
+                async for msg in self._ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            await self._handle_server_message(json.loads(msg.data))
+                        except Exception as exc:
+                            log.error("pixelagents: message handler error: %s", exc)
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                log.warning("pixelagents: connection error: %s", exc)
+            finally:
+                if self._ws is not None and not self._ws.closed:
+                    await self._ws.close()
+                self._ws = None
+                if self._ws_session is not None:
+                    await self._ws_session.close()
+                self._ws_session = None
+
+            if not self._closing:
+                log.info("pixelagents: reconnecting in %.1fs", delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60.0)
+
+    async def _handle_server_message(self, data: dict) -> None:
+        msg_type = data.get("type")
+        if msg_type == "producerBootstrapRequest":
+            await self._send_existing_agents()
+        elif msg_type == "producerAuthCheckRequest":
+            request_id = data.get("requestId", "")
+            user_id_str = data.get("discordUserId", "")
+            try:
+                user_id = int(user_id_str)
+            except (ValueError, TypeError):
+                user_id = 0
+            allowed = await self._check_auth(user_id)
+            await self._send({
+                "type": "producerAuthCheckReply",
+                "requestId": request_id,
+                "allowed": allowed,
+            })
+
+    # ------------------------------------------------------------------
+    # Editor authorization
+    # ------------------------------------------------------------------
+
+    async def _check_auth(self, user_id: int) -> bool:
+        if user_id == 0:
+            return False
+        if await self.bot.is_owner(discord.Object(id=user_id)):
+            return True
+        role_id = await self.config.editor_role_id()
+        if role_id is None:
+            return False
+        for guild in self.bot.guilds:
+            if not await self.config.guild(guild).enabled():
+                continue
+            member = guild.get_member(user_id)
+            if member is None:
+                continue
+            if any(r.id == role_id for r in member.roles):
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Presence sync
+    # ------------------------------------------------------------------
+
+    async def _sync_all_guilds(self) -> None:
+        for guild in self.bot.guilds:
+            if await self.config.guild(guild).enabled():
+                try:
+                    await self._full_sync(guild)
+                except Exception as exc:
+                    log.error("pixelagents: sync error for guild %s: %s", guild.id, exc)
+
+    async def _full_sync(self, guild: discord.Guild) -> str:
+        include_bots = await self.config.guild(guild).include_bots()
+        errors = 0
+        current_user_ids = {m.id for m in guild.members}
+
+        # Close agents that are no longer in the guild
+        stale = [(gid, uid) for (gid, uid) in list(self._agents) if gid == guild.id and uid not in current_user_ids]
+        for key in stale:
+            await self._close_agent(*key)
+
+        for member in guild.members:
+            try:
+                await self._reconcile_member(member, include_bots)
+            except Exception as exc:
+                log.error("pixelagents: reconcile error for %s: %s", member.id, exc)
+                errors += 1
+        return f"Sync complete. Errors: {errors}." if errors else "Sync complete."
+
+    def _status_str(self, member: discord.Member) -> Optional[str]:
+        s = str(member.status)
+        return s if s in _VISIBLE_STATUSES else None
+
+    def _is_included(self, member: discord.Member, include_bots: bool) -> bool:
+        return not (member.bot and not include_bots)
+
+    def _has_rich_presence(self, member: discord.Member) -> bool:
+        return any(a.type != discord.ActivityType.custom for a in member.activities)
+
+    def _agent_status(self, member: discord.Member) -> str:
+        return "active" if self._has_rich_presence(member) else "waiting"
+
+    async def _reconcile_member(self, member: discord.Member, include_bots: bool) -> None:
+        guild_id = member.guild.id
+        user_id = member.id
+        folder = self._status_str(member)
+
+        if folder is None or not self._is_included(member, include_bots):
+            if (guild_id, user_id) in self._agents:
+                await self._close_agent(guild_id, user_id)
+            return
+
+        name = member.display_name
+        cached = self._agents.get((guild_id, user_id))
+
+        if cached is None:
+            await self._spawn_agent(guild_id, user_id, name, folder, member)
+            return
+
+        cached_folder, cached_name = cached
+        if folder != cached_folder:
+            await self._close_agent(guild_id, user_id)
+            await self._spawn_agent(guild_id, user_id, name, folder, member)
+        elif name != cached_name:
+            self._agents[(guild_id, user_id)] = (folder, name)
+            await self._send({"type": "agentTeamInfo", "id": self._agent_id(user_id), "agentName": name})
+
+    def _is_user_active_in_other_guild(self, guild_id: int, user_id: int) -> bool:
+        return any(gid != guild_id and uid == user_id for (gid, uid) in self._agents)
+
+    async def _spawn_agent(
+        self, guild_id: int, user_id: int, name: str, folder: str, member: discord.Member
+    ) -> None:
+        self._detect_collision(user_id)
+        agent_id = self._agent_id(user_id)
+        already_active = self._is_user_active_in_other_guild(guild_id, user_id)
+        self._agents[(guild_id, user_id)] = (folder, name)
+
+        if not already_active:
+            await self._send({"type": "agentCreated", "id": agent_id, "folderName": folder})
+            await self._send({"type": "agentTeamInfo", "id": agent_id, "agentName": name})
+            status = self._agent_status(member)
+            await self._send({"type": "agentStatus", "id": agent_id, "status": status})
+        await self._send_existing_agents()
+
+    async def _close_agent(self, guild_id: int, user_id: int) -> None:
+        if (guild_id, user_id) not in self._agents:
+            return
+        agent_id = self._agent_id(user_id)
+        del self._agents[(guild_id, user_id)]
+        if not self._is_user_active_in_other_guild(guild_id, user_id):
+            await self._send({"type": "agentClosed", "id": agent_id})
+        await self._send_existing_agents()
+
+    async def _despawn_guild(self, guild: discord.Guild) -> None:
+        keys = [(gid, uid) for (gid, uid) in list(self._agents) if gid == guild.id]
+        for key in keys:
+            await self._close_agent(*key)
+
+    async def _clear_tool_after_delay(self, agent_id: int, delay: float) -> None:
+        await asyncio.sleep(delay)
+        await self._send({"type": "agentToolsClear", "id": agent_id})
 
     # ------------------------------------------------------------------
     # Reply helper
     # ------------------------------------------------------------------
 
     async def _reply(self, ctx: commands.Context, content=None, **kwargs) -> None:
-        """Send a message ephemerally for slash invocations, normally for prefix."""
         if ctx.interaction:
             kwargs["ephemeral"] = True
             if not ctx.interaction.response.is_done():
@@ -104,248 +330,32 @@ class pixelagents(commands.Cog):
             await ctx.send(content, **kwargs)
 
     # ------------------------------------------------------------------
-    # HTTP helpers
-    # ------------------------------------------------------------------
-
-    async def _headers(self) -> dict:
-        key = await self.config.api_key()
-        return {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        }
-
-    async def _base(self) -> str:
-        return _normalize_base_url(await self.config.base_url())
-
-    async def _spawn(self, session: aiohttp.ClientSession, base: str, headers: dict,
-                     guild_id: int, user_id: int, name: str, folder: str,
-                     agent_status: str) -> int:
-        url = urljoin(base, "api/agents")
-        payload = {
-            "agentKey": _agent_key(guild_id, user_id),
-            "agentName": name,
-            "folderName": folder,
-            "status": agent_status,
-            "selected": False,
-        }
-        timeout = aiohttp.ClientTimeout(total=await self.config.timeout_seconds())
-        async with session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-            if resp.status not in (200, 201, 409):
-                log.warning("spawn %s -> HTTP %s", _agent_key(guild_id, user_id), resp.status)
-            return resp.status
-
-    async def _patch(self, session: aiohttp.ClientSession, base: str, headers: dict,
-                     guild_id: int, user_id: int, name: str,
-                     agent_status: Optional[str] = None) -> int:
-        key = _agent_key(guild_id, user_id)
-        url = urljoin(base, f"api/agents/{key}/state")
-        payload: dict = {"agentName": name}
-        if agent_status is not None:
-            payload["status"] = agent_status
-        timeout = aiohttp.ClientTimeout(total=await self.config.timeout_seconds())
-        async with session.patch(url, json=payload, headers=headers, timeout=timeout) as resp:
-            if resp.status != 200:
-                log.warning("patch %s -> HTTP %s", key, resp.status)
-            return resp.status
-
-    async def _despawn(self, session: aiohttp.ClientSession, base: str, headers: dict,
-                       guild_id: int, user_id: int) -> int:
-        key = _agent_key(guild_id, user_id)
-        url = urljoin(base, f"api/agents/{key}")
-        timeout = aiohttp.ClientTimeout(total=await self.config.timeout_seconds())
-        async with session.delete(url, headers=headers, timeout=timeout) as resp:
-            if resp.status not in (204, 404):
-                log.warning("despawn %s -> HTTP %s", key, resp.status)
-            return resp.status
-
-    async def _tool_start(self, session: aiohttp.ClientSession, base: str, headers: dict,
-                          guild_id: int, user_id: int, tool_id: str, tool_name: str,
-                          status: str) -> int:
-        key = _agent_key(guild_id, user_id)
-        url = urljoin(base, f"api/agents/{key}/tool")
-        payload = {"type": "agentToolStart", "toolId": tool_id,
-                   "toolName": tool_name, "status": status}
-        timeout = aiohttp.ClientTimeout(total=await self.config.timeout_seconds())
-        async with session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-            if resp.status != 200:
-                log.warning("tool_start %s -> HTTP %s", key, resp.status)
-            return resp.status
-
-    async def _tool_clear(self, session: aiohttp.ClientSession, base: str, headers: dict,
-                          guild_id: int, user_id: int) -> int:
-        key = _agent_key(guild_id, user_id)
-        url = urljoin(base, f"api/agents/{key}/tool")
-        payload = {"type": "agentToolsClear"}
-        timeout = aiohttp.ClientTimeout(total=await self.config.timeout_seconds())
-        async with session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-            if resp.status != 200:
-                log.warning("tool_clear %s -> HTTP %s", key, resp.status)
-            return resp.status
-
-    async def _clear_tool_after_delay(self, guild_id: int, user_id: int, delay: float = 2.0) -> None:
-        await asyncio.sleep(delay)
-        base = await self._base()
-        headers = await self._headers()
-        async with aiohttp.ClientSession() as session:
-            try:
-                await self._tool_clear(session, base, headers, guild_id, user_id)
-            except Exception as exc:
-                log.error("tool_clear error for %s: %s", user_id, exc)
-
-    async def _list_agents(self, session: aiohttp.ClientSession, base: str, headers: dict) -> Optional[list]:
-        url = urljoin(base, "api/agents")
-        timeout = aiohttp.ClientTimeout(total=await self.config.timeout_seconds())
-        try:
-            async with session.get(url, headers=headers, timeout=timeout) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                log.warning("list agents -> HTTP %s", resp.status)
-                return None
-        except Exception as exc:
-            log.error("list agents error: %s", exc)
-            return None
-
-    # ------------------------------------------------------------------
-    # Reconciliation
-    # ------------------------------------------------------------------
-
-    def _status_str(self, member: discord.Member) -> Optional[str]:
-        s = str(member.status)
-        return s if s in _VISIBLE_STATUSES else None
-
-    def _is_included(self, member: discord.Member, include_bots: bool) -> bool:
-        if member.bot and not include_bots:
-            return False
-        return True
-
-    def _has_rich_presence(self, member: discord.Member) -> bool:
-        return any(
-            a.type != discord.ActivityType.custom
-            for a in member.activities
-        )
-
-    def _agent_status(self, member: discord.Member) -> str:
-        return "active" if self._has_rich_presence(member) else "waiting"
-
-    async def _reconcile_member(self, session: aiohttp.ClientSession, base: str, headers: dict,
-                                 member: discord.Member, include_bots: bool) -> None:
-        guild_id = member.guild.id
-        user_id = member.id
-        folder = self._status_str(member)
-        name = member.display_name
-        cache_key = (guild_id, user_id)
-
-        if folder is None or not self._is_included(member, include_bots):
-            if cache_key in self._cache:
-                await self._despawn(session, base, headers, guild_id, user_id)
-                self._cache.pop(cache_key, None)
-            return
-
-        agent_status = self._agent_status(member)
-        cached = self._cache.get(cache_key)
-        if cached is None:
-            # Not tracked — spawn fresh
-            http_status = await self._spawn(session, base, headers, guild_id, user_id, name, folder, agent_status)
-            if http_status in (200, 409):
-                # Already exists; patch mutable fields
-                await self._patch(session, base, headers, guild_id, user_id, name, agent_status)
-            self._cache[cache_key] = (folder, name, agent_status)
-            return
-
-        cached_folder, cached_name, cached_status = cached
-        folder_changed = folder != cached_folder
-        name_changed = name != cached_name
-        status_changed = agent_status != cached_status
-
-        if folder_changed:
-            # folderName is immutable via PATCH; delete then respawn
-            await self._despawn(session, base, headers, guild_id, user_id)
-            await self._spawn(session, base, headers, guild_id, user_id, name, folder, agent_status)
-            self._cache[cache_key] = (folder, name, agent_status)
-        elif name_changed or status_changed:
-            await self._patch(
-                session, base, headers, guild_id, user_id, name,
-                agent_status if status_changed else None,
-            )
-            self._cache[cache_key] = (folder, name, agent_status)
-
-    async def _full_sync(self, guild: discord.Guild) -> str:
-        include_bots = await self.config.guild(guild).include_bots()
-        base = await self._base()
-        headers = await self._headers()
-        if not headers["Authorization"].strip("Bearer ").strip():
-            return "API key is not set."
-        errors = 0
-        async with aiohttp.ClientSession() as session:
-            for member in guild.members:
-                try:
-                    await self._reconcile_member(session, base, headers, member, include_bots)
-                except Exception as exc:
-                    log.error("sync error for %s: %s", member.id, exc)
-                    errors += 1
-        return f"Sync complete. Errors: {errors}." if errors else "Sync complete."
-
-    async def _despawn_guild(self, guild: discord.Guild) -> None:
-        base = await self._base()
-        headers = await self._headers()
-        to_remove = [(gid, uid) for (gid, uid) in list(self._cache) if gid == guild.id]
-        async with aiohttp.ClientSession() as session:
-            for gid, uid in to_remove:
-                try:
-                    await self._despawn(session, base, headers, gid, uid)
-                except Exception as exc:
-                    log.error("despawn error for %s:%s: %s", gid, uid, exc)
-                self._cache.pop((gid, uid), None)
-
-    # ------------------------------------------------------------------
-    # Cog lifecycle
-    # ------------------------------------------------------------------
-
-    async def cog_load(self) -> None:
-        for guild in self.bot.guilds:
-            if await self.config.guild(guild).enabled():
-                try:
-                    await self._full_sync(guild)
-                except Exception as exc:
-                    log.error("cog_load sync error for guild %s: %s", guild.id, exc)
-
-    # ------------------------------------------------------------------
-    # Listeners
+    # Discord event listeners
     # ------------------------------------------------------------------
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
-        # GUILD_MEMBER_UPDATE carries nick/roles/timeout — not status or activities.
         if not await self.config.guild(after.guild).enabled():
             return
         if before.display_name == after.display_name:
             return
         include_bots = await self.config.guild(after.guild).include_bots()
-        base = await self._base()
-        headers = await self._headers()
-        async with aiohttp.ClientSession() as session:
-            try:
-                await self._reconcile_member(session, base, headers, after, include_bots)
-            except Exception as exc:
-                log.error("on_member_update error for %s: %s", after.id, exc)
+        try:
+            await self._reconcile_member(after, include_bots)
+        except Exception as exc:
+            log.error("on_member_update error for %s: %s", after.id, exc)
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member) -> None:
-        # PRESENCE_UPDATE carries status and activities changes.
         if not await self.config.guild(after.guild).enabled():
             return
-        status_changed = before.status != after.status
-        activity_changed = before.activities != after.activities
-        if not status_changed and not activity_changed:
+        if before.status == after.status and before.activities == after.activities:
             return
         include_bots = await self.config.guild(after.guild).include_bots()
-        base = await self._base()
-        headers = await self._headers()
-        async with aiohttp.ClientSession() as session:
-            try:
-                await self._reconcile_member(session, base, headers, after, include_bots)
-            except Exception as exc:
-                log.error("on_presence_update error for %s: %s", after.id, exc)
+        try:
+            await self._reconcile_member(after, include_bots)
+        except Exception as exc:
+            log.error("on_presence_update error for %s: %s", after.id, exc)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
@@ -354,26 +364,19 @@ class pixelagents(commands.Cog):
         if self._status_str(member) is None:
             return
         include_bots = await self.config.guild(member.guild).include_bots()
-        base = await self._base()
-        headers = await self._headers()
-        async with aiohttp.ClientSession() as session:
-            try:
-                await self._reconcile_member(session, base, headers, member, include_bots)
-            except Exception as exc:
-                log.error("on_member_join error for %s: %s", member.id, exc)
+        try:
+            await self._reconcile_member(member, include_bots)
+        except Exception as exc:
+            log.error("on_member_join error for %s: %s", member.id, exc)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
         if not await self.config.guild(member.guild).enabled():
             return
-        base = await self._base()
-        headers = await self._headers()
-        async with aiohttp.ClientSession() as session:
-            try:
-                await self._despawn(session, base, headers, member.guild.id, member.id)
-            except Exception as exc:
-                log.error("on_member_remove error for %s: %s", member.id, exc)
-        self._cache.pop((member.guild.id, member.id), None)
+        try:
+            await self._close_agent(member.guild.id, member.id)
+        except Exception as exc:
+            log.error("on_member_remove error for %s: %s", member.id, exc)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -383,23 +386,22 @@ class pixelagents(commands.Cog):
             return
         guild_id = message.guild.id
         user_id = message.author.id
-        if (guild_id, user_id) not in self._cache:
+        if (guild_id, user_id) not in self._agents:
             return
+        agent_id = self._agent_id(user_id)
         content = message.content or ""
         if len(content) > 40:
             content = content[:40] + "…"
-        base = await self._base()
-        headers = await self._headers()
-        async with aiohttp.ClientSession() as session:
-            try:
-                await self._tool_start(session, base, headers, guild_id, user_id,
-                                       "incoming-message", "Message", content)
-            except Exception as exc:
-                log.error("on_message tool_start error for %s: %s", user_id, exc)
+        tool_id = f"msg-{message.id}"
+        await self._send({
+            "type": "agentToolStart",
+            "id": agent_id,
+            "toolId": tool_id,
+            "toolName": "Message",
+            "status": content,
+        })
         delay = await self.config.message_tool_clear_delay()
-        asyncio.get_event_loop().create_task(
-            self._clear_tool_after_delay(guild_id, user_id, delay=delay)
-        )
+        asyncio.get_event_loop().create_task(self._clear_tool_after_delay(agent_id, delay))
 
     # ------------------------------------------------------------------
     # Commands
@@ -414,44 +416,36 @@ class pixelagents(commands.Cog):
 
     @pixelagents_group.command(name="status")
     async def cmd_status(self, ctx: commands.Context) -> None:
-        """Show current Pixelagents configuration and guild status."""
-        base_url = await self.config.base_url()
-        api_key = await self.config.api_key()
-        timeout = await self.config.timeout_seconds()
+        """Show current Pixelagents configuration and connection status."""
+        producer_url = await self.config.producer_url()
         clear_delay = await self.config.message_tool_clear_delay()
+        editor_role_id = await self.config.editor_role_id()
         enabled = await self.config.guild(ctx.guild).enabled()
         include_bots = await self.config.guild(ctx.guild).include_bots()
-        tracked = sum(1 for (gid, _) in self._cache if gid == ctx.guild.id)
+        tracked = sum(1 for (gid, _) in self._agents if gid == ctx.guild.id)
+        connected = self._ws is not None and not self._ws.closed
 
         embed = discord.Embed(title="Pixelagents Status", color=discord.Color.blurple())
-        embed.add_field(name="Base URL", value=base_url, inline=False)
-        embed.add_field(name="API Key", value="Set" if api_key else "Not set", inline=True)
-        embed.add_field(name="Timeout", value=f"{timeout}s", inline=True)
+        embed.add_field(name="Producer URL", value=producer_url, inline=False)
+        embed.add_field(name="Connected", value="Yes" if connected else "No", inline=True)
         embed.add_field(name="Msg Tool Clear Delay", value=f"{clear_delay}s", inline=True)
+        embed.add_field(
+            name="Editor Role ID",
+            value=str(editor_role_id) if editor_role_id else "Not set",
+            inline=True,
+        )
         embed.add_field(name="Guild Enabled", value="Yes" if enabled else "No", inline=True)
         embed.add_field(name="Include Bots", value="Yes" if include_bots else "No", inline=True)
         embed.add_field(name="Tracked Agents", value=str(tracked), inline=True)
 
-        try:
-            base = await self._base()
-            headers = await self._headers()
-            async with aiohttp.ClientSession() as session:
-                agents = await self._list_agents(session, base, headers)
-            if agents is not None:
-                embed.add_field(name="Remote Agent Count", value=str(len(agents)), inline=True)
-            else:
-                embed.add_field(name="Remote Agent Count", value="unavailable", inline=True)
-        except Exception:
-            embed.add_field(name="Remote Agent Count", value="error", inline=True)
-
         await self._reply(ctx, embed=embed)
 
-    @pixelagents_group.command(name="baseurl")
-    @app_commands.describe(url="Node-RED Agent Control API base URL")
-    async def cmd_baseurl(self, ctx: commands.Context, url: str) -> None:
-        """Set the Node-RED base URL."""
-        await self.config.base_url.set(url)
-        await self._reply(ctx, f"Base URL set to `{url}`.")
+    @pixelagents_group.command(name="producerurl")
+    @app_commands.describe(url="Producer WebSocket URL (default: ws://standalone:3210/ws/producer)")
+    async def cmd_producerurl(self, ctx: commands.Context, url: str) -> None:
+        """Set the producer WebSocket URL."""
+        await self.config.producer_url.set(url)
+        await self._reply(ctx, f"Producer URL set to `{url}`.")
 
     @pixelagents_group.command(name="toolcleardelay")
     @app_commands.describe(seconds="Seconds to keep the message activity indicator visible")
@@ -463,22 +457,16 @@ class pixelagents(commands.Cog):
         await self.config.message_tool_clear_delay.set(seconds)
         await self._reply(ctx, f"Message tool clear delay set to `{seconds}s`.")
 
-    @pixelagents_group.command(name="key")
-    async def cmd_key(self, ctx: commands.Context, token: Optional[str] = None) -> None:
-        """Set the Agent Control API bearer token. Slash: opens a secure modal. Prefix: [p]pixelagents key <token>"""
-        if ctx.interaction:
-            modal = PixelAgentsKeyModal(self)
-            await ctx.interaction.response.send_modal(modal)
-            return
-        if not token:
-            await ctx.send("Please provide the API key: `[p]pixelagents key <token>`")
-            return
-        await self.config.api_key.set(token)
-        try:
-            await ctx.message.delete()
-        except discord.HTTPException:
-            pass
-        await ctx.send("API key set.")
+    @pixelagents_group.command(name="editorrole")
+    @app_commands.describe(role="Discord role that grants webview editor access (omit to clear)")
+    async def cmd_editorrole(self, ctx: commands.Context, role: Optional[discord.Role] = None) -> None:
+        """Set the Discord role that grants webview editor access. Omit to clear."""
+        if role is None:
+            await self.config.editor_role_id.set(None)
+            await self._reply(ctx, "Editor role cleared.")
+        else:
+            await self.config.editor_role_id.set(role.id)
+            await self._reply(ctx, f"Editor role set to `{role.name}` (ID: {role.id}).")
 
     @pixelagents_group.command(name="enable")
     async def cmd_enable(self, ctx: commands.Context) -> None:

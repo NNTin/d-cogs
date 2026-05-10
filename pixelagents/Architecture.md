@@ -4,177 +4,181 @@
 
 `pixelagents` is a Red DiscordBot cog that projects Discord presence into the
 Pixelpipes webview. It observes enabled guilds, maps each visible Discord member
-to one Node-RED overlay-managed agent, and drives lifecycle changes through the
-pixel-agents-node-red Agent Control API.
-
-The cog is intentionally an integration layer. It does not host a webview, does
-not speak WebSocket directly to Pixelpipes, and does not require changes to
-Pixelpipes or Node-RED.
+to a Pixelpipes agent, and drives lifecycle changes through a persistent
+WebSocket connection directly to the Pixelpipes standalone host.
 
 ```text
 Discord gateway events
   -> Red cog: pixelagents
-  -> HTTPS Agent Control API
-  -> pixel-agents-node-red
-  -> Pixelpipes standalone host events
+  -> ws://standalone:3210/ws/producer  (internal Docker network)
+  -> Pixelpipes standalone host
   -> Pixelpipes webview
 ```
+
+The cog speaks WebSocket directly to Pixelpipes. Node-RED is not in this path.
 
 ## Configuration Model
 
 Global configuration:
 
-- `base_url`: Node-RED base URL. Default: `https://pp.lair.nntin.xyz/`.
-- `api_key`: bearer token for the Agent Control API.
-- `timeout_seconds`: HTTP request timeout. Default: `10`.
+- `producer_url`: Pixelpipes producer WebSocket URL.
+  Default: `ws://standalone:3210/ws/producer`.
+- `message_tool_clear_delay`: seconds to keep the Discord message indicator
+  visible. Default: `2.0`.
+- `editor_role_id`: Discord role ID whose members may edit webview
+  furniture/layout via Discord OAuth. Default: `None` (no role configured).
 
 Guild configuration:
 
 - `enabled`: whether the guild is mirrored into Pixelpipes. Default: `false`.
 - `include_bots`: whether bot users are mirrored. Default: `true`.
 
-Configuration is managed by admin-only commands. The API key command deletes the
-invoking Discord message when possible and status output only reports whether a
-key is set.
+Configuration is managed by admin-only commands.
 
-## Agent Identity And Payload Mapping
+## Agent Identity
 
-Each Discord member gets a stable `agentKey`:
+Each Discord user maps to a deterministic Pixelpipes agent ID:
 
-```text
-discord:<guild_id>:<user_id>
+```python
+_JS_MAX_SAFE = (1 << 53) - 1  # 9007199254740991
+
+def _discord_id_to_agent_id(user_id: int) -> int:
+    mapped = user_id % _JS_MAX_SAFE
+    return -(mapped if mapped != 0 else _JS_MAX_SAFE)
 ```
 
-The value is stable across nickname changes and avoids collisions when the same
-Discord user appears in multiple guilds.
+Properties:
+- Stable across cog restarts (derived from Discord user ID only).
+- Always negative — does not collide with Node-RED's positive overlay IDs or
+  Pixelpipes' own positive agent IDs.
+- JavaScript-safe: magnitude ≤ 2^53 - 1.
+- Collisions are logged at WARNING level if they occur (unlikely in practice).
 
-The cog sends only fields accepted by the current Agent Control API:
+## Producer Protocol
 
-| Discord concept | Agent Control API field | Example |
-|---|---|---|
-| Guild member identity | `agentKey` | `discord:123:456` |
-| Guild display name | `agentName` | `Tin` |
-| Presence label | `folderName` | `online`, `idle`, `dnd` |
-
-Spawn payload:
+On connection the cog sends:
 
 ```json
-{
-  "agentKey": "discord:123:456",
-  "agentName": "Tin",
-  "folderName": "online",
-  "selected": false
-}
+{ "type": "producerHello", "capabilities": ["auth-check"] }
 ```
 
-Display name update payload:
+This registers the cog as a Discord producer. The standalone host routes
+`producerAuthCheckRequest` messages only to producers that advertise the
+`auth-check` capability.
 
-```json
-{
-  "agentName": "New Nickname"
-}
-```
+### Bootstrap
 
-The current PATCH endpoint supports `agentName` but not `folderName`. To change
-the visible presence label for an already spawned member, the cog despawns and
-respawns that member.
+When the standalone host sends `producerBootstrapRequest`, the cog replies
+with `existingAgents` listing all currently tracked agents.
 
-## Presence Lifecycle
-
-Presence mapping:
+### Presence Lifecycle
 
 | Discord status | Cog behavior |
 |---|---|
-| `online` | Ensure agent is spawned with `folderName: "online"` |
-| `idle` | Ensure agent is spawned with `folderName: "idle"` |
-| `dnd` | Ensure agent is spawned with `folderName: "dnd"` |
-| `offline` | Despawn agent |
-| `invisible` | Despawn agent |
+| `online` | `agentCreated` with `folderName: "online"` + `agentTeamInfo` + `agentStatus` |
+| `idle` | `agentCreated` with `folderName: "idle"` + `agentTeamInfo` + `agentStatus` |
+| `dnd` | `agentCreated` with `folderName: "dnd"` + `agentTeamInfo` + `agentStatus` |
+| `offline` | `agentClosed` |
+| `invisible` | `agentClosed` |
 
-Main flows:
+A presence label change (e.g. `online` → `dnd`) sends `agentClosed` followed
+by a new `agentCreated` because `folderName` is immutable after creation.
 
-- Cog load: reconcile only guilds that are already enabled.
-- Guild enable: persist `enabled=true`, then full sync all eligible members.
-- Guild disable: persist `enabled=false`, then despawn all tracked members for
-  that guild.
-- Manual sync: list guild members and reconcile each member against current
-  Discord status and bot inclusion settings.
-- Member update: if status or display name changed, reconcile only that member.
-- Member join: reconcile the joined member.
-- Member remove: despawn that member.
+A display name change sends `agentTeamInfo` with the new `agentName`.
 
-Bot handling:
+An `agentStatus` of `"active"` is sent when the member has non-custom Discord
+rich presence; `"waiting"` otherwise.
 
-- Bots are mirrored by default.
-- If `include_bots=false`, bot users are treated as excluded and despawned.
-- The bot account itself follows the same rule.
+After each state change, the cog sends `existingAgents` to let the standalone
+reconcile its overlay.
 
-## HTTP Client Behavior
+### Discord Message Activity
 
-The cog uses asynchronous HTTP requests with:
+When a tracked member sends a Discord message:
 
-```text
-Authorization: Bearer <api_key>
-Content-Type: application/json
+```json
+{ "type": "agentToolStart", "id": <agentId>, "toolId": "msg-<messageId>",
+  "toolName": "Message", "status": "<truncated content>" }
 ```
 
-Expected operations:
+After `message_tool_clear_delay` seconds:
 
-- `POST {base_url}/api/agents` for spawn.
-- `PATCH {base_url}/api/agents/{agentKey}/state` for mutable metadata such as
-  `agentName`.
-- `DELETE {base_url}/api/agents/{agentKey}` for despawn.
-- `GET {base_url}/api/agents` for diagnostics and future reconciliation checks.
+```json
+{ "type": "agentToolsClear", "id": <agentId> }
+```
 
-Response handling:
+## Editor Authorization
 
-- `201` spawn success.
-- `200` patch/list success.
-- `204` despawn success.
-- `404` on delete is treated as already despawned.
-- `409` on spawn is treated as already spawned; the cog patches mutable state.
-- `401` is reported as configuration/auth failure.
-- Network errors are logged and surfaced in command responses for manual
-  commands.
+The standalone host sends auth-check requests when a browser completes Discord
+OAuth login:
 
-The client must normalize URL joining so `https://pp.lair.nntin.xyz/` and
-`https://pp.lair.nntin.xyz` both resolve to the same endpoint paths.
+```json
+{ "type": "producerAuthCheckRequest", "requestId": "<uuid>",
+  "discordUserId": "<id>" }
+```
 
-## Reliability Notes
+The cog checks:
+1. Is the Discord user a bot owner (`bot.is_owner`)? → allow
+2. Is the `editor_role_id` configured and does the user have that role in any
+   enabled guild? → allow
+3. Otherwise → deny
 
-Presence events can arrive quickly and repeatedly. The implementation should
-make reconcile operations idempotent:
+```json
+{ "type": "producerAuthCheckReply", "requestId": "<uuid>", "allowed": true }
+```
 
-- Despawning an already missing agent is success.
-- Spawning an already existing agent is success after patching mutable fields.
-- Status label changes use delete-then-spawn because `folderName` is immutable
-  through the current PATCH API.
+The auth policy:
+- **Allow** bot owners.
+- **Allow** members with the configured editor role.
+- **Deny** everyone else, including if the role is not configured, the user is
+  not in any enabled guild, or Discord lookup fails.
 
-The cog should keep a small in-memory cache per guild/member with the last
-successfully applied `folderName` and `agentName`. The cache is an optimization,
-not the source of truth; manual sync can rebuild state from Discord presence.
+## Connection and Reconnect
+
+The cog maintains a persistent WebSocket connection:
+- On cog load, opens connection and runs a full guild sync.
+- On disconnect, retries with exponential backoff (1s → 2s → 4s … max 60s).
+- On reconnect, re-sends `producerHello` and re-runs full guild sync.
+- Deterministic agent IDs prevent duplicate agents after reconnect.
 
 ## Security And Privacy
 
-The cog sends Discord user IDs, guild IDs, display names, bot status by
-inclusion behavior, and presence labels to the configured Node-RED endpoint.
-It does not persist message content.
+- Discord user IDs, guild IDs, display names, presence labels, and message
+  content (truncated to 40 chars) are sent to the producer endpoint.
+- The producer endpoint is on the internal Docker network only — not exposed
+  through Traefik.
+- No bearer tokens or API keys are needed (Docker network is the trust boundary).
 
-The API key is sensitive:
+## Network
 
-- Never log it.
-- Never render it in Discord.
-- Delete the setup command message when possible.
-- Keep command status limited to "set" or "not set".
+The Red bot container must be attached to the `pixel-agents` Docker network so
+that `standalone:3210` resolves from inside the container. The `redstack`
+Docker Compose template includes both `redstack` and `pixel-agents` networks.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `[p]pixelagents status` | Show configuration and connection status |
+| `[p]pixelagents enable` | Enable guild mirroring and run a full sync |
+| `[p]pixelagents disable` | Disable guild mirroring and despawn all agents |
+| `[p]pixelagents sync` | Manually reconcile guild members |
+| `[p]pixelagents despawnall` | Despawn all tracked agents without disabling |
+| `[p]pixelagents includebots <true/false>` | Toggle bot user mirroring |
+| `[p]pixelagents producerurl <url>` | Override the producer WebSocket URL |
+| `[p]pixelagents toolcleardelay <seconds>` | Set message indicator duration |
+| `[p]pixelagents editorrole [role]` | Set or clear the editor role |
 
 ## End-to-End Verification
 
-After implementation and configuration:
-
-1. Set `base_url` to `https://pp.lair.nntin.xyz/`.
-2. Set the Agent Control API bearer key.
-3. Enable the target guild.
-4. Open `https://pixelpipes-webview-ui.vercel.app/?host=https://pa.lair.nntin.xyz`.
-5. Confirm online, idle, and dnd users appear as agents.
-6. Confirm each agent label shows the Discord display name and presence label.
-7. Set a user offline and confirm their agent despawns.
+1. Ensure the `pixel-agents` Docker network exists and both `standalone` and
+   `red-pico` containers are attached to it.
+2. Load the cog in Red. `[p]pixelagents status` should show "Connected: Yes".
+3. Enable the target guild: `[p]pixelagents enable`.
+4. Open `https://pa.lair.nntin.xyz` in a browser.
+5. Confirm online, idle, and dnd users appear as agents in the webview.
+6. Set a user offline — confirm their agent despawns.
+7. Send a Discord message from a tracked user — confirm the tool bubble appears.
+8. For editor auth: complete Discord OAuth at `/api/discord/auth/start`. Bot
+   owners and configured role members should be able to save layouts; others
+   should be denied.

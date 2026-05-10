@@ -33,6 +33,8 @@ class _ActivityType:
 
 
 _discord.ActivityType = _ActivityType
+_discord.Object = MagicMock
+_discord.Role = MagicMock
 
 
 # discord.Interaction stub
@@ -115,6 +117,72 @@ _discord.app_commands = _discord_app_commands
 sys.modules["discord.app_commands"] = _discord_app_commands
 
 sys.modules["discord"] = _discord
+
+
+# --- aiohttp ---
+class _WSMsgType:
+    TEXT = 1
+    BINARY = 2
+    PING = 9
+    PONG = 10
+    CLOSE = 8
+    CLOSED = 256
+    ERROR = 257
+
+
+class _FakeWSMessage:
+    def __init__(self, data: str = "", msg_type: int = 1):
+        self.type = msg_type
+        self.data = data
+
+
+class _FakeClientWebSocketResponse:
+    def __init__(self, messages=None):
+        self._messages = list(messages or [])
+        self.closed = False
+        self._sent: list = []
+
+    async def send_str(self, data: str) -> None:
+        self._sent.append(data)
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._messages:
+            self.closed = True
+            raise StopAsyncIteration
+        return self._messages.pop(0)
+
+
+class _FakeClientSession:
+    def __init__(self, ws_response=None):
+        self._ws_response = ws_response or _FakeClientWebSocketResponse()
+        self.closed = False
+
+    async def ws_connect(self, url: str, **kwargs):
+        return self._ws_response
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        await self.close()
+
+
+_aiohttp = _make_stub_module(
+    "aiohttp",
+    ClientSession=_FakeClientSession,
+    ClientWebSocketResponse=_FakeClientWebSocketResponse,
+    WSMsgType=_WSMsgType,
+)
+sys.modules["aiohttp"] = _aiohttp
 
 
 # --- redbot ---
