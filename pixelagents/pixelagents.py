@@ -458,6 +458,9 @@ class pixelagents(commands.Cog):
             return
         if label:
             self._presence_cache[(guild_id, user_id)] = label
+            if cached is not None:
+                # Same stable toolId — webview deduplicates on toolId so clear first
+                await self._send({"type": "agentToolsClear", "id": agent_id})
             await self._send_presence_tool(agent_id, label)
         else:
             self._presence_cache.pop((guild_id, user_id), None)
