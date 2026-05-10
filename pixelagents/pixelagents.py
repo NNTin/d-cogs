@@ -365,7 +365,6 @@ class pixelagents(commands.Cog):
         if folder != cached_folder:
             self._agents[(guild_id, user_id)] = (folder, name)
             agent_id = self._agent_id(user_id)
-            await self._send({"type": "agentClosed", "id": agent_id})
             await self._send({"type": "agentCreated", "id": agent_id, "folderName": folder})
             if name != cached_name:
                 await self._send({"type": "agentTeamInfo", "id": agent_id, "agentName": name})
