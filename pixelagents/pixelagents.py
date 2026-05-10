@@ -58,6 +58,8 @@ class pixelagents(commands.Cog):
         )
         # Active agents: (guild_id, user_id) -> (folder_name, display_name)
         self._agents: Dict[Tuple[int, int], Tuple[str, str]] = {}
+        # Current rich presence label per agent, absent when no presence
+        self._presence_cache: Dict[Tuple[int, int], str] = {}
         # Known collisions (agent_id) already logged
         self._logged_collisions: Set[int] = set()
         # WebSocket state
@@ -331,6 +333,27 @@ class pixelagents(commands.Cog):
                 errors += 1
         return f"Sync complete. Errors: {errors}." if errors else "Sync complete."
 
+    def _pick_presence_activity(self, member: discord.Member) -> Optional[discord.Activity]:
+        activities = [a for a in member.activities if a.type != discord.ActivityType.custom]
+        for a in activities:
+            if a.type == discord.ActivityType.listening:
+                return a
+        return activities[0] if activities else None
+
+    def _build_presence_label(self, member: discord.Member) -> Optional[str]:
+        activity = self._pick_presence_activity(member)
+        if activity is None:
+            return None
+        if activity.type == discord.ActivityType.listening:
+            if isinstance(activity, discord.Spotify) and activity.title and activity.artist:
+                return f"{activity.title} — {activity.artist}"
+            details = getattr(activity, "details", None)
+            state = getattr(activity, "state", None)
+            if details and state:
+                return f"{details} — {state}"
+            return activity.name or None
+        return activity.name or None
+
     def _status_str(self, member: discord.Member) -> Optional[str]:
         s = str(member.status)
         return s if s in _VISIBLE_STATUSES else None
@@ -372,6 +395,7 @@ class pixelagents(commands.Cog):
         elif name != cached_name:
             self._agents[(guild_id, user_id)] = (folder, name)
             await self._send({"type": "agentTeamInfo", "id": self._agent_id(user_id), "agentName": name})
+        await self._update_presence_tool(guild_id, user_id, member)
 
     def _is_user_active_in_other_guild(self, guild_id: int, user_id: int) -> bool:
         return any(gid != guild_id and uid == user_id for (gid, uid) in self._agents)
@@ -390,12 +414,17 @@ class pixelagents(commands.Cog):
             status = self._agent_status(member)
             await self._send({"type": "agentStatus", "id": agent_id, "status": status})
         await self._send_existing_agents()
+        label = self._build_presence_label(member)
+        if label:
+            self._presence_cache[(guild_id, user_id)] = label
+            await self._send_presence_tool(agent_id, label)
 
     async def _close_agent(self, guild_id: int, user_id: int) -> None:
         if (guild_id, user_id) not in self._agents:
             return
         agent_id = self._agent_id(user_id)
         del self._agents[(guild_id, user_id)]
+        self._presence_cache.pop((guild_id, user_id), None)
         if not self._is_user_active_in_other_guild(guild_id, user_id):
             await self._send({"type": "agentClosed", "id": agent_id})
         await self._send_existing_agents()
@@ -405,9 +434,39 @@ class pixelagents(commands.Cog):
         for key in keys:
             await self._close_agent(*key)
 
-    async def _clear_tool_after_delay(self, agent_id: int, delay: float) -> None:
+    async def _send_presence_tool(self, agent_id: int, label: str) -> None:
+        await self._send({
+            "type": "agentToolStart",
+            "id": agent_id,
+            "toolId": f"rp-{agent_id}",
+            "toolName": "Activity",
+            "status": label,
+        })
+
+    async def _update_presence_tool(
+        self, guild_id: int, user_id: int, member: discord.Member
+    ) -> None:
+        agent_id = self._agent_id(user_id)
+        label = self._build_presence_label(member)
+        cached = self._presence_cache.get((guild_id, user_id))
+        if label == cached:
+            return
+        if label:
+            self._presence_cache[(guild_id, user_id)] = label
+            await self._send_presence_tool(agent_id, label)
+        else:
+            self._presence_cache.pop((guild_id, user_id), None)
+            await self._send({"type": "agentToolsClear", "id": agent_id})
+
+    async def _clear_tool_after_delay(
+        self, agent_id: int, delay: float, guild_id: int = 0, user_id: int = 0
+    ) -> None:
         await asyncio.sleep(delay)
         await self._send({"type": "agentToolsClear", "id": agent_id})
+        if guild_id and user_id:
+            label = self._presence_cache.get((guild_id, user_id))
+            if label:
+                await self._send_presence_tool(agent_id, label)
 
     # ------------------------------------------------------------------
     # Reply helper
@@ -505,7 +564,9 @@ class pixelagents(commands.Cog):
             "status": content,
         })
         delay = await self.config.message_tool_clear_delay()
-        asyncio.get_event_loop().create_task(self._clear_tool_after_delay(agent_id, delay))
+        asyncio.get_event_loop().create_task(
+            self._clear_tool_after_delay(agent_id, delay, guild_id, user_id)
+        )
 
     # ------------------------------------------------------------------
     # Commands
