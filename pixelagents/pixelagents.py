@@ -281,6 +281,30 @@ class pixelagents(commands.Cog):
     async def _check_auth(self, user_id: int) -> bool:
         return await self._can_edit_layout_user(user_id)
 
+    async def _get_auth_member(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+    ) -> Optional[discord.Member]:
+        member = guild.get_member(user_id)
+        if member is not None:
+            return member
+
+        fetch_member = getattr(guild, "fetch_member", None)
+        if fetch_member is None:
+            return None
+
+        try:
+            return await fetch_member(user_id)
+        except Exception as exc:
+            log.debug(
+                "pixelagents: failed to fetch member %d in guild %s for auth check: %s",
+                user_id,
+                getattr(guild, "id", "unknown"),
+                exc,
+            )
+            return None
+
     async def _can_edit_layout_user(self, user_id: int) -> bool:
         if user_id == 0:
             return False
@@ -290,7 +314,7 @@ class pixelagents(commands.Cog):
         for guild in self.bot.guilds:
             if not await self.config.guild(guild).enabled():
                 continue
-            member = guild.get_member(user_id)
+            member = await self._get_auth_member(guild, user_id)
             if member is None:
                 continue
             permissions = getattr(member, "guild_permissions", None)

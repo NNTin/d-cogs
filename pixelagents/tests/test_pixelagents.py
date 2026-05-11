@@ -442,6 +442,34 @@ class TestCheckAuth(unittest.IsolatedAsyncioTestCase):
         self.cog.config.guild = MagicMock(return_value=guild_cfg)
 
         self.assertTrue(await self.cog._check_auth(12345))
+        guild.fetch_member.assert_not_called()
+
+    async def test_uncached_role_match_fetches_member_and_allows(self):
+        role_id = 999
+        self.cog.config._global["editor_role_id"] = role_id
+
+        role = MagicMock()
+        role.id = role_id
+
+        member = MagicMock()
+        member.roles = [role]
+        member.guild_permissions.administrator = False
+
+        guild = MagicMock()
+        guild.get_member = MagicMock(return_value=None)
+        guild.fetch_member = AsyncMock(return_value=member)
+
+        self.cog.bot.guilds = [guild]
+
+        async def _enabled():
+            return True
+
+        guild_cfg = MagicMock()
+        guild_cfg.enabled = _enabled
+        self.cog.config.guild = MagicMock(return_value=guild_cfg)
+
+        self.assertTrue(await self.cog._check_auth(12345))
+        guild.fetch_member.assert_awaited_once_with(12345)
 
     async def test_enabled_guild_admin_allows(self):
         member = MagicMock()
@@ -460,6 +488,26 @@ class TestCheckAuth(unittest.IsolatedAsyncioTestCase):
         self.cog.config.guild = MagicMock(return_value=guild_cfg)
 
         self.assertTrue(await self.cog._check_auth(12345))
+
+    async def test_uncached_admin_fetches_member_and_allows(self):
+        member = MagicMock()
+        member.guild_permissions.administrator = True
+        member.roles = []
+
+        guild = MagicMock()
+        guild.get_member = MagicMock(return_value=None)
+        guild.fetch_member = AsyncMock(return_value=member)
+        self.cog.bot.guilds = [guild]
+
+        async def _enabled():
+            return True
+
+        guild_cfg = MagicMock()
+        guild_cfg.enabled = _enabled
+        self.cog.config.guild = MagicMock(return_value=guild_cfg)
+
+        self.assertTrue(await self.cog._check_auth(12345))
+        guild.fetch_member.assert_awaited_once_with(12345)
 
     async def test_no_role_match_denied(self):
         role_id = 999
@@ -483,6 +531,25 @@ class TestCheckAuth(unittest.IsolatedAsyncioTestCase):
         self.cog.config.guild = MagicMock(return_value=guild_cfg)
 
         self.assertFalse(await self.cog._check_auth(12345))
+
+    async def test_uncached_member_fetch_failure_denied(self):
+        role_id = 999
+        self.cog.config._global["editor_role_id"] = role_id
+
+        guild = MagicMock()
+        guild.get_member = MagicMock(return_value=None)
+        guild.fetch_member = AsyncMock(side_effect=Exception("not found"))
+        self.cog.bot.guilds = [guild]
+
+        async def _enabled():
+            return True
+
+        guild_cfg = MagicMock()
+        guild_cfg.enabled = _enabled
+        self.cog.config.guild = MagicMock(return_value=guild_cfg)
+
+        self.assertFalse(await self.cog._check_auth(12345))
+        guild.fetch_member.assert_awaited_once_with(12345)
 
 
 # ---------------------------------------------------------------------------
