@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import logging
+import mimetypes
+from pathlib import Path
 import re
 import time
 import uuid
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 import aiohttp
 import discord
@@ -22,9 +25,18 @@ _LAYOUT_REQUEST_TIMEOUT = 10.0
 _MAX_LAYOUTS_PER_USER = 20
 _MAX_LAYOUT_BYTES = 1024 * 1024
 _LAYOUT_NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
+_WEBVIEW_CACHE_CONTROL = "public, max-age=3600"
 
 # JavaScript Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991
 _JS_MAX_SAFE = (1 << 53) - 1
+
+
+def dashboard_page(*args, **kwargs):
+    def decorator(func: Callable):
+        func.__dashboard_decorator_params__ = (args, kwargs)
+        return func
+
+    return decorator
 
 
 def _discord_id_to_agent_id(user_id: int) -> int:
@@ -70,6 +82,92 @@ class pixelagents(commands.Cog):
         self._connect_task: Optional[asyncio.Task] = None
         self._pending_layout_requests: Dict[str, asyncio.Future] = {}
         self._closing = False
+
+    # ------------------------------------------------------------------
+    # Dashboard webview hosting
+    # ------------------------------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_dashboard_cog_add(self, dashboard_cog: commands.Cog) -> None:
+        if not hasattr(dashboard_cog, "rpc"):
+            return
+        third_parties = getattr(dashboard_cog.rpc, "third_parties_handler", None)
+        if third_parties is None:
+            return
+        third_parties.add_third_party(self, overwrite=True)
+
+    def _webview_dist_root(self) -> Path:
+        return Path(__file__).with_name("webview_dist")
+
+    def _resolve_webview_asset(self, asset_path: str) -> Optional[Path]:
+        clean_path = asset_path.strip().lstrip("/")
+        if not clean_path or "\x00" in clean_path:
+            return None
+
+        root = self._webview_dist_root().resolve()
+        candidate = (root / clean_path).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return None
+        return candidate if candidate.is_file() else None
+
+    def _content_type_for_asset(self, asset_path: str) -> str:
+        if asset_path.endswith(".js"):
+            return "text/javascript; charset=utf-8"
+        if asset_path.endswith(".css"):
+            return "text/css; charset=utf-8"
+        if asset_path.endswith(".json") or asset_path.endswith(".webmanifest"):
+            return "application/json; charset=utf-8"
+        if asset_path.endswith(".svg"):
+            return "image/svg+xml"
+        if asset_path.endswith(".ico"):
+            return "image/x-icon"
+        if asset_path.endswith(".ttf"):
+            return "font/ttf"
+        guessed, _ = mimetypes.guess_type(asset_path)
+        return guessed or "application/octet-stream"
+
+    @dashboard_page(name=None, description="Pixel Agents webview.", methods=("GET",))
+    async def dashboard_webview(self, **kwargs) -> dict:
+        index_path = self._resolve_webview_asset("index.html")
+        if index_path is None:
+            return {
+                "status": 1,
+                "error_code": 503,
+                "error_message": "Pixel Agents webview assets are not installed.",
+            }
+
+        return {
+            "status": 0,
+            "web_content": {
+                "standalone": True,
+                "source": index_path.read_text(encoding="utf-8"),
+            },
+        }
+
+    @dashboard_page(name="static", description="Pixel Agents static asset.", methods=("GET", "HEAD"))
+    async def dashboard_static(self, asset_path: str, **kwargs) -> dict:
+        resolved = self._resolve_webview_asset(asset_path)
+        if resolved is None:
+            return {
+                "status": 1,
+                "error_code": 404,
+                "error_message": "Pixel Agents asset not found.",
+            }
+
+        body = b"" if kwargs.get("method") == "HEAD" else resolved.read_bytes()
+        return {
+            "status": 0,
+            "raw_response": {
+                "status": 200,
+                "content_type": self._content_type_for_asset(asset_path),
+                "body_base64": base64.b64encode(body).decode("ascii"),
+                "headers": {
+                    "Cache-Control": _WEBVIEW_CACHE_CONTROL,
+                },
+            },
+        }
 
     # ------------------------------------------------------------------
     # ID helpers
@@ -418,6 +516,7 @@ class pixelagents(commands.Cog):
         if folder != cached_folder:
             self._agents[(guild_id, user_id)] = (folder, name)
             agent_id = self._agent_id(user_id)
+            await self._send({"type": "agentClosed", "id": agent_id})
             await self._send({"type": "agentCreated", "id": agent_id, "folderName": folder})
             if name != cached_name:
                 await self._send({"type": "agentTeamInfo", "id": agent_id, "agentName": name})

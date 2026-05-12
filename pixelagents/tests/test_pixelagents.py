@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import json
 import asyncio
+import base64
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from pixelagents.pixelagents import (
@@ -61,9 +64,12 @@ def _make_cog():
         "producer_url": "ws://standalone:3210/ws/producer",
         "message_tool_clear_delay": 2.0,
         "editor_role_id": None,
+        "broadcast_rich_presence": True,
+        "broadcast_messages": True,
     }
     cog.config = cfg
     cog._agents = {}
+    cog._presence_cache = {}
     cog._logged_collisions = set()
     cog._ws = None
     cog._ws_session = None
@@ -249,6 +255,53 @@ class TestSendHello(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg["type"], "producerHello")
         self.assertIn("auth-check", msg["capabilities"])
         self.assertIn("layout-control", msg["capabilities"])
+
+
+# ---------------------------------------------------------------------------
+# Tests: dashboard webview hosting
+# ---------------------------------------------------------------------------
+
+class TestDashboardWebviewHosting(unittest.IsolatedAsyncioTestCase):
+    async def test_static_asset_returns_raw_response(self):
+        cog = _make_cog()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "assets").mkdir()
+            (root / "assets" / "index-test.js").write_text("console.log('ok');", encoding="utf-8")
+            cog._webview_dist_root = lambda: root
+
+            result = await cog.dashboard_static("assets/index-test.js")
+
+        self.assertEqual(result["status"], 0)
+        raw = result["raw_response"]
+        self.assertEqual(raw["content_type"], "text/javascript; charset=utf-8")
+        self.assertEqual(raw["headers"]["Cache-Control"], "public, max-age=3600")
+        self.assertEqual(base64.b64decode(raw["body_base64"]).decode("utf-8"), "console.log('ok');")
+
+    async def test_static_asset_rejects_path_traversal(self):
+        cog = _make_cog()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "index.html").write_text("ok", encoding="utf-8")
+            cog._webview_dist_root = lambda: root
+
+            result = await cog.dashboard_static("../index.html")
+
+        self.assertEqual(result["status"], 1)
+        self.assertEqual(result["error_code"], 404)
+
+    async def test_dashboard_webview_returns_index_html(self):
+        cog = _make_cog()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "index.html").write_text("<!doctype html><div id=\"root\"></div>", encoding="utf-8")
+            cog._webview_dist_root = lambda: root
+
+            result = await cog.dashboard_webview()
+
+        self.assertEqual(result["status"], 0)
+        self.assertTrue(result["web_content"]["standalone"])
+        self.assertIn("root", result["web_content"]["source"])
 
 
 # ---------------------------------------------------------------------------
