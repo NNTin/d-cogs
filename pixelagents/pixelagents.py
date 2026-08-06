@@ -7,12 +7,13 @@ import json
 import logging
 import mimetypes
 from pathlib import Path
+import random
 import re
+import secrets
 import time
-import uuid
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-import aiohttp
+from aiohttp import WSMsgType, web
 import discord
 from discord import app_commands
 from redbot.core import Config, commands
@@ -21,7 +22,6 @@ from redbot.core.bot import Red
 log = logging.getLogger("red.d_cogs.pixelagents")
 
 _VISIBLE_STATUSES = {"online", "idle", "dnd"}
-_LAYOUT_REQUEST_TIMEOUT = 10.0
 _MAX_LAYOUTS_PER_USER = 20
 _MAX_LAYOUT_BYTES = 1024 * 1024
 _LAYOUT_NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
@@ -29,6 +29,60 @@ _WEBVIEW_CACHE_CONTROL = "public, max-age=3600"
 
 # JavaScript Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991
 _JS_MAX_SAFE = (1 << 53) - 1
+
+# How long an editor ticket minted by the dashboard page stays valid. Long
+# enough to survive a reconnect or a page left open; short enough that a leaked
+# URL fragment stops working the same day.
+_TICKET_TTL = 8 * 60 * 60
+
+# Bundled character palettes (char_0.png .. char_5.png).
+_PALETTE_COUNT = 6
+
+# Keys the AsyncAPI FurnitureAssetMessage allows. buildFurnitureCatalog emits
+# `furniturePath` on top of these for its own PNG loading; the contract sets
+# additionalProperties: false, so it is stripped before broadcast.
+_FURNITURE_KEYS = frozenset({
+    "id", "name", "label", "category", "file", "width", "height",
+    "footprintW", "footprintH", "isDesk", "canPlaceOnWalls", "groupId",
+    "canPlaceOnSurfaces", "backgroundTiles", "orientation", "state",
+    "mirrorSide", "rotationScheme", "animationGroup", "frame",
+})
+
+# Mutating client messages. Everything else a viewer sends is harmless, but
+# these change shared state and are dropped unless the socket is authorized.
+_EDITOR_MESSAGES = frozenset({"saveLayout", "saveAgentSeats", "importLayout"})
+
+# Upstream's Claude provider capabilities. The office uses these to pick the
+# reading vs typing animation; Discord activity labels are rendered the same
+# way, so we mirror the reference implementation's sets.
+_READING_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]
+_SUBAGENT_TOOL_NAMES = ["Task", "Agent"]
+
+# Injected ahead of the bundle so the office's WebSocket carries the editor
+# ticket. Upstream builds its socket URL as `<origin>/ws` with no room for a
+# credential, and Traefik routes /ws past the dashboard, so the session cookie
+# alone cannot identify the viewer. Wrapping the constructor keeps the vendored
+# bundle byte-identical to what upstream builds.
+_TICKET_SHIM = """<script>
+(function () {
+  var ticket = %s;
+  var Native = window.WebSocket;
+  function Patched(url, protocols) {
+    try {
+      if (typeof url === 'string' && url.indexOf('/ws') !== -1) {
+        url += (url.indexOf('?') === -1 ? '?' : '&') + 'ticket=' + encodeURIComponent(ticket);
+      }
+    } catch (e) { /* fall through with the original url */ }
+    return protocols === undefined ? new Native(url) : new Native(url, protocols);
+  }
+  Patched.prototype = Native.prototype;
+  Patched.CONNECTING = Native.CONNECTING;
+  Patched.OPEN = Native.OPEN;
+  Patched.CLOSING = Native.CLOSING;
+  Patched.CLOSED = Native.CLOSED;
+  window.WebSocket = Patched;
+})();
+</script>"""
 
 
 def dashboard_page(*args, **kwargs):
@@ -51,17 +105,23 @@ def _discord_id_to_agent_id(user_id: int) -> int:
 
 
 class pixelagents(commands.Cog):
-    """Mirror Discord guild presence into Pixelpipes via the producer WebSocket."""
+    """Serve the Pixel Agents office and mirror Discord guild presence into it."""
 
     def __init__(self, bot: Red) -> None:
         self.bot = bot
         self.config = Config.get_conf(self, identifier=0x706978656C61, force_registration=True)
         self.config.register_global(
-            producer_url="ws://standalone:3210/ws/producer",
+            ws_host="0.0.0.0",
+            ws_port=3210,
             message_tool_clear_delay=2.0,
             editor_role_id=None,
             broadcast_rich_presence=True,
             broadcast_messages=True,
+            # The office layout is owned by this cog now that there is no
+            # standalone host to hold it. None falls back to the bundled default.
+            layout=None,
+            # agent_id (as str) -> {palette, hueShift, seatId}
+            seats={},
         )
         self.config.register_guild(
             enabled=False,
@@ -72,15 +132,18 @@ class pixelagents(commands.Cog):
         )
         # Active agents: (guild_id, user_id) -> (folder_name, display_name)
         self._agents: Dict[Tuple[int, int], Tuple[str, str]] = {}
+        self._sync_task: Optional[asyncio.Task] = None
         # Current rich presence label per agent, absent when no presence
         self._presence_cache: Dict[Tuple[int, int], str] = {}
         # Known collisions (agent_id) already logged
         self._logged_collisions: Set[int] = set()
-        # WebSocket state
-        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
-        self._ws_session: Optional[aiohttp.ClientSession] = None
-        self._connect_task: Optional[asyncio.Task] = None
-        self._pending_layout_requests: Dict[str, asyncio.Future] = {}
+        # Office WebSocket server state
+        self._runner: Optional[web.AppRunner] = None
+        self._clients: Dict[web.WebSocketResponse, bool] = {}  # socket -> authorized
+        # Editor tickets minted by the dashboard page: ticket -> (user_id, expiry)
+        self._tickets: Dict[str, Tuple[int, float]] = {}
+        # Decoded sprite payloads, loaded once from webview_dist/assets/decoded/
+        self._assets: Dict[str, Any] = {}
         self._closing = False
 
     # ------------------------------------------------------------------
@@ -128,8 +191,35 @@ class pixelagents(commands.Cog):
         guessed, _ = mimetypes.guess_type(asset_path)
         return guessed or "application/octet-stream"
 
+    def _mint_ticket(self, user_id: int) -> str:
+        """Issue a short-lived editor ticket bound to a Discord user ID."""
+        now = time.time()
+        # Opportunistically drop expired tickets so the dict cannot grow without
+        # bound on a long-lived bot process.
+        for value, (_, expiry) in list(self._tickets.items()):
+            if expiry <= now:
+                del self._tickets[value]
+        ticket = secrets.token_urlsafe(32)
+        self._tickets[ticket] = (user_id, now + _TICKET_TTL)
+        return ticket
+
+    def _resolve_ticket(self, ticket: str) -> Optional[int]:
+        entry = self._tickets.get(ticket)
+        if entry is None:
+            return None
+        user_id, expiry = entry
+        if expiry <= time.time():
+            del self._tickets[ticket]
+            return None
+        return user_id
+
+    # `user_id` in the signature is what makes the dashboard treat this as a
+    # logged-in page and hand us the visitor's Discord ID. Do NOT also pass
+    # `context_ids` to the decorator: it skips the inference branch and files
+    # `user_id` under required_kwargs instead, which turns the page into a 404
+    # unless the caller appends `?user_id=`.
     @dashboard_page(name=None, description="Pixel Agents webview.", methods=("GET",))
-    async def dashboard_webview(self, **kwargs) -> dict:
+    async def dashboard_webview(self, user_id: int, **kwargs) -> dict:
         index_path = self._resolve_webview_asset("index.html")
         if index_path is None:
             return {
@@ -138,11 +228,22 @@ class pixelagents(commands.Cog):
                 "error_message": "Pixel Agents webview assets are not installed.",
             }
 
+        source = index_path.read_text(encoding="utf-8")
+        shim = _TICKET_SHIM % json.dumps(self._mint_ticket(user_id))
+        # Immediately after <head>, i.e. ahead of the bundle's own <script>.
+        # The bundle is a deferred module so a later inline script would still
+        # win, but relying on that is a trap for whoever edits this next.
+        match = re.search(r"<head[^>]*>", source, re.IGNORECASE)
+        if match:
+            source = source[: match.end()] + "\n" + shim + source[match.end():]
+        else:
+            source = shim + source
+
         return {
             "status": 0,
             "web_content": {
                 "standalone": True,
-                "source": index_path.read_text(encoding="utf-8"),
+                "source": source,
             },
         }
 
@@ -189,63 +290,140 @@ class pixelagents(commands.Cog):
                 break
 
     # ------------------------------------------------------------------
-    # WebSocket send helper
+    # Broadcast helpers
     # ------------------------------------------------------------------
+
+    async def _send_to(self, socket: web.WebSocketResponse, message: dict) -> None:
+        try:
+            await socket.send_str(json.dumps(message))
+        except Exception as exc:
+            log.debug("pixelagents: send error: %s", exc)
 
     async def _send(self, message: dict) -> None:
-        if self._ws is not None and not self._ws.closed:
-            try:
-                await self._ws.send_str(json.dumps(message))
-            except Exception as exc:
-                log.error("pixelagents: send error: %s", exc)
-
-    # ------------------------------------------------------------------
-    # Producer protocol messages
-    # ------------------------------------------------------------------
-
-    async def _send_hello(self) -> None:
-        await self._send({"type": "producerHello", "capabilities": ["auth-check", "layout-control"]})
-
-    async def _send_existing_agents(self) -> None:
-        seen: Set[int] = set()
-        agent_ids = []
-        folder_names: Dict[int, str] = {}
-        for (_, uid), (folder, _) in sorted(self._agents.items()):
-            if uid in seen:
+        """Broadcast a ServerMessage to every connected office client."""
+        if not self._clients:
+            return
+        try:
+            payload = json.dumps(message)
+        except TypeError as exc:
+            # A malformed message must not take down the presence update that
+            # produced it; drop it loudly instead.
+            log.error("pixelagents: refusing to broadcast unserializable %s: %s",
+                      message.get("type"), exc)
+            return
+        for socket in list(self._clients):
+            if socket.closed:
+                self._clients.pop(socket, None)
                 continue
-            seen.add(uid)
+            try:
+                await socket.send_str(payload)
+            except Exception as exc:
+                log.debug("pixelagents: broadcast error: %s", exc)
+
+    def _tracked_user_ids(self) -> List[int]:
+        """Distinct tracked users, ordered stably so agent lists don't churn."""
+        seen: List[int] = []
+        for (_, uid) in sorted(self._agents):
+            if uid not in seen:
+                seen.append(uid)
+        return seen
+
+    def _existing_agents_message(self, seats: dict) -> dict:
+        agent_ids: List[int] = []
+        folder_names: Dict[str, str] = {}
+        agent_meta: Dict[str, dict] = {}
+        for uid in self._tracked_user_ids():
             aid = self._agent_id(uid)
             agent_ids.append(aid)
-            folder_names[aid] = folder
-        await self._send({
+            folder = next(
+                (f for (_, u), (f, _) in sorted(self._agents.items()) if u == uid),
+                None,
+            )
+            if folder:
+                folder_names[str(aid)] = folder
+            agent_meta[str(aid)] = self._seat_meta(aid, seats)
+        return {
             "type": "existingAgents",
             "agents": agent_ids,
-            "agentMeta": {},
+            "agentMeta": agent_meta,
             "folderNames": folder_names,
             "externalAgents": {},
-        })
+        }
 
-    async def _request_layout_snapshot(self) -> dict:
-        return await self._request_layout_control({"type": "producerLayoutSnapshotRequest"})
+    async def _send_existing_agents(self) -> None:
+        await self._send(self._existing_agents_message(await self.config.seats() or {}))
 
-    async def _request_layout_load(self, layout: dict) -> dict:
-        return await self._request_layout_control({"type": "producerLayoutLoadRequest", "layout": layout})
+    # ------------------------------------------------------------------
+    # Seats and palettes
+    # ------------------------------------------------------------------
 
-    async def _request_layout_control(self, message: dict) -> dict:
-        if self._ws is None or self._ws.closed:
-            raise RuntimeError("Pixelpipes producer WebSocket is not connected.")
+    def _seat_meta(self, agent_id: int, seats: Optional[dict]) -> dict:
+        record = (seats or {}).get(str(agent_id)) or {}
+        meta: Dict[str, Any] = {}
+        for key in ("palette", "hueShift", "seatId"):
+            if record.get(key) is not None:
+                meta[key] = record[key]
+        return meta
 
-        request_id = str(uuid.uuid4())
-        message["requestId"] = request_id
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
-        self._pending_layout_requests[request_id] = future
-        await self._send(message)
+    async def _assign_palette(self, agent_id: int) -> Tuple[int, int]:
+        """Pick a palette for a new agent, mirroring upstream's diverse assignment.
+
+        Counts palettes already in use and picks randomly among the least-used
+        ones, so the first six characters each look different. Beyond that,
+        palettes repeat with a random hue shift.
+        """
+        seats = await self.config.seats() or {}
+        record = seats.get(str(agent_id))
+        if record and record.get("palette") is not None:
+            return int(record["palette"]), int(record.get("hueShift") or 0)
+
+        counts = [0] * _PALETTE_COUNT
+        live = {str(self._agent_id(uid)) for uid in self._tracked_user_ids()}
+        for key, value in seats.items():
+            if key in live and value.get("palette") is not None:
+                index = int(value["palette"])
+                if 0 <= index < _PALETTE_COUNT:
+                    counts[index] += 1
+
+        fewest = min(counts)
+        palette = random.choice([i for i, c in enumerate(counts) if c == fewest])
+        hue_shift = 0 if fewest == 0 else random.randint(45, 315)
+
+        seats[str(agent_id)] = {
+            **(record or {}),
+            "palette": palette,
+            "hueShift": hue_shift,
+        }
+        await self.config.seats.set(seats)
+        return palette, hue_shift
+
+    # ------------------------------------------------------------------
+    # Layout ownership
+    # ------------------------------------------------------------------
+
+    def _default_layout(self) -> Optional[dict]:
+        """The layout bundled with the webview build, used until one is saved."""
+        index_path = self._resolve_webview_asset("assets/asset-index.json")
+        if index_path is None:
+            return None
         try:
-            return await asyncio.wait_for(future, timeout=_LAYOUT_REQUEST_TIMEOUT)
-        except asyncio.TimeoutError as exc:
-            self._pending_layout_requests.pop(request_id, None)
-            raise RuntimeError("Timed out waiting for Pixelpipes layout reply.") from exc
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        name = index.get("defaultLayout")
+        if not name:
+            return None
+        layout_path = self._resolve_webview_asset(f"assets/{name}")
+        if layout_path is None:
+            return None
+        try:
+            return json.loads(layout_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("pixelagents: could not read bundled default layout: %s", exc)
+            return None
+
+    async def _current_layout(self) -> Optional[dict]:
+        return await self.config.layout() or self._default_layout()
 
     def _normalize_layout_name(self, name: str) -> Optional[str]:
         clean = name.strip()
@@ -282,95 +460,258 @@ class pixelagents(commands.Cog):
     # Connection lifecycle
     # ------------------------------------------------------------------
 
+    def _load_assets(self) -> None:
+        """Read the decoded sprite payloads emitted by scripts/build-webview.
+
+        Blocking file reads, but they happen once at cog load and total a few
+        hundred kB of JSON. The webview cannot render without them: the
+        production bundle decodes nothing itself.
+        """
+        assets: Dict[str, Any] = {}
+        for name in ("characters", "floors", "walls", "carpets", "furniture"):
+            path = self._resolve_webview_asset(f"assets/decoded/{name}.json")
+            if path is None:
+                log.warning(
+                    "pixelagents: missing assets/decoded/%s.json — run scripts/build-webview", name
+                )
+                continue
+            try:
+                assets[name] = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                log.error("pixelagents: could not read decoded %s: %s", name, exc)
+
+        catalog_path = self._resolve_webview_asset("assets/furniture-catalog.json")
+        if catalog_path is not None:
+            try:
+                raw = json.loads(catalog_path.read_text(encoding="utf-8"))
+                assets["catalog"] = [
+                    {k: v for k, v in entry.items() if k in _FURNITURE_KEYS} for entry in raw
+                ]
+            except Exception as exc:
+                log.error("pixelagents: could not read furniture catalog: %s", exc)
+
+        self._assets = assets
+        log.info(
+            "pixelagents: loaded assets — %d palettes, %d floors, %d wall sets, %d furniture sprites",
+            len(assets.get("characters", [])),
+            len(assets.get("floors", [])),
+            len(assets.get("walls", [])),
+            len(assets.get("furniture", {})),
+        )
+
     async def cog_load(self) -> None:
         self._closing = False
-        self._connect_task = asyncio.get_event_loop().create_task(self._connect_loop())
+        await asyncio.get_event_loop().run_in_executor(None, self._load_assets)
+        await self._start_server()
+        # The producer client used to sync on connect. Nothing dials out now, so
+        # seed the agent set once the gateway cache is populated instead.
+        self._sync_task = asyncio.get_event_loop().create_task(self._initial_sync())
+
+    async def _initial_sync(self) -> None:
+        try:
+            await self.bot.wait_until_red_ready()
+            await self._sync_all_guilds()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error("pixelagents: initial sync failed: %s", exc)
 
     async def cog_unload(self) -> None:
         self._closing = True
-        if self._connect_task is not None:
-            self._connect_task.cancel()
+        task = getattr(self, "_sync_task", None)
+        if task is not None:
+            task.cancel()
+        for socket in list(self._clients):
             try:
-                await self._connect_task
-            except asyncio.CancelledError:
+                await socket.close()
+            except Exception:
                 pass
-        if self._ws is not None and not self._ws.closed:
-            await self._ws.close()
-        if self._ws_session is not None:
-            await self._ws_session.close()
-        for future in self._pending_layout_requests.values():
-            if not future.done():
-                future.set_exception(RuntimeError("pixelagents cog unloaded"))
-        self._pending_layout_requests.clear()
+        self._clients.clear()
+        if self._runner is not None:
+            await self._runner.cleanup()
+            self._runner = None
 
-    async def _connect_loop(self) -> None:
-        delay = 1.0
-        while not self._closing:
-            try:
-                url = await self.config.producer_url()
-                self._ws_session = aiohttp.ClientSession()
-                self._ws = await self._ws_session.ws_connect(url)
-                log.info("pixelagents: connected to %s", url)
-                delay = 1.0
+    async def _start_server(self) -> None:
+        host = await self.config.ws_host()
+        port = await self.config.ws_port()
+        app = web.Application()
+        app.router.add_get("/ws", self._handle_ws)
+        app.router.add_get("/api/health", self._handle_health)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host, port)
+        try:
+            await site.start()
+        except OSError as exc:
+            await runner.cleanup()
+            log.error("pixelagents: could not bind office server to %s:%s — %s", host, port, exc)
+            return
+        self._runner = runner
+        log.info("pixelagents: office server listening on %s:%s/ws", host, port)
 
-                await self._send_hello()
-                await self._sync_all_guilds()
+    async def _handle_health(self, request: web.Request) -> web.Response:
+        return web.json_response({
+            "status": "ok",
+            "clients": len(self._clients),
+            "agents": len(self._tracked_user_ids()),
+            "assets": sorted(self._assets),
+        })
 
-                async for msg in self._ws:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        try:
-                            await self._handle_server_message(json.loads(msg.data))
-                        except Exception as exc:
-                            log.error("pixelagents: message handler error: %s", exc)
-                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+    async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
+        socket = web.WebSocketResponse(heartbeat=30.0, max_msg_size=0)
+        await socket.prepare(request)
+
+        ticket = request.query.get("ticket", "")
+        user_id = self._resolve_ticket(ticket) if ticket else None
+        authorized = bool(user_id) and await self._check_auth(user_id)
+        self._clients[socket] = authorized
+        log.info(
+            "pixelagents: office client connected (%s, %d total)",
+            "editor" if authorized else "viewer",
+            len(self._clients),
+        )
+
+        try:
+            async for msg in socket:
+                if msg.type != WSMsgType.TEXT:
+                    if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
                         break
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                log.warning("pixelagents: connection error: %s", exc)
-            finally:
-                if self._ws is not None and not self._ws.closed:
-                    await self._ws.close()
-                self._ws = None
-                if self._ws_session is not None:
-                    await self._ws_session.close()
-                self._ws_session = None
-
-            if not self._closing:
-                log.info("pixelagents: reconnecting in %.1fs", delay)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 60.0)
-
-    async def _handle_server_message(self, data: dict) -> None:
-        msg_type = data.get("type")
-        if msg_type == "producerBootstrapRequest":
-            await self._send_existing_agents()
-            # Resend display names so the server has current data after a reconnect or restart.
-            # _send_existing_agents only sends IDs and folderNames; agentTeamInfo carries the name.
-            seen: Set[int] = set()
-            for (_, uid), (_, name) in sorted(self._agents.items()):
-                if uid in seen:
                     continue
-                seen.add(uid)
-                await self._send({"type": "agentTeamInfo", "id": self._agent_id(uid), "agentName": name})
-        elif msg_type == "producerAuthCheckRequest":
-            request_id = data.get("requestId", "")
-            user_id_str = data.get("discordUserId", "")
-            try:
-                user_id = int(user_id_str)
-            except (ValueError, TypeError):
-                user_id = 0
-            allowed = await self._check_auth(user_id)
-            await self._send({
-                "type": "producerAuthCheckReply",
-                "requestId": request_id,
-                "allowed": allowed,
+                try:
+                    await self._handle_client_message(socket, json.loads(msg.data))
+                except Exception as exc:
+                    log.error("pixelagents: client message error: %s", exc, exc_info=True)
+        finally:
+            self._clients.pop(socket, None)
+            log.info("pixelagents: office client disconnected (%d left)", len(self._clients))
+        return socket
+
+    async def _handle_client_message(self, socket: web.WebSocketResponse, data: dict) -> None:
+        msg_type = data.get("type")
+
+        if msg_type in _EDITOR_MESSAGES and not self._clients.get(socket, False):
+            log.info("pixelagents: dropped %s from an unauthorized office client", msg_type)
+            return
+
+        if msg_type == "webviewReady":
+            await self._send_bootstrap(socket)
+        elif msg_type == "saveLayout":
+            layout = data.get("layout")
+            if self._validate_layout(layout):
+                await self.config.layout.set(layout)
+                # Mirror the new layout to every other open tab. The saving
+                # client already has it applied locally.
+                for other in list(self._clients):
+                    if other is not socket and not other.closed:
+                        await self._send_to(other, {"type": "layoutLoaded", "layout": layout})
+            else:
+                log.warning("pixelagents: rejected an invalid layout from an office client")
+        elif msg_type == "saveAgentSeats":
+            await self._save_seats(data.get("seats") or {})
+        elif msg_type == "requestDiagnostics":
+            await self._send_to(socket, {"type": "agentDiagnostics", "agents": []})
+
+    async def _save_seats(self, incoming: dict) -> None:
+        seats = await self.config.seats() or {}
+        for agent_id, value in incoming.items():
+            if not isinstance(value, dict):
+                continue
+            record = dict(seats.get(str(agent_id)) or {})
+            palette = value.get("palette")
+            hue_shift = value.get("hueShift")
+            seat_id = value.get("seatId")
+            # Validate before storing: a hand-edited payload should not be able
+            # to persist a palette index that renders as a missing sprite.
+            if isinstance(palette, int) and 0 <= palette < max(
+                len(self._assets.get("characters", [])), _PALETTE_COUNT
+            ):
+                record["palette"] = palette
+            if isinstance(hue_shift, int) and 0 <= hue_shift <= 360:
+                record["hueShift"] = hue_shift
+            if isinstance(seat_id, str):
+                record["seatId"] = seat_id
+            seats[str(agent_id)] = record
+        await self.config.seats.set(seats)
+
+    async def _send_bootstrap(self, socket: web.WebSocketResponse) -> None:
+        """Push the whole world to a freshly connected office client.
+
+        Order matters and mirrors upstream's handleWebviewReady: capabilities
+        first, then assets, then settings, and `layoutLoaded` LAST — the webview
+        buffers `existingAgents` and only materializes characters when the
+        layout arrives, so a layout-first bootstrap leaves an empty office.
+        """
+        await self._send_to(socket, {
+            "type": "providerCapabilities",
+            "readingTools": _READING_TOOLS,
+            "subagentToolNames": _SUBAGENT_TOOL_NAMES,
+        })
+
+        if "characters" in self._assets:
+            await self._send_to(socket, {
+                "type": "characterSpritesLoaded",
+                "characters": self._assets["characters"],
             })
-        elif msg_type in ("producerLayoutSnapshotReply", "producerLayoutLoadReply"):
-            request_id = data.get("requestId", "")
-            future = self._pending_layout_requests.pop(request_id, None)
-            if future is not None and not future.done():
-                future.set_result(data)
+        if "floors" in self._assets:
+            await self._send_to(socket, {
+                "type": "floorTilesLoaded",
+                "sprites": self._assets["floors"],
+            })
+        if "walls" in self._assets:
+            await self._send_to(socket, {"type": "wallTilesLoaded", "sets": self._assets["walls"]})
+        if "carpets" in self._assets:
+            await self._send_to(socket, {
+                "type": "carpetTilesLoaded",
+                "sets": self._assets["carpets"],
+            })
+        if "catalog" in self._assets and "furniture" in self._assets:
+            await self._send_to(socket, {
+                "type": "furnitureAssetsLoaded",
+                "catalog": self._assets["catalog"],
+                "sprites": self._assets["furniture"],
+            })
+
+        await self._send_to(socket, {
+            "type": "settingsLoaded",
+            "soundEnabled": False,
+            "lastSeenVersion": "",
+            "extensionVersion": "",
+            "watchAllSessions": False,
+            "alwaysShowLabels": False,
+            "ghostHeadlessAgents": False,
+            "hooksEnabled": False,
+            "hooksInfoShown": True,
+            "externalAssetDirectories": [],
+            "showAreas": False,
+        })
+        await self._send_to(socket, {"type": "areaMappingsLoaded", "mappings": {}})
+
+        seats = await self.config.seats() or {}
+        await self._send_to(socket, self._existing_agents_message(seats))
+        for uid in self._tracked_user_ids():
+            aid = self._agent_id(uid)
+            name = next(
+                (n for (_, u), (_, n) in sorted(self._agents.items()) if u == uid),
+                None,
+            )
+            if name:
+                await self._send_to(socket, {
+                    "type": "agentTeamInfo", "id": aid, "agentName": name,
+                })
+
+        await self._send_to(socket, {"type": "layoutLoaded", "layout": await self._current_layout()})
+
+        # Activity bubbles reference characters that only exist after the
+        # layout flush above, so replay them last.
+        for (guild_id, user_id), label in self._presence_cache.items():
+            if (guild_id, user_id) in self._agents:
+                await self._send_to(socket, {
+                    "type": "agentToolStart",
+                    "id": self._agent_id(user_id),
+                    "toolId": f"rp-{self._agent_id(user_id)}",
+                    "toolName": "Activity",
+                    "status": label,
+                })
 
     # ------------------------------------------------------------------
     # Editor authorization
@@ -516,8 +857,15 @@ class pixelagents(commands.Cog):
         if folder != cached_folder:
             self._agents[(guild_id, user_id)] = (folder, name)
             agent_id = self._agent_id(user_id)
+            palette, hue_shift = await self._assign_palette(agent_id)
             await self._send({"type": "agentClosed", "id": agent_id})
-            await self._send({"type": "agentCreated", "id": agent_id, "folderName": folder})
+            await self._send({
+                "type": "agentCreated",
+                "id": agent_id,
+                "folderName": folder,
+                "palette": palette,
+                "hueShift": hue_shift,
+            })
             if name != cached_name:
                 await self._send({"type": "agentTeamInfo", "id": agent_id, "agentName": name})
             await self._send_existing_agents()
@@ -538,7 +886,14 @@ class pixelagents(commands.Cog):
         self._agents[(guild_id, user_id)] = (folder, name)
 
         if not already_active:
-            await self._send({"type": "agentCreated", "id": agent_id, "folderName": folder})
+            palette, hue_shift = await self._assign_palette(agent_id)
+            await self._send({
+                "type": "agentCreated",
+                "id": agent_id,
+                "folderName": folder,
+                "palette": palette,
+                "hueShift": hue_shift,
+            })
             await self._send({"type": "agentTeamInfo", "id": agent_id, "agentName": name})
             status = self._agent_status(member)
             await self._send({"type": "agentStatus", "id": agent_id, "status": status})
@@ -719,7 +1074,8 @@ class pixelagents(commands.Cog):
     @commands.admin_or_permissions(administrator=True)
     async def cmd_status(self, ctx: commands.Context) -> None:
         """Show current Pixelagents configuration and connection status."""
-        producer_url = await self.config.producer_url()
+        ws_host = await self.config.ws_host()
+        ws_port = await self.config.ws_port()
         clear_delay = await self.config.message_tool_clear_delay()
         editor_role_id = await self.config.editor_role_id()
         broadcast_rp = await self.config.broadcast_rich_presence()
@@ -727,14 +1083,25 @@ class pixelagents(commands.Cog):
         enabled = await self.config.guild(ctx.guild).enabled()
         include_bots = await self.config.guild(ctx.guild).include_bots()
         tracked = sum(1 for (gid, _) in self._agents if gid == ctx.guild.id)
-        connected = self._ws is not None and not self._ws.closed
+        serving = self._runner is not None
+        editors = sum(1 for authorized in self._clients.values() if authorized)
 
         def yn(value: bool) -> str:
             return "✅" if value else "🛑"
 
         embed = discord.Embed(title="Pixelagents Status", color=discord.Color.blurple())
-        embed.add_field(name="Producer URL", value=producer_url, inline=False)
-        embed.add_field(name="Connected", value=yn(connected), inline=True)
+        embed.add_field(name="Office Server", value=f"{ws_host}:{ws_port}/ws", inline=False)
+        embed.add_field(name="Serving", value=yn(serving), inline=True)
+        embed.add_field(
+            name="Office Clients",
+            value=f"{len(self._clients)} ({editors} editor)",
+            inline=True,
+        )
+        embed.add_field(
+            name="Assets",
+            value="✅ loaded" if self._assets.get("characters") else "⚠️ missing",
+            inline=True,
+        )
         embed.add_field(name="Msg Tool Clear Delay", value=f"{clear_delay}s", inline=True)
         embed.add_field(
             name="Editor Role ID",
@@ -749,13 +1116,24 @@ class pixelagents(commands.Cog):
 
         await self._reply(ctx, embed=embed)
 
-    @pixelagents_group.command(name="producerurl")
+    @pixelagents_group.command(name="wsport")
     @commands.admin_or_permissions(administrator=True)
-    @app_commands.describe(url="Producer WebSocket URL (default: ws://standalone:3210/ws/producer)")
-    async def cmd_producerurl(self, ctx: commands.Context, url: str) -> None:
-        """Set the producer WebSocket URL."""
-        await self.config.producer_url.set(url)
-        await self._reply(ctx, f"Producer URL set to `{url}`.")
+    @app_commands.describe(port="Port the office WebSocket server binds (default: 3210)")
+    async def cmd_wsport(self, ctx: commands.Context, port: int) -> None:
+        """Set the port the office WebSocket server listens on.
+
+        Traefik routes `/ws` on the dashboard host to this port, so changing it
+        means updating the Traefik label in redstack too.
+        """
+        if not 1 <= port <= 65535:
+            await self._reply(ctx, "Port must be between 1 and 65535.")
+            return
+        await self.config.ws_port.set(port)
+        await self._reply(
+            ctx,
+            f"Office server port set to `{port}`. Reload the cog to rebind, and update the "
+            "Traefik `/ws` route to match.",
+        )
 
     @pixelagents_group.command(name="toolcleardelay")
     @commands.admin_or_permissions(administrator=True)
@@ -895,19 +1273,9 @@ class pixelagents(commands.Cog):
             await self._reply(ctx, f"You can save at most {_MAX_LAYOUTS_PER_USER} layouts. Delete one first.")
             return
 
-        try:
-            reply = await self._request_layout_snapshot()
-        except RuntimeError as exc:
-            await self._reply(ctx, str(exc))
-            return
-
-        if not reply.get("ok"):
-            await self._reply(ctx, f"Could not read the current Pixelpipes layout: {reply.get('error', 'unknown error')}")
-            return
-
-        layout = reply.get("layout")
+        layout = await self._current_layout()
         if not self._validate_layout(layout):
-            await self._reply(ctx, "Pixelpipes returned an invalid layout.")
+            await self._reply(ctx, "There is no valid office layout to save yet.")
             return
 
         size = self._layout_size(layout)
@@ -950,15 +1318,9 @@ class pixelagents(commands.Cog):
             await self._reply(ctx, "Saved layout is invalid and cannot be loaded.")
             return
 
-        try:
-            reply = await self._request_layout_load(layout)
-        except RuntimeError as exc:
-            await self._reply(ctx, str(exc))
-            return
-
-        if not reply.get("ok"):
-            await self._reply(ctx, f"Could not load layout: {reply.get('error', 'unknown error')}")
-            return
+        await self.config.layout.set(layout)
+        # Push it to every open office tab so the change is live immediately.
+        await self._send({"type": "layoutLoaded", "layout": layout})
         await self._reply(ctx, f"Loaded layout `{record.get('display_name', name.strip())}`.")
 
     @pixelagents_layout_group.command(name="delete")

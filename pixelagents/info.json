@@ -1,10 +1,10 @@
 {
     "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog.schema.json",
     "name": "pixelagents",
-    "short": "Mirror Discord presence into Pixelpipes",
-    "description": "Observes Discord guild presence, answers Pixelpipes editor authorization checks, and manages saved layouts through the standalone Pixelpipes producer WebSocket.",
-    "end_user_data_statement": "This cog transmits Discord user IDs, guild IDs, display names, presence status, and short message activity snippets to the configured Pixelpipes producer WebSocket. It stores saved Pixelpipes layout JSON per Discord user.",
-    "install_msg": "Configure the producer WebSocket with `[p]pixelagents producerurl` if needed, set `[p]pixelagents editorrole`, then enable a guild with `[p]pixelagents enable`.",
+    "short": "Serve the Pixel Agents office and mirror Discord presence into it",
+    "description": "Hosts the Pixel Agents office webview through the Red Web Dashboard and serves its WebSocket protocol directly, turning Discord guild presence into animated characters. Owns the office layout and enforces editor authorization.",
+    "end_user_data_statement": "This cog transmits Discord user IDs, guild IDs, display names, presence status, and short message activity snippets to browsers connected to the Pixel Agents office. It stores saved office layout JSON per Discord user.",
+    "install_msg": "Set `[p]pixelagents editorrole`, then enable a guild with `[p]pixelagents enable`. The office is served at /third-party/pixelagents; route `/ws` on that host to the port from `[p]pixelagents wsport`.",
     "author": [
         "Tin Nguyen"
     ],
@@ -13,9 +13,9 @@
         "aiohttp"
     ],
     "tags": [
-        "pixelpipes",
+        "pixelagents",
         "presence",
-        "agents",
+        "office",
         "layouts"
     ],
     "min_bot_version": "3.5.0",

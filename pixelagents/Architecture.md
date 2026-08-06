@@ -1,399 +1,235 @@
 # Pixelagents Architecture
 
-## Overview
-
 `pixelagents` is a Red DiscordBot cog that does two things:
 
-1. **Presence mirroring** — observes Discord guild events and drives agent
-   lifecycle changes in the Pixelpipes standalone host over a producer WebSocket.
-2. **Webview hosting** — serves the pre-built Pixelpipes browser bundle through
-   the Red Web Dashboard third-party page system, making the webview accessible
-   at `https://pico.red.lair.nntin.xyz/third-party/pixelagents`.
+1. **Serves the Pixel Agents office** — hosts the pre-built browser bundle
+   through the Red Web Dashboard third-party page system, and serves the office
+   WebSocket protocol itself.
+2. **Mirrors Discord presence** — turns guild presence, activity, and message
+   events into the office's `ServerMessage` protocol.
 
-There are two public entry points for the browser:
+The cog *is* the Pixel Agents server. There is no standalone host: upstream
+`pixel-agents` exposes only `POST /api/hooks/:providerId`, `/api/health`, and
+`/ws`, and has no producer ingress. The `/ws/producer` socket this cog used to
+dial is gone along with the pixelpipes fork.
 
-- **Flow A** — `https://pixelpipes-webview-ui.vercel.app/?host=https://pa.lair.nntin.xyz`
-  Static assets served by Vercel; the standalone host URL comes from the `?host=` query param.
-- **Flow B** — `https://pico.red.lair.nntin.xyz/third-party/pixelagents`
-  HTML and static assets served through the Red Dashboard and this cog; the standalone host
-  URL is inferred from the page's own origin.
+One public entry point:
 
-Both flows share the same runtime routes for WebSocket and Discord OAuth.
-Node-RED is not in the presence mirroring path — it connects to the standalone separately as its own producer.
+```text
+https://pico.nntin.xyz/third-party/pixelagents
+```
 
 ```mermaid
 flowchart TD
     Browser(["Browser"])
-    Vercel["Vercel CDN\npixelpipes-webview-ui.vercel.app\nHTML · JS · CSS"]
     Discord(["Discord Gateway"])
 
-    subgraph docker["Docker Host — lair.nntin.xyz"]
-        Traefik["Traefik\nTLS termination\npa.lair.nntin.xyz · pico.red.lair.nntin.xyz"]
+    subgraph docker["Docker host"]
+        Traefik["Traefik<br/>pico.nntin.xyz"]
 
-        subgraph rednet["redstack-network"]
-            Dashboard["Red Dashboard\nFlask / Waitress :42356\nred-dashboard-pico"]
-            Bot["Red Bot\nred-pico"]
-            Cog["pixelagents cog\ndashboard_webview()\ndashboard_static()\nserves webview_dist/"]
-        end
-
-        subgraph panet["pixel-agents network"]
-            Standalone["Pixelpipes Standalone\nstandalone:3210"]
+        subgraph ns["network namespace of red-pico"]
+            Dashboard["Red Dashboard<br/>Flask/Waitress :42356"]
+            Bot["Red Bot"]
+            Cog["pixelagents cog<br/>dashboard_webview()<br/>dashboard_static()<br/>office server :3210"]
         end
     end
 
-    %% ── Flow A: Vercel-hosted ──────────────────────────────────────────
-    Browser -- "Flow A ①  GET /?host=https://pa.lair.nntin.xyz" --> Vercel
-    Vercel  -- "Flow A ②  HTML/JS bundle\nstandaloneHostUrl ← ?host param\n= https://pa.lair.nntin.xyz" --> Browser
+    Browser -- "① GET /third-party/pixelagents" --> Traefik
+    Traefik -- "② default rule → :42356" --> Dashboard
+    Dashboard -- "③ RPC :6133" --> Bot
+    Bot --> Cog
+    Cog -- "④ index.html + ticket shim" --> Dashboard
+    Dashboard -- "⑤ HTML/JS bundle" --> Browser
 
-    %% ── Flow B: Red Dashboard-hosted ──────────────────────────────────
-    Browser   -- "Flow B ①  GET /third-party/pixelagents\nHost: pico.red.lair.nntin.xyz" --> Traefik
-    Traefik   -- "Flow B ②  default host rule\n→ red-pico:42356" --> Dashboard
-    Dashboard -- "Flow B ③  RPC :6133\nDASHBOARDRPC…DATA_RECEIVE" --> Bot
-    Bot       --> Cog
-    Cog       -- "Flow B ④  index.html\nfrom webview_dist/" --> Dashboard
-    Dashboard -- "Flow B ⑤  HTML/JS bundle\nstandaloneHostUrl ← pathname\n= https://pico.red.lair.nntin.xyz" --> Browser
+    Browser -- "⑥ GET /static/assets/*" --> Traefik
+    Traefik --> Dashboard
 
-    Browser   -- "Flow B  GET /third-party/pixelagents/static/assets/*" --> Traefik
-    Traefik   --> Dashboard
-    Dashboard -- "RPC → dashboard_static()\nreads + base64-encodes webview_dist/assets/*" --> Cog
+    Browser -- "⑦ wss://pico.nntin.xyz/ws?ticket=…" --> Traefik
+    Traefik -- "Path(/ws) priority 100 → :3210" --> Cog
 
-    %% ── Runtime — shared by both flows ────────────────────────────────
-    Browser   -- "Runtime ①  wss://[host]/ws\n(pa or pico host)" --> Traefik
-    Traefik   -- "pa-ws / pa-pico-ws\npriority 100" --> Standalone
-
-    Browser   -- "Runtime ②  GET /api/discord/auth/*\n(pa or pico host)" --> Traefik
-    Traefik   -- "pa-discord / pa-pico-discord\npriority 100" --> Standalone
-
-    %% ── Internal producer (Docker-internal, not via Traefik) ──────────
-    Bot -- "ws://standalone:3210/ws/producer\nDocker-internal · not via Traefik" --> Standalone
-
-    %% ── Discord events ─────────────────────────────────────────────────
-    Discord -- "on_presence_update\non_member_update\non_message" --> Bot
+    Discord -- "presence · member · message" --> Bot
 ```
 
----
+## Routing
 
-## Deployment: How the Webview Reaches the Browser
-
-### Container layout
-
-| Container | Image | Network | Role |
-|---|---|---|---|
-| `red-pico` | `phasecorex/red-discordbot` | `redstack-network`, `pixel-agents` | Discord bot + cog host |
-| `red-dashboard-pico` | `redstack/red-web-dashboard:local` | shared via `network_mode: "service:red-pico"` | Flask/Waitress web server |
-| `pixel-agents-standalone-1` | built from `pixel-agents` repo | `pixel-agents`, `lair-network` | Pixelpipes standalone host |
-| `traefik` | Traefik | `redstack-network`, `lair-network` | TLS termination + routing |
-
-`red-dashboard-pico` shares the network namespace of `red-pico` (no separate
-IP). It talks to the Red bot over `localhost:6133` (RPC) and listens on
-`:42356` for HTTP, which Traefik picks up from the `red-pico` container's IP.
-
-### Traefik routing for `pico.red.lair.nntin.xyz`
-
-Defined via Docker labels on the respective containers:
-
-| Router | Rule | Destination |
+| Router | Rule | Target |
 |---|---|---|
-| `red-pico` | `Host(pico.red.lair.nntin.xyz)` | `red-pico:42356` (Red Dashboard) |
-| `pa-pico-ws` | `Host(pico.red.lair.nntin.xyz) && Path(/ws)` | `standalone:3210` — priority 100 |
-| `pa-pico-discord` | `Host(pico.red.lair.nntin.xyz) && PathPrefix(/api/discord/)` | `standalone:3210` — priority 100 |
+| `red-pico` | ``Host(`pico.nntin.xyz`)`` | `:42356` Red Dashboard |
+| `red-pico-ws` | ``Host(`pico.nntin.xyz`) && Path(`/ws`)`` — priority 100 | `:3210` this cog |
 
-The two higher-priority rules intercept same-origin WebSocket connections and
-Discord OAuth callbacks, forwarding them directly to the standalone host. All
-other paths (including `/third-party/pixelagents`) fall through to the Red
-Dashboard.
+Both routers point at the same container: `red-dashboard-pico` runs with
+`network_mode: "service:red-pico"`, so the dashboard and the cog share one
+network namespace.
 
-The `/ws/producer` path is intentionally absent from Traefik — the producer
-connection from the cog stays internal on the `pixel-agents` Docker network
-and is never exposed publicly.
+`/ws` has to sit at the origin root because upstream's webview hardcodes
+`<origin>/ws` (`webview-ui/src/transport/index.ts`) and is not subpath-aware.
 
-### Red Dashboard serving the page
+> **Both routers must name their service explicitly.** Once a container
+> declares two Traefik services, Traefik cannot infer a default and silently
+> drops the router that lacks `traefik.http.routers.<name>.service=`. The
+> symptom is the dashboard 404ing on every path, which reads like a dead app
+> rather than a routing problem.
 
-The Dashboard receives all paths not matched by the high-priority Traefik
-rules. When a request arrives for `/third-party/pixelagents`, Flask routes it
-through `third_parties_blueprint.third_party` (in `reddash/app/third_parties/routes.py`).
-That calls `DASHBOARDRPC_THIRDPARTIES__DATA_RECEIVE` over the bot RPC
-WebSocket, which invokes `dashboard_webview` on the cog. The cog returns
-`index.html` from `webview_dist/`, rendered inline via `render_template_string`
-with `standalone: true` so the Dashboard wraps it in no extra Chrome.
+## Serving the bundle
 
-Static sub-assets (`/js`, `/css`, fonts, images) are served through a
-companion route added by the `routes.py` patch:
+```text
+GET /third-party/pixelagents
+  → third_parties_blueprint.third_party
+  → DASHBOARDRPC_THIRDPARTIES__DATA_RECEIVE over RPC
+  → dashboard_webview(user_id=…) → index.html + ticket shim
+  → rendered with standalone: true
 
-```
 GET /third-party/pixelagents/static/<asset_path>
-  → Flask third_party_static()
-  → DASHBOARDRPC_THIRDPARTIES__DATA_RECEIVE  (page="static", required_kwargs={"asset_path": …})
-  → cog.dashboard_static()
-  → reads webview_dist/<asset_path>, base64-encodes, returns raw_response dict
-  → Flask decodes and streams with correct Content-Type + Cache-Control
+  → third_party_static()  (a redstack patch, not upstream reddash)
+  → dashboard_static() → base64 of webview_dist/<asset_path>
+  → Cache-Control: public, max-age=3600
 ```
 
-The round-trip through the bot RPC happens on every static request; `Cache-Control: public, max-age=3600` in the response lets the browser cache assets for one hour.
+`_resolve_webview_asset` enforces a path-traversal guard
+(`candidate.relative_to(root)`), so a crafted `asset_path` cannot escape
+`webview_dist/`.
 
----
+> **Never pass `context_ids` to `dashboard_page`.** The decorator infers it
+> from the signature: a `user_id` parameter with no default becomes a context
+> ID, which makes the page require login and delivers the visitor's Discord ID.
+> Passing `context_ids` explicitly skips that branch, `user_id` lands in
+> `required_kwargs`, and the page 404s unless the URL carries `?user_id=`.
 
-## How `webview_dist` Is Generated
+## Building `webview_dist`
 
-The browser bundle is built from the Pixelpipes (`pixel-agents`) repository
-and then committed into this cog directory.
-
-### Build command
+Built from the `vendor/pixel-agents` submodule in redstack:
 
 ```sh
-# Run from the pixel-agents repo root
-VITE_PIXEL_AGENTS_SAME_ORIGIN=true \
-WEBVIEW_BASE=/third-party/pixelagents/static/ \
-WEBVIEW_OUT_DIR=../dist/pico-webview \
-npm exec -w webview-ui -- vite build
+./scripts/build-webview
 ```
 
-This is aliased as:
+which runs a subpath Vite build (`--base /third-party/pixelagents/static/`,
+supported upstream and covered by its `build-subpath` test) plus
+`scripts/emit-decoded-assets.ts`, then syncs into `webview_dist/`.
 
-```sh
-npm run build:webview:pico   # in pixel-agents/package.json
+The production bundle decodes **no** assets itself — `initBrowserMock()` is
+DEV-gated in `main.tsx` — so sprites must arrive over the socket as pixel
+arrays. Upstream decodes PNGs in Node; rather than port that to Python, the
+build runs upstream's own decoders and writes `assets/decoded/*.json`, which
+the cog reads at load and forwards verbatim.
+
+## The `webviewReady` bootstrap
+
+Order matters and mirrors upstream's `handleWebviewReady`:
+
+```text
+providerCapabilities
+  → characterSpritesLoaded → floorTilesLoaded → wallTilesLoaded
+  → carpetTilesLoaded → furnitureAssetsLoaded
+  → settingsLoaded → areaMappingsLoaded
+  → existingAgents → agentTeamInfo…
+  → layoutLoaded            ← LAST
+  → agentToolStart…         ← after the layout flush
 ```
 
-### What the flags do
+`layoutLoaded` must come after `existingAgents`: the webview buffers agents and
+only materializes characters when the layout arrives, so a layout-first
+bootstrap renders an empty office. Activity bubbles reference those characters,
+so they are replayed after it.
 
-| Variable | Effect |
-|---|---|
-| `VITE_PIXEL_AGENTS_SAME_ORIGIN=true` | Forces `runtime.ts` to use `window.location.origin` as the standalone host URL instead of requiring a `?host=` query param |
-| `WEBVIEW_BASE=/third-party/pixelagents/static/` | Sets Vite's `base`, so all asset hrefs in the output HTML are absolute paths under `/third-party/pixelagents/static/` |
-| `WEBVIEW_OUT_DIR=../dist/pico-webview` | Output directory relative to `webview-ui/` |
+`petSpritesLoaded` is not sent — upstream's pet decoder lives in `server/`
+rather than `core/`, so the build-time emitter does not cover it. The bundled
+default layout has no pets.
 
-`VITE_PIXEL_AGENTS_SAME_ORIGIN=true` is belt-and-suspenders: `runtime.ts` also
-detects `isDashboardHosted` at runtime by checking whether `pathname` starts
-with `/third-party/pixelagents`, so it resolves the host correctly regardless
-of the build flag:
+## Editor authorization
 
-```ts
-const isDashboardHosted =
-  path === '/third-party/pixelagents' || path.startsWith('/third-party/pixelagents/');
-const isProduction = Boolean(env?.PROD || env?.VITE_PIXEL_AGENTS_SAME_ORIGIN === 'true');
-if (isProduction || isDashboardHosted) {
-  return browserGlobals.location.origin;  // → "https://pico.red.lair.nntin.xyz"
-}
+The office page requires a dashboard login, so the cog knows the visitor's
+Discord ID. It mints a ticket (8 h TTL, bound to that ID) and injects a script
+that wraps `window.WebSocket` to append `?ticket=…` to the `/ws` URL — upstream
+offers no hook for a credential, and Traefik routes `/ws` past the dashboard so
+the session cookie never reaches the socket. The vendored bundle stays
+byte-identical to upstream's build.
+
+On handshake the cog resolves the ticket and applies:
+
+```text
+Allow if ANY of:
+  1. the user is a bot owner
+  2. the user is an administrator in an enabled guild
+  3. editor_role_id is set and the user holds it in an enabled guild
+Deny otherwise
 ```
 
-This resolved origin becomes the WebSocket URL (`wss://pico.red.lair.nntin.xyz/ws`)
-and the Discord OAuth base URL (`https://pico.red.lair.nntin.xyz/api/discord/…`).
+Unauthorized sockets are still served the office as **read-only viewers**;
+`saveLayout`, `saveAgentSeats`, and `importLayout` are dropped server-side.
 
-### Vendoring the build output
-
-After building:
-
-```sh
-cp -r pixel-agents/dist/pico-webview/* \
-      redstack/cogs/d-cogs/pixelagents/webview_dist/
-```
-
-`webview_dist/` is committed into the cog directory and read at runtime by
-`dashboard_webview` / `dashboard_static`. The cog has no build-time dependency
-on the Pixelpipes repo at deploy time.
-
-### Updating the bundle
-
-1. Make changes in the `pixel-agents` webview.
-2. Run `npm run build:webview:pico` from the `pixel-agents` root.
-3. Copy output to `webview_dist/` and commit.
-4. Rebuild the `redstack/red-web-dashboard:local` Docker image and recreate
-   `red-dashboard-pico` (the cog directory is volume-mounted at
-   `/cogs` inside `red-pico`, so the Red bot picks up file changes without
-   a rebuild; however the Dashboard image embeds the patched `routes.py` and
-   must be rebuilt when that file changes).
-
----
-
-## Configuration Model
+## Configuration
 
 Global:
 
 | Key | Default | Description |
 |---|---|---|
-| `producer_url` | `ws://standalone:3210/ws/producer` | Pixelpipes producer WebSocket URL |
-| `message_tool_clear_delay` | `2.0` | Seconds to keep the Discord message bubble visible |
-| `editor_role_id` | `None` | Discord role ID granting webview editor access |
-| `broadcast_rich_presence` | `True` | Whether to send Spotify/game activity as tool bubbles |
-| `broadcast_messages` | `True` | Whether to send Discord messages as tool bubbles |
+| `ws_host` | `0.0.0.0` | Office server bind address |
+| `ws_port` | `3210` | Office server port (must match the Traefik `/ws` route) |
+| `message_tool_clear_delay` | `2.0` | Seconds the message bubble stays visible |
+| `editor_role_id` | `None` | Role granting editor access |
+| `broadcast_rich_presence` | `True` | Send Spotify/game activity as bubbles |
+| `broadcast_messages` | `True` | Send messages as bubbles |
+| `layout` | `None` | The office layout; falls back to the bundled default |
+| `seats` | `{}` | agent ID → `{palette, hueShift, seatId}` |
 
-Guild:
+Guild: `enabled` (`False`), `include_bots` (`True`). User: `layouts`.
 
-| Key | Default | Description |
-|---|---|---|
-| `enabled` | `False` | Mirror this guild's presence |
-| `include_bots` | `True` | Include bot users |
-
-User:
-
-| Key | Description |
-|---|---|
-| `layouts` | Dict of saved layout records keyed by normalised layout name |
-
----
-
-## Agent Identity
+## Agent identity
 
 ```python
-_JS_MAX_SAFE = (1 << 53) - 1  # 9007199254740991
-
 def _discord_id_to_agent_id(user_id: int) -> int:
     mapped = user_id % _JS_MAX_SAFE
     return -(mapped if mapped != 0 else _JS_MAX_SAFE)
 ```
 
-- Always **negative** — does not collide with Node-RED's positive overlay IDs.
-- **Stable** across cog restarts (derived from Discord user ID only).
-- **JavaScript-safe**: magnitude ≤ 2^53 − 1.
-- Collisions are logged at WARNING level (extremely unlikely in practice).
+Always negative, stable across restarts, JavaScript-safe. The negative
+namespace keeps Discord agents clear of upstream's sub-agent IDs (−1 downward)
+and shadow-store IDs (1 000 000 up). Collisions are logged at WARNING.
 
----
+## Presence mapping
 
-## Producer Protocol
-
-The cog connects to `ws://standalone:3210/ws/producer` (internal Docker
-network, never exposed through Traefik).
-
-On connect:
-
-```json
-{ "type": "producerHello", "capabilities": ["auth-check", "layout-control"] }
-```
-
-The standalone routes `producerAuthCheckRequest` only to producers that
-advertise `auth-check`, and layout snapshot/load requests only to those that
-advertise `layout-control`.
-
-### Bootstrap
-
-When the standalone sends `producerBootstrapRequest` (after connect or
-restart), the cog replies with `existingAgents` + one `agentTeamInfo` per
-tracked agent to repopulate the host's overlay.
-
-### Presence lifecycle
-
-| Discord status | Cog action |
+| Discord signal | Office effect |
 |---|---|
-| `online` / `idle` / `dnd` | `agentCreated` → `agentTeamInfo` → `agentStatus` |
-| `offline` / `invisible` | `agentClosed` |
-| status change (e.g. `online` → `dnd`) | `agentClosed` + new `agentCreated` (folderName is immutable) |
-| display name change | `agentTeamInfo` with new name |
-| non-custom rich presence | `agentStatus: "active"` + `agentToolStart` for Activity label |
+| `online` / `idle` / `dnd` | `agentCreated` (with palette) → `agentTeamInfo` → `agentStatus` |
+| `offline` / `invisible` / left / excluded | `agentClosed` |
+| status change | `agentClosed` + fresh `agentCreated` (`folderName` is immutable) |
+| display-name change | `agentTeamInfo` |
+| non-custom rich presence | `agentStatus: "active"` + `agentToolStart` |
 | no rich presence | `agentStatus: "waiting"` |
+| message sent | `agentToolStart` (`msg-<id>`, 40 chars), cleared after the delay |
 
-After every state change the cog sends `existingAgents` so the standalone can
-reconcile its overlay.
+After every change the cog re-broadcasts `existingAgents`.
 
-### Discord message activity
-
-```json
-{ "type": "agentToolStart", "id": <agentId>,
-  "toolId": "msg-<messageId>", "toolName": "Message", "status": "<40 chars>" }
-```
-
-After `message_tool_clear_delay` seconds:
-
-```json
-{ "type": "agentToolsClear", "id": <agentId> }
-```
-
-If the agent had a rich-presence label before the message, `_send_presence_tool`
-is re-sent after the clear so the Activity bubble reappears.
-
-### Layout control
-
-Save → snapshot request / load → load request, both over the producer
-WebSocket with a UUID `requestId` and a 10-second `asyncio.wait_for` timeout.
-The host replies with `producerLayoutSnapshotReply` / `producerLayoutLoadReply`.
-
----
-
-## Editor Authorization
-
-The standalone sends `producerAuthCheckRequest` when a browser completes
-Discord OAuth login at `/api/discord/auth/start`. The cog replies with
-`producerAuthCheckReply`:
-
-```
-Allow if ANY of:
-  1. Discord user is a bot owner
-  2. User is an administrator in any enabled guild
-  3. editor_role_id is set and user has that role in any enabled guild
-Deny otherwise (including unknown user_id or Discord lookup failure)
-```
-
-The OAuth callback URL must match what is registered in the Discord Developer
-Portal. For the Pico deployment: `https://pico.red.lair.nntin.xyz/api/discord/auth/callback`
-(set via `DISCORD_REDIRECT_URI` in `pixelpipes/.env`).
-
----
-
-## Connection and Reconnect
-
-- On `cog_load`: starts `_connect_loop` as an asyncio Task.
-- On connect: sends `producerHello`, runs full guild sync.
-- On disconnect or error: exponential backoff, 1s → 2s → 4s → … max 60s.
-- On reconnect: re-sends `producerHello`, re-runs full sync.
-- Deterministic agent IDs prevent duplicate agents after reconnect.
-
----
-
-## Security and Privacy
-
-- Discord user IDs, guild IDs, display names, presence labels, and message
-  content (truncated to 40 chars) are sent to the producer endpoint.
-- The producer endpoint (`standalone:3210/ws/producer`) is on the `pixel-agents`
-  Docker network only — never exposed through Traefik.
-- The Dashboard static asset route (RPC over `localhost:6133`) requires no
-  external credentials; the Docker network is the trust boundary.
-- `_resolve_webview_asset` enforces a path-traversal guard: `candidate.relative_to(root)` rejects any path that escapes `webview_dist/`.
-
----
+Palettes follow upstream's diverse assignment: count the palettes in use, pick
+randomly among the least-used, and hue-shift once all six are taken.
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `[p]pixelagents status` | Show configuration and connection status |
-| `[p]pixelagents enable` | Enable guild mirroring and run a full sync |
-| `[p]pixelagents disable` | Disable guild mirroring and despawn all agents |
-| `[p]pixelagents sync` | Manually reconcile guild members |
-| `[p]pixelagents despawnall` | Despawn all tracked agents without disabling |
-| `[p]pixelagents includebots <true/false>` | Toggle bot user mirroring |
-| `[p]pixelagents producerurl <url>` | Override the producer WebSocket URL |
-| `[p]pixelagents toolcleardelay <seconds>` | Set message indicator duration |
-| `[p]pixelagents richpresence <true/false>` | Toggle Spotify/game activity bubbles |
-| `[p]pixelagents messages <true/false>` | Toggle Discord message tool bubbles |
-| `[p]pixelagents editorrole [role]` | Set or clear the editor role |
-| `[p]pixelagents layout save <name> [overwrite]` | Save the host's current layout |
-| `[p]pixelagents layout load <name>` | Force-load a saved layout into the shared frontend |
-| `[p]pixelagents layout delete <name>` | Delete a saved layout |
-| `[p]pixelagents layout list` | List saved layouts |
-| `[p]pixelagents layout share <name>` | Upload a saved layout as a JSON attachment |
+| `[p]pixelagents status` | Configuration, client count, asset state |
+| `[p]pixelagents enable` / `disable` | Guild mirroring on/off |
+| `[p]pixelagents sync` / `despawnall` | Reconcile / clear agents |
+| `[p]pixelagents includebots <bool>` | Mirror bot users |
+| `[p]pixelagents wsport <port>` | Office server port |
+| `[p]pixelagents toolcleardelay <s>` | Message bubble duration |
+| `[p]pixelagents richpresence <bool>` | Activity bubbles |
+| `[p]pixelagents messages <bool>` | Message bubbles |
+| `[p]pixelagents editorrole [role]` | Editor role |
+| `[p]pixelagents layout save/load/delete/list/share` | Saved layouts |
 
----
+`layout load` writes the layout and broadcasts `layoutLoaded` to every open tab.
 
-## End-to-End Verification
+## Rebuilding after changes
 
-1. Confirm `pixel-agents` Docker network exists; `red-pico` and `standalone`
-   are both attached to it.
-2. Load the cog. `[p]pixelagents status` should show "Connected: ✅".
-3. Enable a guild: `[p]pixelagents enable`.
-4. Open `https://pico.red.lair.nntin.xyz/third-party/pixelagents` in a browser.
-5. Confirm online/idle/dnd users appear as agents; going offline despawns them.
-6. Send a Discord message from a tracked user — confirm the tool bubble appears
-   and clears after `message_tool_clear_delay` seconds.
-7. For editor auth: complete Discord OAuth at `/api/discord/auth/start`.
-   Bot owners, guild administrators, and configured-role members should be
-   granted editor access; others denied.
-8. Save, list, load, delete, and share a layout via the Discord layout commands.
-
-## Rebuilding After Changes
-
-| What changed | Action required |
+| What changed | Action |
 |---|---|
-| `pixelagents.py` or `webview_dist/` | None — cog directory is volume-mounted; Red hot-reloads or `[p]reload pixelagents` |
-| `vendor/red-web-dashboard/reddash/…` (routes patch) | `docker compose build red-dashboard-pico && docker compose up -d red-dashboard-pico` (from `projects/redstack/`) |
-| `webview-ui/` source in pixel-agents repo | `npm run build:webview:pico` → copy output to `webview_dist/` → reload cog |
-| `pixelpipes/docker-compose.yml` Traefik labels | `docker compose up -d standalone` (from `projects/pixelpipes/`) |
-| `pixelpipes/.env` (e.g. `DISCORD_REDIRECT_URI`) | `docker compose up -d standalone` (from `projects/pixelpipes/`) |
+| `pixelagents.py` or `webview_dist/` | None — `/cogs` is bind-mounted; hot-reload or `[p]reload pixelagents` |
+| `vendor/pixel-agents` (webview source) | `./scripts/build-webview`, then reload the cog |
+| `vendor/red-web-dashboard` (routes patch) | `docker compose build red-dashboard-pico && docker compose up -d red-dashboard-pico` |
+| Traefik labels / instance env | `./scripts/update-compose && docker compose up -d` |
+
+Third-party registration is cached by the dashboard process: after changing a
+`dashboard_page` signature, restart `red-dashboard-pico` so its
+`app.variables["third_parties"]` resyncs.

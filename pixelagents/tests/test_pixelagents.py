@@ -35,9 +35,12 @@ import aiohttp  # stubbed by conftest
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _activity(activity_type):
+def _activity(activity_type, name="Some Game"):
     a = MagicMock()
     a.type = activity_type
+    # `name` must be a real string: MagicMock's auto-attribute is not JSON
+    # serializable, and presence labels are serialized onto the wire.
+    a.name = name
     return a
 
 
@@ -61,22 +64,37 @@ def _make_cog():
     cog.bot = bot
     cfg = _FakeConfig()
     cfg._global = {
-        "producer_url": "ws://standalone:3210/ws/producer",
+        "ws_host": "0.0.0.0",
+        "ws_port": 3210,
         "message_tool_clear_delay": 2.0,
         "editor_role_id": None,
         "broadcast_rich_presence": True,
         "broadcast_messages": True,
+        "layout": None,
+        "seats": {},
     }
     cog.config = cfg
     cog._agents = {}
+    cog._sync_task = None
     cog._presence_cache = {}
     cog._logged_collisions = set()
-    cog._ws = None
-    cog._ws_session = None
-    cog._connect_task = None
-    cog._pending_layout_requests = {}
+    cog._runner = None
+    cog._clients = {}
+    cog._tickets = {}
+    cog._assets = {}
     cog._closing = False
     return cog
+
+
+def _connect(cog, authorized=False):
+    """Attach a fake office client to the cog and return it."""
+    socket = _FakeClientWebSocketResponse()
+    cog._clients[socket] = authorized
+    return socket
+
+
+def _sent_types(socket):
+    return [json.loads(raw)["type"] for raw in socket._sent]
 
 
 def _make_enabled_cog():
@@ -220,8 +238,7 @@ class TestRichPresence(unittest.TestCase):
 class TestSend(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cog = _make_cog()
-        self.ws = _FakeClientWebSocketResponse()
-        self.cog._ws = self.ws
+        self.ws = _connect(self.cog)
 
     async def test_send_serializes_json(self):
         await self.cog._send({"type": "agentClosed", "id": -42})
@@ -229,32 +246,69 @@ class TestSend(unittest.IsolatedAsyncioTestCase):
         parsed = json.loads(self.ws._sent[0])
         self.assertEqual(parsed["type"], "agentClosed")
 
-    async def test_send_noop_when_no_ws(self):
-        self.cog._ws = None
+    async def test_send_reaches_every_client(self):
+        other = _connect(self.cog)
+        await self.cog._send({"type": "agentClosed", "id": -42})
+        self.assertEqual(len(self.ws._sent), 1)
+        self.assertEqual(len(other._sent), 1)
+
+    async def test_send_noop_when_no_clients(self):
+        self.cog._clients = {}
         await self.cog._send({"type": "test"})
 
-    async def test_send_noop_when_closed(self):
+    async def test_send_drops_closed_clients(self):
         self.ws.closed = True
         await self.cog._send({"type": "test"})
         self.assertEqual(len(self.ws._sent), 0)
+        self.assertNotIn(self.ws, self.cog._clients)
 
 
 # ---------------------------------------------------------------------------
-# Tests: send_hello
+# Tests: bootstrap on webviewReady
 # ---------------------------------------------------------------------------
 
-class TestSendHello(unittest.IsolatedAsyncioTestCase):
+class TestBootstrap(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cog = _make_cog()
-        self.ws = _FakeClientWebSocketResponse()
-        self.cog._ws = self.ws
+        self.cog._assets = {
+            "characters": [{"down": [], "up": [], "right": []}],
+            "floors": [[["#000"]]],
+            "walls": [[[["#000"]]]],
+            "carpets": [[[["#000"]]]],
+            "furniture": {"DESK": [["#000"]]},
+            "catalog": [{"id": "DESK", "name": "Desk", "label": "Desk", "category": "desks",
+                         "file": "DESK.png", "width": 16, "height": 16, "footprintW": 1,
+                         "footprintH": 1, "isDesk": True, "canPlaceOnWalls": False}],
+        }
+        self.cog._default_layout = lambda: _valid_layout()
+        self.ws = _connect(self.cog)
 
-    async def test_hello_includes_auth_check_capability(self):
-        await self.cog._send_hello()
-        msg = json.loads(self.ws._sent[0])
-        self.assertEqual(msg["type"], "producerHello")
-        self.assertIn("auth-check", msg["capabilities"])
-        self.assertIn("layout-control", msg["capabilities"])
+    async def test_capabilities_arrive_first(self):
+        await self.cog._send_bootstrap(self.ws)
+        self.assertEqual(_sent_types(self.ws)[0], "providerCapabilities")
+
+    async def test_layout_arrives_after_existing_agents(self):
+        """The webview buffers existingAgents and only builds characters on
+        layoutLoaded, so a layout-first bootstrap renders an empty office."""
+        await self.cog._send_bootstrap(self.ws)
+        types = _sent_types(self.ws)
+        self.assertLess(types.index("existingAgents"), types.index("layoutLoaded"))
+
+    async def test_sends_every_asset_family(self):
+        await self.cog._send_bootstrap(self.ws)
+        types = _sent_types(self.ws)
+        for expected in (
+            "characterSpritesLoaded", "floorTilesLoaded", "wallTilesLoaded",
+            "carpetTilesLoaded", "furnitureAssetsLoaded", "settingsLoaded",
+        ):
+            self.assertIn(expected, types)
+
+    async def test_replays_presence_bubbles_after_layout(self):
+        self.cog._agents[(100, 1)] = ("online", "Tin")
+        self.cog._presence_cache[(100, 1)] = "Spotify"
+        await self.cog._send_bootstrap(self.ws)
+        types = _sent_types(self.ws)
+        self.assertGreater(types.index("agentToolStart"), types.index("layoutLoaded"))
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +351,7 @@ class TestDashboardWebviewHosting(unittest.IsolatedAsyncioTestCase):
             (root / "index.html").write_text("<!doctype html><div id=\"root\"></div>", encoding="utf-8")
             cog._webview_dist_root = lambda: root
 
-            result = await cog.dashboard_webview()
+            result = await cog.dashboard_webview(user_id=1)
 
         self.assertEqual(result["status"], 0)
         self.assertTrue(result["web_content"]["standalone"])
@@ -311,8 +365,7 @@ class TestDashboardWebviewHosting(unittest.IsolatedAsyncioTestCase):
 class TestSendExistingAgents(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cog = _make_cog()
-        self.ws = _FakeClientWebSocketResponse()
-        self.cog._ws = self.ws
+        self.ws = _connect(self.cog)
 
     async def test_empty_agents(self):
         await self.cog._send_existing_agents()
@@ -343,8 +396,7 @@ class TestSendExistingAgents(unittest.IsolatedAsyncioTestCase):
 class TestReconcileMember(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cog = _make_cog()
-        self.ws = _FakeClientWebSocketResponse()
-        self.cog._ws = self.ws
+        self.ws = _connect(self.cog)
 
     async def test_new_visible_member_spawns(self):
         m = _member(status="online")
@@ -427,8 +479,7 @@ class TestReconcileMember(unittest.IsolatedAsyncioTestCase):
 class TestCloseAgent(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cog = _make_cog()
-        self.ws = _FakeClientWebSocketResponse()
-        self.cog._ws = self.ws
+        self.ws = _connect(self.cog)
 
     async def test_close_sends_agent_closed(self):
         self.cog._agents[(100, 1)] = ("online", "Tin")
@@ -609,105 +660,132 @@ class TestCheckAuth(unittest.IsolatedAsyncioTestCase):
 # Tests: handle_server_message
 # ---------------------------------------------------------------------------
 
-class TestHandleServerMessage(unittest.IsolatedAsyncioTestCase):
+class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cog = _make_cog()
-        self.ws = _FakeClientWebSocketResponse()
-        self.cog._ws = self.ws
+        self.viewer = _connect(self.cog, authorized=False)
+        self.editor = _connect(self.cog, authorized=True)
 
-    async def test_bootstrap_request_sends_existing_agents(self):
-        await self.cog._handle_server_message({"type": "producerBootstrapRequest"})
-        msg = json.loads(self.ws._sent[0])
-        self.assertEqual(msg["type"], "existingAgents")
+    async def test_webview_ready_triggers_bootstrap(self):
+        self.cog._send_bootstrap = AsyncMock()
+        await self.cog._handle_client_message(self.viewer, {"type": "webviewReady"})
+        self.cog._send_bootstrap.assert_awaited_once_with(self.viewer)
 
-    async def test_auth_check_request_replies(self):
-        self.cog._check_auth = AsyncMock(return_value=True)
-        await self.cog._handle_server_message({
-            "type": "producerAuthCheckRequest",
-            "requestId": "req-1",
-            "discordUserId": "12345",
-        })
-        reply = json.loads(self.ws._sent[0])
-        self.assertEqual(reply["type"], "producerAuthCheckReply")
-        self.assertEqual(reply["requestId"], "req-1")
-        self.assertTrue(reply["allowed"])
+    async def test_viewer_cannot_save_layout(self):
+        await self.cog._handle_client_message(
+            self.viewer, {"type": "saveLayout", "layout": _valid_layout()}
+        )
+        self.assertIsNone(await self.cog.config.layout())
 
-    async def test_auth_check_denied(self):
-        self.cog._check_auth = AsyncMock(return_value=False)
-        await self.cog._handle_server_message({
-            "type": "producerAuthCheckRequest",
-            "requestId": "req-2",
-            "discordUserId": "99999",
-        })
-        reply = json.loads(self.ws._sent[0])
-        self.assertFalse(reply["allowed"])
-
-    async def test_auth_check_invalid_user_id_denied(self):
-        self.cog._check_auth = AsyncMock(return_value=False)
-        await self.cog._handle_server_message({
-            "type": "producerAuthCheckRequest",
-            "requestId": "req-3",
-            "discordUserId": "not-a-number",
-        })
-        reply = json.loads(self.ws._sent[0])
-        self.assertFalse(reply["allowed"])
-
-    async def test_layout_reply_resolves_pending_request(self):
-        future = asyncio.get_event_loop().create_future()
-        self.cog._pending_layout_requests["layout-1"] = future
-
-        await self.cog._handle_server_message({
-            "type": "producerLayoutSnapshotReply",
-            "requestId": "layout-1",
-            "ok": True,
-            "layout": _valid_layout(),
-        })
-
-        self.assertTrue(future.done())
-        self.assertTrue(future.result()["ok"])
-
-
-class TestLayoutControlRequests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.cog = _make_cog()
-        self.ws = _FakeClientWebSocketResponse()
-        self.cog._ws = self.ws
-
-    async def test_snapshot_request_sends_request_id_and_returns_reply(self):
-        task = asyncio.create_task(self.cog._request_layout_snapshot())
-        await asyncio.sleep(0)
-
-        sent = json.loads(self.ws._sent[0])
-        self.assertEqual(sent["type"], "producerLayoutSnapshotRequest")
-        self.assertIn("requestId", sent)
-
-        await self.cog._handle_server_message({
-            "type": "producerLayoutSnapshotReply",
-            "requestId": sent["requestId"],
-            "ok": True,
-            "layout": _valid_layout(),
-        })
-
-        reply = await task
-        self.assertTrue(reply["ok"])
-
-    async def test_load_request_sends_layout(self):
+    async def test_editor_can_save_layout(self):
         layout = _valid_layout()
-        task = asyncio.create_task(self.cog._request_layout_load(layout))
-        await asyncio.sleep(0)
+        await self.cog._handle_client_message(self.editor, {"type": "saveLayout", "layout": layout})
+        self.assertEqual(await self.cog.config.layout(), layout)
 
-        sent = json.loads(self.ws._sent[0])
-        self.assertEqual(sent["type"], "producerLayoutLoadRequest")
-        self.assertEqual(sent["layout"], layout)
+    async def test_saved_layout_is_mirrored_to_other_tabs(self):
+        await self.cog._handle_client_message(
+            self.editor, {"type": "saveLayout", "layout": _valid_layout()}
+        )
+        self.assertIn("layoutLoaded", _sent_types(self.viewer))
+        # The saving client already applied it locally; echoing would be noise.
+        self.assertEqual(_sent_types(self.editor), [])
 
-        await self.cog._handle_server_message({
-            "type": "producerLayoutLoadReply",
-            "requestId": sent["requestId"],
-            "ok": True,
-        })
+    async def test_invalid_layout_is_rejected(self):
+        await self.cog._handle_client_message(
+            self.editor, {"type": "saveLayout", "layout": {"version": 99}}
+        )
+        self.assertIsNone(await self.cog.config.layout())
 
-        reply = await task
-        self.assertTrue(reply["ok"])
+    async def test_viewer_cannot_save_seats(self):
+        await self.cog._handle_client_message(
+            self.viewer, {"type": "saveAgentSeats", "seats": {"-1": {"seatId": "a"}}}
+        )
+        self.assertEqual(await self.cog.config.seats(), {})
+
+    async def test_editor_seats_are_persisted(self):
+        await self.cog._handle_client_message(
+            self.editor,
+            {"type": "saveAgentSeats", "seats": {"-1": {"seatId": "chair:1", "palette": 2}}},
+        )
+        seats = await self.cog.config.seats()
+        self.assertEqual(seats["-1"]["seatId"], "chair:1")
+        self.assertEqual(seats["-1"]["palette"], 2)
+
+    async def test_out_of_range_palette_is_ignored(self):
+        await self.cog._handle_client_message(
+            self.editor, {"type": "saveAgentSeats", "seats": {"-1": {"palette": 999}}}
+        )
+        self.assertNotIn("palette", (await self.cog.config.seats())["-1"])
+
+
+class TestTicketInjection(unittest.IsolatedAsyncioTestCase):
+    async def _render(self, html):
+        cog = _make_cog()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "index.html").write_text(html, encoding="utf-8")
+            cog._webview_dist_root = lambda: root
+            result = await cog.dashboard_webview(user_id=777)
+        return cog, result["web_content"]["source"]
+
+    async def test_shim_is_injected_before_the_bundle(self):
+        html = '<!doctype html><head><script src="/app.js"></script></head><body></body>'
+        _, source = await self._render(html)
+        # The constructor must be patched before the module bundle runs, or the
+        # socket is opened without a ticket.
+        self.assertLess(source.index("window.WebSocket = Patched"), source.index("/app.js"))
+
+    async def test_injected_ticket_resolves_to_the_visitor(self):
+        cog, source = await self._render("<!doctype html><head></head><body></body>")
+        ticket = next(iter(cog._tickets))
+        self.assertIn(ticket, source)
+        self.assertEqual(cog._resolve_ticket(ticket), 777)
+
+    async def test_headless_document_still_gets_the_shim(self):
+        _, source = await self._render("<div id='root'></div>")
+        self.assertIn("window.WebSocket = Patched", source)
+
+
+class TestEditorTickets(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+
+    def test_minted_ticket_resolves_to_user(self):
+        ticket = self.cog._mint_ticket(4242)
+        self.assertEqual(self.cog._resolve_ticket(ticket), 4242)
+
+    def test_unknown_ticket_resolves_to_none(self):
+        self.assertIsNone(self.cog._resolve_ticket("nope"))
+
+    def test_expired_ticket_is_rejected_and_dropped(self):
+        ticket = self.cog._mint_ticket(1)
+        user_id, _ = self.cog._tickets[ticket]
+        self.cog._tickets[ticket] = (user_id, 0.0)
+        self.assertIsNone(self.cog._resolve_ticket(ticket))
+        self.assertNotIn(ticket, self.cog._tickets)
+
+    def test_minting_evicts_expired_tickets(self):
+        stale = self.cog._mint_ticket(1)
+        self.cog._tickets[stale] = (1, 0.0)
+        self.cog._mint_ticket(2)
+        self.assertNotIn(stale, self.cog._tickets)
+
+
+class TestLayoutOwnership(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.cog = _make_cog()
+
+    async def test_saved_layout_wins_over_bundled_default(self):
+        layout = _valid_layout()
+        await self.cog.config.layout.set(layout)
+        self.cog._default_layout = lambda: {"version": 1, "cols": 9, "rows": 9,
+                                            "tiles": [0] * 81, "furniture": []}
+        self.assertEqual(await self.cog._current_layout(), layout)
+
+    async def test_falls_back_to_bundled_default(self):
+        default = _valid_layout()
+        self.cog._default_layout = lambda: default
+        self.assertEqual(await self.cog._current_layout(), default)
 
 
 # ---------------------------------------------------------------------------
@@ -798,8 +876,7 @@ class TestMemberRemoveListener(unittest.IsolatedAsyncioTestCase):
 class TestOnMessage(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cog = _make_enabled_cog()
-        self.ws = _FakeClientWebSocketResponse()
-        self.cog._ws = self.ws
+        self.ws = _connect(self.cog)
 
     async def test_message_sends_tool_start(self):
         self.cog._agents[(100, 1)] = ("online", "Tin")
@@ -863,18 +940,23 @@ class TestToolClearDelayCommand(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.cog.config.message_tool_clear_delay(), 2.0)
 
 
-class TestProducerUrlCommand(unittest.IsolatedAsyncioTestCase):
+class TestWsPortCommand(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.cog = _make_cog()
 
-    async def test_sets_url(self):
+    def _ctx(self):
         ctx = MagicMock()
         ctx.interaction = None
         ctx.send = AsyncMock()
-        await self.cog.cmd_producerurl(ctx, "ws://newhost:3210/ws/producer")
-        self.assertEqual(
-            await self.cog.config.producer_url(), "ws://newhost:3210/ws/producer"
-        )
+        return ctx
+
+    async def test_sets_port(self):
+        await self.cog.cmd_wsport(self._ctx(), 4300)
+        self.assertEqual(await self.cog.config.ws_port(), 4300)
+
+    async def test_rejects_out_of_range_port(self):
+        await self.cog.cmd_wsport(self._ctx(), 70000)
+        self.assertEqual(await self.cog.config.ws_port(), 3210)
 
 
 class TestLayoutCommands(unittest.IsolatedAsyncioTestCase):
@@ -883,7 +965,7 @@ class TestLayoutCommands(unittest.IsolatedAsyncioTestCase):
         self.cog.bot.is_owner = AsyncMock(return_value=True)
 
     async def test_save_stores_snapshot(self):
-        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": _valid_layout()})
+        self.cog._current_layout = AsyncMock(return_value=_valid_layout())
         ctx = _layout_ctx()
 
         await self.cog.cmd_layout_save(ctx, "Office")
@@ -894,7 +976,7 @@ class TestLayoutCommands(unittest.IsolatedAsyncioTestCase):
         ctx.send.assert_awaited()
 
     async def test_save_rejects_duplicate_without_overwrite(self):
-        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": _valid_layout()})
+        self.cog._current_layout = AsyncMock(return_value=_valid_layout())
         ctx = _layout_ctx()
 
         await self.cog.cmd_layout_save(ctx, "Office")
@@ -903,7 +985,7 @@ class TestLayoutCommands(unittest.IsolatedAsyncioTestCase):
         self.assertIn("already exists", ctx.send.call_args[0][0])
 
     async def test_save_overwrites_existing(self):
-        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": _valid_layout()})
+        self.cog._current_layout = AsyncMock(return_value=_valid_layout())
         ctx = _layout_ctx()
 
         await self.cog.cmd_layout_save(ctx, "Office")
@@ -913,20 +995,21 @@ class TestLayoutCommands(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(layouts), 1)
         self.assertIn("Overwrote", ctx.send.call_args[0][0])
 
-    async def test_load_sends_saved_layout_to_host(self):
+    async def test_load_stores_layout_and_pushes_it_to_open_tabs(self):
         layout = _valid_layout()
-        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": layout})
-        self.cog._request_layout_load = AsyncMock(return_value={"ok": True})
+        self.cog._current_layout = AsyncMock(return_value=layout)
+        client = _connect(self.cog)
         ctx = _layout_ctx()
 
         await self.cog.cmd_layout_save(ctx, "Office")
         await self.cog.cmd_layout_load(ctx, "Office")
 
-        self.cog._request_layout_load.assert_awaited_once_with(layout)
+        self.assertEqual(await self.cog.config.layout(), layout)
+        self.assertIn("layoutLoaded", _sent_types(client))
         self.assertIn("Loaded", ctx.send.call_args[0][0])
 
     async def test_delete_removes_only_requested_layout(self):
-        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": _valid_layout()})
+        self.cog._current_layout = AsyncMock(return_value=_valid_layout())
         ctx = _layout_ctx()
 
         await self.cog.cmd_layout_save(ctx, "Office")
@@ -936,7 +1019,7 @@ class TestLayoutCommands(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(layouts, {})
 
     async def test_share_uploads_public_file(self):
-        self.cog._request_layout_snapshot = AsyncMock(return_value={"ok": True, "layout": _valid_layout()})
+        self.cog._current_layout = AsyncMock(return_value=_valid_layout())
         ctx = _layout_ctx()
 
         await self.cog.cmd_layout_save(ctx, "Office")
@@ -947,12 +1030,12 @@ class TestLayoutCommands(unittest.IsolatedAsyncioTestCase):
 
     async def test_unauthorized_user_cannot_save(self):
         self.cog.bot.is_owner = AsyncMock(return_value=False)
-        self.cog._request_layout_snapshot = AsyncMock()
+        self.cog._current_layout = AsyncMock()
         ctx = _layout_ctx()
 
         await self.cog.cmd_layout_save(ctx, "Office")
 
-        self.cog._request_layout_snapshot.assert_not_awaited()
+        self.cog._current_layout.assert_not_awaited()
         self.assertIn("not authorized", ctx.send.call_args[0][0])
 
 
