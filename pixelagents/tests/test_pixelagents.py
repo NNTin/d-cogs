@@ -351,7 +351,7 @@ class TestDashboardWebviewHosting(unittest.IsolatedAsyncioTestCase):
             (root / "index.html").write_text("<!doctype html><div id=\"root\"></div>", encoding="utf-8")
             cog._webview_dist_root = lambda: root
 
-            result = await cog.dashboard_webview(user_id=1)
+            result = await cog.dashboard_webview()
 
         self.assertEqual(result["status"], 0)
         self.assertTrue(result["web_content"]["standalone"])
@@ -725,7 +725,7 @@ class TestTicketInjection(unittest.IsolatedAsyncioTestCase):
             root = Path(tmp)
             (root / "index.html").write_text(html, encoding="utf-8")
             cog._webview_dist_root = lambda: root
-            result = await cog.dashboard_webview(user_id=777)
+            result = await cog.dashboard_webview()
         return cog, result["web_content"]["source"]
 
     async def test_shim_is_injected_before_the_bundle(self):
@@ -735,15 +735,72 @@ class TestTicketInjection(unittest.IsolatedAsyncioTestCase):
         # socket is opened without a ticket.
         self.assertLess(source.index("window.WebSocket = Patched"), source.index("/app.js"))
 
-    async def test_injected_ticket_resolves_to_the_visitor(self):
+    async def test_office_page_mints_no_ticket(self):
+        """The office is public; identity only exists on the editor page."""
         cog, source = await self._render("<!doctype html><head></head><body></body>")
-        ticket = next(iter(cog._tickets))
-        self.assertIn(ticket, source)
-        self.assertEqual(cog._resolve_ticket(ticket), 777)
+        self.assertEqual(cog._tickets, {})
+        self.assertIn("localStorage.getItem", source)
 
     async def test_headless_document_still_gets_the_shim(self):
         _, source = await self._render("<div id='root'></div>")
         self.assertIn("window.WebSocket = Patched", source)
+
+
+class TestEditorPage(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+        self.cog.bot.is_owner = AsyncMock(return_value=True)
+
+    async def test_authorized_user_gets_a_working_ticket(self):
+        result = await self.cog.dashboard_editor(
+            user_id=777, request_url="https://pico.nntin.xyz/third-party/pixelagents/editor"
+        )
+        source = result["web_content"]["source"]
+        ticket = next(iter(self.cog._tickets))
+        self.assertIn(ticket, source)
+        self.assertIn("localStorage.setItem", source)
+        self.assertEqual(self.cog._resolve_ticket(ticket), 777)
+
+    async def test_unauthorized_user_gets_no_ticket(self):
+        self.cog.bot.is_owner = AsyncMock(return_value=False)
+        result = await self.cog.dashboard_editor(
+            user_id=777, request_url="https://pico.nntin.xyz/third-party/pixelagents/editor"
+        )
+        self.assertEqual(self.cog._tickets, {})
+        self.assertIn("not authorized", result["web_content"]["source"])
+
+    async def test_redirects_back_to_the_office(self):
+        result = await self.cog.dashboard_editor(
+            user_id=777, request_url="https://pico.nntin.xyz/third-party/pixelagents/editor"
+        )
+        self.assertIn("/third-party/pixelagents", result["web_content"]["source"])
+        self.assertNotIn("/editor", result["web_content"]["source"])
+
+
+class TestOfficeUrlDerivation(unittest.TestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+
+    def test_strips_editor_segment(self):
+        self.assertEqual(
+            self.cog._office_url("https://pico.nntin.xyz/third-party/pixelagents/editor"),
+            "/third-party/pixelagents",
+        )
+
+    def test_ignores_query_string(self):
+        self.assertEqual(
+            self.cog._office_url("https://pico.nntin.xyz/third-party/pixelagents/editor?x=1"),
+            "/third-party/pixelagents",
+        )
+
+    def test_tolerates_trailing_slash(self):
+        self.assertEqual(
+            self.cog._office_url("https://pico.nntin.xyz/third-party/pixelagents/editor/"),
+            "/third-party/pixelagents",
+        )
+
+    def test_falls_back_when_url_is_missing(self):
+        self.assertEqual(self.cog._office_url(None), "/third-party/pixelagents")
 
 
 class TestEditorTickets(unittest.IsolatedAsyncioTestCase):

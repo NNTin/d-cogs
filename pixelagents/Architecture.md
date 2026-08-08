@@ -73,11 +73,15 @@ network namespace.
 ## Serving the bundle
 
 ```text
-GET /third-party/pixelagents
+GET /third-party/pixelagents                     ← public, no login
   → third_parties_blueprint.third_party
   → DASHBOARDRPC_THIRDPARTIES__DATA_RECEIVE over RPC
-  → dashboard_webview(user_id=…) → index.html + ticket shim
+  → dashboard_webview() → index.html + ticket shim
   → rendered with standalone: true
+
+GET /third-party/pixelagents/editor              ← login required
+  → dashboard_editor(user_id=…) → mints a ticket
+  → HTML that stores it in localStorage and redirects to the office
 
 GET /third-party/pixelagents/static/<asset_path>
   → third_party_static()  (a redstack patch, not upstream reddash)
@@ -89,11 +93,16 @@ GET /third-party/pixelagents/static/<asset_path>
 (`candidate.relative_to(root)`), so a crafted `asset_path` cannot escape
 `webview_dist/`.
 
-> **Never pass `context_ids` to `dashboard_page`.** The decorator infers it
-> from the signature: a `user_id` parameter with no default becomes a context
-> ID, which makes the page require login and delivers the visitor's Discord ID.
-> Passing `context_ids` explicitly skips that branch, `user_id` lands in
-> `required_kwargs`, and the page 404s unless the URL carries `?user_id=`.
+> **A `user_id` parameter is what forces a login.** `/third-party/<name>`
+> carries no `@login_required` of its own; the redirect comes from the
+> `"user_id" in context_ids` branch in reddash's `routes.py`, and the decorator
+> infers `context_ids` from the signature. So the office page omits `user_id`
+> (public) and the editor page declares it (login-gated). Adding the parameter
+> to `dashboard_webview` would silently make the whole office private again.
+>
+> **Never pass `context_ids` explicitly.** That skips the inference branch,
+> `user_id` lands in `required_kwargs`, and the page 404s unless the URL
+> carries `?user_id=`.
 
 ## Building `webview_dist`
 
@@ -138,12 +147,29 @@ default layout has no pets.
 
 ## Editor authorization
 
-The office page requires a dashboard login, so the cog knows the visitor's
-Discord ID. It mints a ticket (8 h TTL, bound to that ID) and injects a script
-that wraps `window.WebSocket` to append `?ticket=…` to the `/ws` URL — upstream
-offers no hook for a credential, and Traefik routes `/ws` past the dashboard so
-the session cookie never reaches the socket. The vendored bundle stays
-byte-identical to upstream's build.
+**The office is public.** Anyone can open it and watch; no Discord account
+required. Presence data is public by the same token — an anonymous `/ws`
+connection is accepted and served the full bootstrap, which is what makes the
+unauthenticated view work at all.
+
+Editing is opt-in through a second, login-gated page:
+
+```text
+visitor → /third-party/pixelagents            public, read-only
+        → /third-party/pixelagents/editor     Discord login
+        → ticket stored in localStorage, redirect back
+        → office reconnects with ?ticket=…    editor
+```
+
+The office page injects a script that wraps `window.WebSocket` and appends
+`?ticket=…` when localStorage holds one — upstream offers no hook for a
+credential, and Traefik routes `/ws` past the dashboard so the session cookie
+never reaches the socket. With no ticket the socket connects unchanged. The
+vendored bundle stays byte-identical to upstream's build.
+
+Tickets live in same-origin localStorage, so any script on this origin could
+read one. The dashboard is the only app on the host, and a stolen ticket grants
+nothing beyond office editing.
 
 On handshake the cog resolves the ticket and applies:
 
@@ -155,8 +181,10 @@ Allow if ANY of:
 Deny otherwise
 ```
 
-Unauthorized sockets are still served the office as **read-only viewers**;
-`saveLayout`, `saveAgentSeats`, and `importLayout` are dropped server-side.
+Unauthenticated and unauthorized sockets are still served the office as
+**read-only viewers**; `saveLayout`, `saveAgentSeats`, and `importLayout` are
+dropped server-side. An authenticated user who fails the policy gets an
+explanatory page instead of a ticket.
 
 ## Configuration
 

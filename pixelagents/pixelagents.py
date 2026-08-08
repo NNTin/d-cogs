@@ -12,6 +12,7 @@ import re
 import secrets
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, web
 import discord
@@ -58,18 +59,27 @@ _EDITOR_MESSAGES = frozenset({"saveLayout", "saveAgentSeats", "importLayout"})
 _READING_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]
 _SUBAGENT_TOOL_NAMES = ["Task", "Agent"]
 
+# Where the editor ticket lives in the browser. Same-origin localStorage, so it
+# survives the redirect back from the login-gated editor page and any later
+# reload of the (public) office page.
+_TICKET_STORAGE_KEY = "pixelagents.ticket"
+
 # Injected ahead of the bundle so the office's WebSocket carries the editor
-# ticket. Upstream builds its socket URL as `<origin>/ws` with no room for a
-# credential, and Traefik routes /ws past the dashboard, so the session cookie
-# alone cannot identify the viewer. Wrapping the constructor keeps the vendored
-# bundle byte-identical to what upstream builds.
+# ticket when the visitor has one. Upstream builds its socket URL as
+# `<origin>/ws` with no room for a credential, and Traefik routes /ws past the
+# dashboard, so the session cookie alone cannot identify the viewer. Wrapping
+# the constructor keeps the vendored bundle byte-identical to upstream's build.
+#
+# The office page itself is public: with no stored ticket the socket connects
+# unchanged and the server treats it as a read-only viewer.
 _TICKET_SHIM = """<script>
 (function () {
-  var ticket = %s;
+  var ticket = null;
+  try { ticket = window.localStorage.getItem(%s); } catch (e) { /* private mode */ }
   var Native = window.WebSocket;
   function Patched(url, protocols) {
     try {
-      if (typeof url === 'string' && url.indexOf('/ws') !== -1) {
+      if (ticket && typeof url === 'string' && url.indexOf('/ws') !== -1) {
         url += (url.indexOf('?') === -1 ? '?' : '&') + 'ticket=' + encodeURIComponent(ticket);
       }
     } catch (e) { /* fall through with the original url */ }
@@ -83,6 +93,26 @@ _TICKET_SHIM = """<script>
   window.WebSocket = Patched;
 })();
 </script>"""
+
+# Served by the login-gated editor page. Stores the freshly minted ticket and
+# bounces back to the office, which picks it up from localStorage on load.
+_EDITOR_HANDOFF = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Pixel Agents — enabling editing</title>
+  </head>
+  <body>
+    <p>Editing enabled. Returning to the office…</p>
+    <p><a id="back" href="%(office)s">Continue</a></p>
+    <script>
+      (function () {
+        try { window.localStorage.setItem(%(key)s, %(ticket)s); } catch (e) {}
+        window.location.replace(%(office_js)s);
+      })();
+    </script>
+  </body>
+</html>"""
 
 
 def dashboard_page(*args, **kwargs):
@@ -213,13 +243,14 @@ class pixelagents(commands.Cog):
             return None
         return user_id
 
-    # `user_id` in the signature is what makes the dashboard treat this as a
-    # logged-in page and hand us the visitor's Discord ID. Do NOT also pass
-    # `context_ids` to the decorator: it skips the inference branch and files
-    # `user_id` under required_kwargs instead, which turns the page into a 404
-    # unless the caller appends `?user_id=`.
+    # Deliberately NO `user_id` parameter: the dashboard infers `context_ids`
+    # from the signature, and a `user_id` there is the only thing that makes
+    # `/third-party/<name>` redirect to the login page (the route carries no
+    # @login_required of its own). Keeping it out is what makes the office
+    # public. The login-gated `editor` page below is where identity is
+    # established for people who want to edit.
     @dashboard_page(name=None, description="Pixel Agents webview.", methods=("GET",))
-    async def dashboard_webview(self, user_id: int, **kwargs) -> dict:
+    async def dashboard_webview(self, **kwargs) -> dict:
         index_path = self._resolve_webview_asset("index.html")
         if index_path is None:
             return {
@@ -229,7 +260,7 @@ class pixelagents(commands.Cog):
             }
 
         source = index_path.read_text(encoding="utf-8")
-        shim = _TICKET_SHIM % json.dumps(self._mint_ticket(user_id))
+        shim = _TICKET_SHIM % json.dumps(_TICKET_STORAGE_KEY)
         # Immediately after <head>, i.e. ahead of the bundle's own <script>.
         # The bundle is a deferred module so a later inline script would still
         # win, but relying on that is a trap for whoever edits this next.
@@ -244,6 +275,66 @@ class pixelagents(commands.Cog):
             "web_content": {
                 "standalone": True,
                 "source": source,
+            },
+        }
+
+    def _office_url(self, request_url: Optional[str]) -> str:
+        """The office page URL, derived from this page's own URL.
+
+        The third-party mount point depends on the cog's qualified name and the
+        dashboard's routing, so deriving it beats hardcoding: strip the trailing
+        `/editor` segment (and any query) off the request we were called for.
+        """
+        default = "/third-party/pixelagents"
+        if not request_url:
+            return default
+        try:
+            parsed = urlsplit(request_url)
+        except ValueError:
+            return default
+        path = parsed.path.rstrip("/")
+        if path.lower().endswith("/editor"):
+            path = path[: -len("/editor")]
+        return path or default
+
+    # `user_id` in the signature is what makes the dashboard treat this as a
+    # logged-in page and hand us the visitor's Discord ID -- this page, and only
+    # this page, requires a Discord login. Do NOT also pass `context_ids` to the
+    # decorator: that skips the inference branch and files `user_id` under
+    # required_kwargs instead, which 404s the page unless the caller appends
+    # `?user_id=`.
+    @dashboard_page(
+        name="editor",
+        description="Enable Pixel Agents office editing.",
+        methods=("GET",),
+    )
+    async def dashboard_editor(self, user_id: int, **kwargs) -> dict:
+        office = self._office_url(kwargs.get("request_url"))
+        allowed = await self._check_auth(user_id)
+        if not allowed:
+            # Authenticated but not an editor. Say so rather than handing over a
+            # ticket the socket would refuse anyway.
+            return {
+                "status": 0,
+                "web_content": {
+                    "standalone": False,
+                    "source": (
+                        "<p>Your Discord account is not authorized to edit the Pixel Agents "
+                        f'office.</p><p><a href="{office}">Back to the office</a></p>'
+                    ),
+                },
+            }
+
+        return {
+            "status": 0,
+            "web_content": {
+                "standalone": True,
+                "source": _EDITOR_HANDOFF % {
+                    "office": office,
+                    "office_js": json.dumps(office),
+                    "key": json.dumps(_TICKET_STORAGE_KEY),
+                    "ticket": json.dumps(self._mint_ticket(user_id)),
+                },
             },
         }
 
