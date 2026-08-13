@@ -351,7 +351,7 @@ class TestDashboardWebviewHosting(unittest.IsolatedAsyncioTestCase):
             (root / "index.html").write_text("<!doctype html><div id=\"root\"></div>", encoding="utf-8")
             cog._webview_dist_root = lambda: root
 
-            result = await cog.dashboard_webview(user_id=1)
+            result = await cog.dashboard_webview()
 
         self.assertEqual(result["status"], 0)
         self.assertTrue(result["web_content"]["standalone"])
@@ -717,6 +717,22 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("palette", (await self.cog.config.seats())["-1"])
 
+    async def test_authorize_with_valid_ticket_upgrades_viewer_to_editor(self):
+        self.cog._check_auth = AsyncMock(return_value=True)
+        ticket = self.cog._mint_ticket(4242)
+        await self.cog._handle_client_message(self.viewer, {"type": "authorize", "ticket": ticket})
+        self.assertTrue(self.cog._clients[self.viewer])
+
+    async def test_authorize_with_unknown_ticket_stays_viewer(self):
+        await self.cog._handle_client_message(self.viewer, {"type": "authorize", "ticket": "nope"})
+        self.assertFalse(self.cog._clients[self.viewer])
+
+    async def test_authorize_with_valid_ticket_but_failed_authz_stays_viewer(self):
+        self.cog._check_auth = AsyncMock(return_value=False)
+        ticket = self.cog._mint_ticket(4242)
+        await self.cog._handle_client_message(self.viewer, {"type": "authorize", "ticket": ticket})
+        self.assertFalse(self.cog._clients[self.viewer])
+
 
 class TestTicketInjection(unittest.IsolatedAsyncioTestCase):
     async def _render(self, html):
@@ -725,25 +741,39 @@ class TestTicketInjection(unittest.IsolatedAsyncioTestCase):
             root = Path(tmp)
             (root / "index.html").write_text(html, encoding="utf-8")
             cog._webview_dist_root = lambda: root
-            result = await cog.dashboard_webview(user_id=777)
+            result = await cog.dashboard_webview()
         return cog, result["web_content"]["source"]
 
     async def test_shim_is_injected_before_the_bundle(self):
         html = '<!doctype html><head><script src="/app.js"></script></head><body></body>'
         _, source = await self._render(html)
         # The constructor must be patched before the module bundle runs, or the
-        # socket is opened without a ticket.
+        # socket is opened without a chance to be authorized.
         self.assertLess(source.index("window.WebSocket = Patched"), source.index("/app.js"))
 
-    async def test_injected_ticket_resolves_to_the_visitor(self):
-        cog, source = await self._render("<!doctype html><head></head><body></body>")
-        ticket = next(iter(cog._tickets))
-        self.assertIn(ticket, source)
-        self.assertEqual(cog._resolve_ticket(ticket), 777)
+    async def test_webview_page_does_not_mint_a_ticket(self):
+        # The webview page is public and must not know the visitor's Discord
+        # ID; tickets are only minted by the login-gated `session` page.
+        cog, _source = await self._render("<!doctype html><head></head><body></body>")
+        self.assertEqual(cog._tickets, {})
+
+    async def test_shim_fetches_the_session_page(self):
+        _, source = await self._render("<!doctype html><head></head><body></body>")
+        self.assertIn("/session", source)
 
     async def test_headless_document_still_gets_the_shim(self):
         _, source = await self._render("<div id='root'></div>")
         self.assertIn("window.WebSocket = Patched", source)
+
+
+class TestSessionTicketPage(unittest.IsolatedAsyncioTestCase):
+    async def test_session_page_mints_a_ticket_for_the_visitor(self):
+        cog = _make_cog()
+        result = await cog.dashboard_session(user_id=777)
+        self.assertEqual(result["status"], 0)
+        body = json.loads(base64.b64decode(result["raw_response"]["body_base64"]))
+        ticket = body["ticket"]
+        self.assertEqual(cog._resolve_ticket(ticket), 777)
 
 
 class TestEditorTickets(unittest.IsolatedAsyncioTestCase):

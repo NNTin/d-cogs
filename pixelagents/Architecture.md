@@ -38,14 +38,16 @@ flowchart TD
     Traefik -- "② default rule → :42356" --> Dashboard
     Dashboard -- "③ RPC :6133" --> Bot
     Bot --> Cog
-    Cog -- "④ index.html + ticket shim" --> Dashboard
+    Cog -- "④ index.html + authorize shim" --> Dashboard
     Dashboard -- "⑤ HTML/JS bundle" --> Browser
 
     Browser -- "⑥ GET /static/assets/*" --> Traefik
     Traefik --> Dashboard
 
-    Browser -- "⑦ wss://pico.nntin.xyz/ws?ticket=…" --> Traefik
+    Browser -- "⑦ wss://pico.nntin.xyz/ws" --> Traefik
     Traefik -- "Path(/ws) priority 100 → :3210" --> Cog
+    Browser -- "⑧ background GET /third-party/pixelagents/session (if logged in)" --> Traefik
+    Browser -- "⑨ {type:authorize, ticket} over the open socket" --> Cog
 
     Discord -- "presence · member · message" --> Bot
 ```
@@ -73,11 +75,15 @@ network namespace.
 ## Serving the bundle
 
 ```text
-GET /third-party/pixelagents
+GET /third-party/pixelagents            (public — no login required)
   → third_parties_blueprint.third_party
   → DASHBOARDRPC_THIRDPARTIES__DATA_RECEIVE over RPC
-  → dashboard_webview(user_id=…) → index.html + ticket shim
+  → dashboard_webview() → index.html + authorize shim
   → rendered with standalone: true
+
+GET /third-party/pixelagents/session    (login required)
+  → dashboard_session(user_id=…) → {"ticket": "…"} as JSON
+  → fetched in the background by the shim, not navigated to directly
 
 GET /third-party/pixelagents/static/<asset_path>
   → third_party_static()  (a redstack patch, not upstream reddash)
@@ -89,11 +95,16 @@ GET /third-party/pixelagents/static/<asset_path>
 (`candidate.relative_to(root)`), so a crafted `asset_path` cannot escape
 `webview_dist/`.
 
-> **Never pass `context_ids` to `dashboard_page`.** The decorator infers it
-> from the signature: a `user_id` parameter with no default becomes a context
-> ID, which makes the page require login and delivers the visitor's Discord ID.
-> Passing `context_ids` explicitly skips that branch, `user_id` lands in
-> `required_kwargs`, and the page 404s unless the URL carries `?user_id=`.
+> **`dashboard_page` infers `context_ids` from the function signature**: any
+> parameter with no default named `user_id` (or `guild_id`, `member_id`, …)
+> becomes a context ID, which makes the dashboard require login before
+> serving that page and hand back the visitor's Discord ID. `dashboard_webview`
+> deliberately has no such parameter — that's what keeps the office public.
+> `dashboard_session` deliberately does — that's the only login-gated route.
+> Never pass `context_ids` explicitly to the decorator: it skips the
+> inference branch and files the same-named parameter under
+> `required_kwargs` instead, which 404s unless the caller appends the id as a
+> query string (e.g. `?user_id=`).
 
 ## Building `webview_dist`
 
@@ -138,14 +149,28 @@ default layout has no pets.
 
 ## Editor authorization
 
-The office page requires a dashboard login, so the cog knows the visitor's
-Discord ID. It mints a ticket (8 h TTL, bound to that ID) and injects a script
-that wraps `window.WebSocket` to append `?ticket=…` to the `/ws` URL — upstream
-offers no hook for a credential, and Traefik routes `/ws` past the dashboard so
-the session cookie never reaches the socket. The vendored bundle stays
-byte-identical to upstream's build.
+The office page (`dashboard_webview`) is public — anyone can load it without a
+dashboard login, and every socket starts out as a read-only viewer. Knowing
+who a visitor *is* still requires a dashboard login, though, so identifying an
+editor happens out-of-band:
 
-On handshake the cog resolves the ticket and applies:
+1. The injected shim opens the office `/ws` socket immediately (viewers never
+   wait on anything).
+2. In parallel, the shim does a background `fetch()` of the `session` page.
+   That page is login-gated (`dashboard_session(user_id=…)`), so an
+   already-logged-in visitor gets back `{"ticket": "…"}` (8 h TTL, minted
+   bound to their Discord ID); an anonymous visitor's fetch gets redirected to
+   the dashboard's login HTML, which fails to parse as the expected JSON and
+   is swallowed silently — no navigation, no prompt.
+3. If a ticket comes back, the shim sends `{"type": "authorize", "ticket":
+   "…"}` over the already-open socket.
+
+Upstream offers no hook for a credential, and Traefik routes `/ws` past the
+dashboard so the session cookie never reaches the socket — the ticket is the
+only channel. The vendored bundle stays byte-identical to upstream's build;
+none of this touches it.
+
+On receiving `authorize` the cog resolves the ticket and applies:
 
 ```text
 Allow if ANY of:
@@ -155,8 +180,9 @@ Allow if ANY of:
 Deny otherwise
 ```
 
-Unauthorized sockets are still served the office as **read-only viewers**;
-`saveLayout`, `saveAgentSeats`, and `importLayout` are dropped server-side.
+Sockets that never authorize (or fail the check above) stay **read-only
+viewers**; `saveLayout`, `saveAgentSeats`, and `importLayout` are dropped
+server-side regardless of what the client claims.
 
 ## Configuration
 

@@ -58,22 +58,51 @@ _EDITOR_MESSAGES = frozenset({"saveLayout", "saveAgentSeats", "importLayout"})
 _READING_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]
 _SUBAGENT_TOOL_NAMES = ["Task", "Agent"]
 
-# Injected ahead of the bundle so the office's WebSocket carries the editor
-# ticket. Upstream builds its socket URL as `<origin>/ws` with no room for a
-# credential, and Traefik routes /ws past the dashboard, so the session cookie
-# alone cannot identify the viewer. Wrapping the constructor keeps the vendored
-# bundle byte-identical to what upstream builds.
+# Injected ahead of the bundle so the office's WebSocket can be upgraded to an
+# editor session without the webview page itself requiring a dashboard login.
+# The webview is public (anonymous visitors connect as read-only viewers); this
+# shim opens the socket immediately and, in parallel, asks the `session` page
+# (which *does* require login) for a ticket. Logged-in visitors get one and the
+# shim sends it over the already-open socket; anonymous visitors get a failed
+# fetch, swallowed silently, and stay viewers. Upstream builds its socket URL
+# as `<origin>/ws` with no room for a credential, and Traefik routes /ws past
+# the dashboard, so the session cookie never reaches the socket either way.
+# Wrapping the constructor keeps the vendored bundle byte-identical to what
+# upstream builds.
 _TICKET_SHIM = """<script>
 (function () {
-  var ticket = %s;
   var Native = window.WebSocket;
-  function Patched(url, protocols) {
-    try {
-      if (typeof url === 'string' && url.indexOf('/ws') !== -1) {
-        url += (url.indexOf('?') === -1 ? '?' : '&') + 'ticket=' + encodeURIComponent(ticket);
+  var ticketPromise = fetch(location.pathname + '/session', {
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+  })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (data) { return (data && data.ticket) || null; })
+    .catch(function () { return null; });
+
+  function authorize(socket) {
+    ticketPromise.then(function (ticket) {
+      if (!ticket) { return; }
+      var payload = JSON.stringify({ type: 'authorize', ticket: ticket });
+      if (socket.readyState === Native.OPEN) {
+        socket.send(payload);
+        return;
       }
-    } catch (e) { /* fall through with the original url */ }
-    return protocols === undefined ? new Native(url) : new Native(url, protocols);
+      if (socket.readyState === Native.CONNECTING) {
+        socket.addEventListener('open', function once() {
+          socket.removeEventListener('open', once);
+          socket.send(payload);
+        });
+      }
+    });
+  }
+
+  function Patched(url, protocols) {
+    var socket = protocols === undefined ? new Native(url) : new Native(url, protocols);
+    if (typeof url === 'string' && url.indexOf('/ws') !== -1) {
+      authorize(socket);
+    }
+    return socket;
   }
   Patched.prototype = Native.prototype;
   Patched.CONNECTING = Native.CONNECTING;
@@ -213,13 +242,16 @@ class pixelagents(commands.Cog):
             return None
         return user_id
 
-    # `user_id` in the signature is what makes the dashboard treat this as a
-    # logged-in page and hand us the visitor's Discord ID. Do NOT also pass
-    # `context_ids` to the decorator: it skips the inference branch and files
-    # `user_id` under required_kwargs instead, which turns the page into a 404
-    # unless the caller appends `?user_id=`.
+    # No `user_id` (or any other context-id-shaped name) in this signature —
+    # that's what keeps this page public. `dashboard_page` infers context_ids
+    # from parameters with no default, so a bare `user_id: int` here would
+    # make the dashboard force a login before serving the page at all. Do NOT
+    # add one back and do NOT pass `context_ids` explicitly either (that skips
+    # the inference branch and files a same-named param under required_kwargs
+    # instead, 404ing unless the caller appends `?user_id=`). Editor
+    # authorization is handled out-of-band by `dashboard_session` below.
     @dashboard_page(name=None, description="Pixel Agents webview.", methods=("GET",))
-    async def dashboard_webview(self, user_id: int, **kwargs) -> dict:
+    async def dashboard_webview(self, **kwargs) -> dict:
         index_path = self._resolve_webview_asset("index.html")
         if index_path is None:
             return {
@@ -229,21 +261,43 @@ class pixelagents(commands.Cog):
             }
 
         source = index_path.read_text(encoding="utf-8")
-        shim = _TICKET_SHIM % json.dumps(self._mint_ticket(user_id))
         # Immediately after <head>, i.e. ahead of the bundle's own <script>.
         # The bundle is a deferred module so a later inline script would still
         # win, but relying on that is a trap for whoever edits this next.
         match = re.search(r"<head[^>]*>", source, re.IGNORECASE)
         if match:
-            source = source[: match.end()] + "\n" + shim + source[match.end():]
+            source = source[: match.end()] + "\n" + _TICKET_SHIM + source[match.end():]
         else:
-            source = shim + source
+            source = _TICKET_SHIM + source
 
         return {
             "status": 0,
             "web_content": {
                 "standalone": True,
                 "source": source,
+            },
+        }
+
+    # Unlike `dashboard_webview`, `user_id` here has no default, so the
+    # dashboard *does* require login for this one page and hands us the
+    # visitor's Discord ID. That's intentional: it's the only way a visitor
+    # can mint an editor ticket, and it's fetched in the background by the
+    # shim above rather than being a page a person navigates to.
+    @dashboard_page(
+        name="session",
+        description="Pixel Agents editor session ticket.",
+        methods=("GET",),
+        hidden=True,
+    )
+    async def dashboard_session(self, user_id: int, **kwargs) -> dict:
+        body = json.dumps({"ticket": self._mint_ticket(user_id)}).encode("utf-8")
+        return {
+            "status": 0,
+            "raw_response": {
+                "status": 200,
+                "content_type": "application/json",
+                "body_base64": base64.b64encode(body).decode("ascii"),
+                "headers": {"Cache-Control": "no-store"},
             },
         }
 
@@ -593,7 +647,18 @@ class pixelagents(commands.Cog):
             log.info("pixelagents: dropped %s from an unauthorized office client", msg_type)
             return
 
-        if msg_type == "webviewReady":
+        if msg_type == "authorize":
+            # Sent out-of-band by the injected shim once its background
+            # fetch of the `session` page resolves. The webview page itself
+            # is public, so a socket starts as an unauthorized viewer and is
+            # only upgraded here, after the ticket is independently validated
+            # (mint + authz check), never trusted from the client alone.
+            ticket = data.get("ticket")
+            user_id = self._resolve_ticket(ticket) if ticket else None
+            if user_id and await self._check_auth(user_id):
+                self._clients[socket] = True
+                log.info("pixelagents: office client upgraded to editor")
+        elif msg_type == "webviewReady":
             await self._send_bootstrap(socket)
         elif msg_type == "saveLayout":
             layout = data.get("layout")
