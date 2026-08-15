@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import json
 import logging
 import mimetypes
@@ -12,8 +11,9 @@ import re
 import secrets
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import urlparse
 
+import aiohttp
 from aiohttp import WSMsgType, web
 import discord
 from discord import app_commands
@@ -23,10 +23,13 @@ from redbot.core.bot import Red
 log = logging.getLogger("red.d_cogs.pixelagents")
 
 _VISIBLE_STATUSES = {"online", "idle", "dnd"}
-_MAX_LAYOUTS_PER_USER = 20
-_MAX_LAYOUT_BYTES = 1024 * 1024
-_LAYOUT_NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 _WEBVIEW_CACHE_CONTROL = "public, max-age=3600"
+_DEFAULT_PIXEL_INDEX_API_URL = "https://pixel-index-api-staging.nntin.xyz"
+_DEFAULT_PIXEL_INDEX_WEB_URL = "https://pixel-index.vercel.app"
+_PIXEL_INDEX_HEALTH_TIMEOUT = 5.0
+_PIXEL_INDEX_REQUEST_TIMEOUT = 10.0
+_LAYOUT_SEARCH_PAGE_SIZE = 5
+_LAYOUT_SORT_CHOICES = ("newest", "furniture", "largest", "title")
 
 # JavaScript Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991
 _JS_MAX_SAFE = (1 << 53) - 1
@@ -59,31 +62,51 @@ _EDITOR_MESSAGES = frozenset({"saveLayout", "saveAgentSeats", "importLayout"})
 _READING_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]
 _SUBAGENT_TOOL_NAMES = ["Task", "Agent"]
 
-# Where the editor ticket lives in the browser. Same-origin localStorage, so it
-# survives the redirect back from the login-gated editor page and any later
-# reload of the (public) office page.
-_TICKET_STORAGE_KEY = "pixelagents.ticket"
-
-# Injected ahead of the bundle so the office's WebSocket carries the editor
-# ticket when the visitor has one. Upstream builds its socket URL as
-# `<origin>/ws` with no room for a credential, and Traefik routes /ws past the
-# dashboard, so the session cookie alone cannot identify the viewer. Wrapping
-# the constructor keeps the vendored bundle byte-identical to upstream's build.
-#
-# The office page itself is public: with no stored ticket the socket connects
-# unchanged and the server treats it as a read-only viewer.
+# Injected ahead of the bundle so the office's WebSocket can be upgraded to an
+# editor session without the webview page itself requiring a dashboard login.
+# The webview is public (anonymous visitors connect as read-only viewers); this
+# shim opens the socket immediately and, in parallel, asks the `session` page
+# (which *does* require login) for a ticket. Logged-in visitors get one and the
+# shim sends it over the already-open socket; anonymous visitors get a failed
+# fetch, swallowed silently, and stay viewers. Upstream builds its socket URL
+# as `<origin>/ws` with no room for a credential, and Traefik routes /ws past
+# the dashboard, so the session cookie never reaches the socket either way.
+# Wrapping the constructor keeps the vendored bundle byte-identical to what
+# upstream builds.
 _TICKET_SHIM = """<script>
 (function () {
-  var ticket = null;
-  try { ticket = window.localStorage.getItem(%s); } catch (e) { /* private mode */ }
   var Native = window.WebSocket;
-  function Patched(url, protocols) {
-    try {
-      if (ticket && typeof url === 'string' && url.indexOf('/ws') !== -1) {
-        url += (url.indexOf('?') === -1 ? '?' : '&') + 'ticket=' + encodeURIComponent(ticket);
+  var ticketPromise = fetch(location.pathname + '/session', {
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+  })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (data) { return (data && data.ticket) || null; })
+    .catch(function () { return null; });
+
+  function authorize(socket) {
+    ticketPromise.then(function (ticket) {
+      if (!ticket) { return; }
+      var payload = JSON.stringify({ type: 'authorize', ticket: ticket });
+      if (socket.readyState === Native.OPEN) {
+        socket.send(payload);
+        return;
       }
-    } catch (e) { /* fall through with the original url */ }
-    return protocols === undefined ? new Native(url) : new Native(url, protocols);
+      if (socket.readyState === Native.CONNECTING) {
+        socket.addEventListener('open', function once() {
+          socket.removeEventListener('open', once);
+          socket.send(payload);
+        });
+      }
+    });
+  }
+
+  function Patched(url, protocols) {
+    var socket = protocols === undefined ? new Native(url) : new Native(url, protocols);
+    if (typeof url === 'string' && url.indexOf('/ws') !== -1) {
+      authorize(socket);
+    }
+    return socket;
   }
   Patched.prototype = Native.prototype;
   Patched.CONNECTING = Native.CONNECTING;
@@ -93,26 +116,6 @@ _TICKET_SHIM = """<script>
   window.WebSocket = Patched;
 })();
 </script>"""
-
-# Served by the login-gated editor page. Stores the freshly minted ticket and
-# bounces back to the office, which picks it up from localStorage on load.
-_EDITOR_HANDOFF = """<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <title>Pixel Agents — enabling editing</title>
-  </head>
-  <body>
-    <p>Editing enabled. Returning to the office…</p>
-    <p><a id="back" href="%(office)s">Continue</a></p>
-    <script>
-      (function () {
-        try { window.localStorage.setItem(%(key)s, %(ticket)s); } catch (e) {}
-        window.location.replace(%(office_js)s);
-      })();
-    </script>
-  </body>
-</html>"""
 
 
 def dashboard_page(*args, **kwargs):
@@ -152,13 +155,12 @@ class pixelagents(commands.Cog):
             layout=None,
             # agent_id (as str) -> {palette, hueShift, seatId}
             seats={},
+            pixel_index_api_url=_DEFAULT_PIXEL_INDEX_API_URL,
+            pixel_index_web_url=_DEFAULT_PIXEL_INDEX_WEB_URL,
         )
         self.config.register_guild(
             enabled=False,
             include_bots=True,
-        )
-        self.config.register_user(
-            layouts={},
         )
         # Active agents: (guild_id, user_id) -> (folder_name, display_name)
         self._agents: Dict[Tuple[int, int], Tuple[str, str]] = {}
@@ -243,12 +245,14 @@ class pixelagents(commands.Cog):
             return None
         return user_id
 
-    # Deliberately NO `user_id` parameter: the dashboard infers `context_ids`
-    # from the signature, and a `user_id` there is the only thing that makes
-    # `/third-party/<name>` redirect to the login page (the route carries no
-    # @login_required of its own). Keeping it out is what makes the office
-    # public. The login-gated `editor` page below is where identity is
-    # established for people who want to edit.
+    # No `user_id` (or any other context-id-shaped name) in this signature —
+    # that's what keeps this page public. `dashboard_page` infers context_ids
+    # from parameters with no default, so a bare `user_id: int` here would
+    # make the dashboard force a login before serving the page at all. Do NOT
+    # add one back and do NOT pass `context_ids` explicitly either (that skips
+    # the inference branch and files a same-named param under required_kwargs
+    # instead, 404ing unless the caller appends `?user_id=`). Editor
+    # authorization is handled out-of-band by `dashboard_session` below.
     @dashboard_page(name=None, description="Pixel Agents webview.", methods=("GET",))
     async def dashboard_webview(self, **kwargs) -> dict:
         index_path = self._resolve_webview_asset("index.html")
@@ -260,15 +264,14 @@ class pixelagents(commands.Cog):
             }
 
         source = index_path.read_text(encoding="utf-8")
-        shim = _TICKET_SHIM % json.dumps(_TICKET_STORAGE_KEY)
         # Immediately after <head>, i.e. ahead of the bundle's own <script>.
         # The bundle is a deferred module so a later inline script would still
         # win, but relying on that is a trap for whoever edits this next.
         match = re.search(r"<head[^>]*>", source, re.IGNORECASE)
         if match:
-            source = source[: match.end()] + "\n" + shim + source[match.end():]
+            source = source[: match.end()] + "\n" + _TICKET_SHIM + source[match.end():]
         else:
-            source = shim + source
+            source = _TICKET_SHIM + source
 
         return {
             "status": 0,
@@ -278,63 +281,26 @@ class pixelagents(commands.Cog):
             },
         }
 
-    def _office_url(self, request_url: Optional[str]) -> str:
-        """The office page URL, derived from this page's own URL.
-
-        The third-party mount point depends on the cog's qualified name and the
-        dashboard's routing, so deriving it beats hardcoding: strip the trailing
-        `/editor` segment (and any query) off the request we were called for.
-        """
-        default = "/third-party/pixelagents"
-        if not request_url:
-            return default
-        try:
-            parsed = urlsplit(request_url)
-        except ValueError:
-            return default
-        path = parsed.path.rstrip("/")
-        if path.lower().endswith("/editor"):
-            path = path[: -len("/editor")]
-        return path or default
-
-    # `user_id` in the signature is what makes the dashboard treat this as a
-    # logged-in page and hand us the visitor's Discord ID -- this page, and only
-    # this page, requires a Discord login. Do NOT also pass `context_ids` to the
-    # decorator: that skips the inference branch and files `user_id` under
-    # required_kwargs instead, which 404s the page unless the caller appends
-    # `?user_id=`.
+    # Unlike `dashboard_webview`, `user_id` here has no default, so the
+    # dashboard *does* require login for this one page and hands us the
+    # visitor's Discord ID. That's intentional: it's the only way a visitor
+    # can mint an editor ticket, and it's fetched in the background by the
+    # shim above rather than being a page a person navigates to.
     @dashboard_page(
-        name="editor",
-        description="Enable Pixel Agents office editing.",
+        name="session",
+        description="Pixel Agents editor session ticket.",
         methods=("GET",),
+        hidden=True,
     )
-    async def dashboard_editor(self, user_id: int, **kwargs) -> dict:
-        office = self._office_url(kwargs.get("request_url"))
-        allowed = await self._check_auth(user_id)
-        if not allowed:
-            # Authenticated but not an editor. Say so rather than handing over a
-            # ticket the socket would refuse anyway.
-            return {
-                "status": 0,
-                "web_content": {
-                    "standalone": False,
-                    "source": (
-                        "<p>Your Discord account is not authorized to edit the Pixel Agents "
-                        f'office.</p><p><a href="{office}">Back to the office</a></p>'
-                    ),
-                },
-            }
-
+    async def dashboard_session(self, user_id: int, **kwargs) -> dict:
+        body = json.dumps({"ticket": self._mint_ticket(user_id)}).encode("utf-8")
         return {
             "status": 0,
-            "web_content": {
-                "standalone": True,
-                "source": _EDITOR_HANDOFF % {
-                    "office": office,
-                    "office_js": json.dumps(office),
-                    "key": json.dumps(_TICKET_STORAGE_KEY),
-                    "ticket": json.dumps(self._mint_ticket(user_id)),
-                },
+            "raw_response": {
+                "status": 200,
+                "content_type": "application/json",
+                "body_base64": base64.b64encode(body).decode("ascii"),
+                "headers": {"Cache-Control": "no-store"},
             },
         }
 
@@ -516,15 +482,6 @@ class pixelagents(commands.Cog):
     async def _current_layout(self) -> Optional[dict]:
         return await self.config.layout() or self._default_layout()
 
-    def _normalize_layout_name(self, name: str) -> Optional[str]:
-        clean = name.strip()
-        if not _LAYOUT_NAME_RE.fullmatch(clean):
-            return None
-        return clean.casefold()
-
-    def _layout_size(self, layout: dict) -> int:
-        return len(json.dumps(layout, separators=(",", ":"), sort_keys=True).encode("utf-8"))
-
     def _validate_layout(self, layout: Any) -> bool:
         if not isinstance(layout, dict):
             return False
@@ -684,7 +641,18 @@ class pixelagents(commands.Cog):
             log.info("pixelagents: dropped %s from an unauthorized office client", msg_type)
             return
 
-        if msg_type == "webviewReady":
+        if msg_type == "authorize":
+            # Sent out-of-band by the injected shim once its background
+            # fetch of the `session` page resolves. The webview page itself
+            # is public, so a socket starts as an unauthorized viewer and is
+            # only upgraded here, after the ticket is independently validated
+            # (mint + authz check), never trusted from the client alone.
+            ticket = data.get("ticket")
+            user_id = self._resolve_ticket(ticket) if ticket else None
+            if user_id and await self._check_auth(user_id):
+                self._clients[socket] = True
+                log.info("pixelagents: office client upgraded to editor")
+        elif msg_type == "webviewReady":
             await self._send_bootstrap(socket)
         elif msg_type == "saveLayout":
             layout = data.get("layout")
@@ -853,11 +821,6 @@ class pixelagents(commands.Cog):
             if role_id is not None and any(r.id == role_id for r in getattr(member, "roles", [])):
                 return True
         return False
-
-    async def _can_edit_layout_ctx(self, ctx: commands.Context) -> bool:
-        author = getattr(ctx, "author", None)
-        user_id = getattr(author, "id", 0)
-        return await self._can_edit_layout_user(user_id)
 
     # ------------------------------------------------------------------
     # Presence sync
@@ -1171,6 +1134,8 @@ class pixelagents(commands.Cog):
         editor_role_id = await self.config.editor_role_id()
         broadcast_rp = await self.config.broadcast_rich_presence()
         broadcast_msg = await self.config.broadcast_messages()
+        pixel_index_api_url = await self.config.pixel_index_api_url()
+        pixel_index_web_url = await self.config.pixel_index_web_url()
         enabled = await self.config.guild(ctx.guild).enabled()
         include_bots = await self.config.guild(ctx.guild).include_bots()
         tracked = sum(1 for (gid, _) in self._agents if gid == ctx.guild.id)
@@ -1204,6 +1169,8 @@ class pixelagents(commands.Cog):
         embed.add_field(name="Tracked Agents", value=str(tracked), inline=True)
         embed.add_field(name="Broadcast Rich Presence", value=yn(broadcast_rp), inline=True)
         embed.add_field(name="Broadcast Messages", value=yn(broadcast_msg), inline=True)
+        embed.add_field(name="Pixel Index API", value=pixel_index_api_url, inline=False)
+        embed.add_field(name="Pixel Index Web", value=pixel_index_web_url, inline=False)
 
         await self._reply(ctx, embed=embed)
 
@@ -1321,163 +1288,453 @@ class pixelagents(commands.Cog):
         await self._despawn_guild(ctx.guild)
         await self._reply(ctx, "Done.")
 
+    @pixelagents_group.group(name="index", invoke_without_command=True)
+    @commands.admin_or_permissions(administrator=True)
+    async def pixelagents_pixelindex_group(self, ctx: commands.Context) -> None:
+        """Show the configured Pixel Index API endpoint and check its health."""
+        if ctx.invoked_subcommand is not None:
+            return
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+        api_url = await self.config.pixel_index_api_url()
+        web_url = await self.config.pixel_index_web_url()
+        ok, detail = await self._check_pixel_index_health(api_url)
+        await self._reply(
+            ctx,
+            f"Pixel Index API: `{api_url}`\n"
+            f"Pixel Index Web: `{web_url}`\n"
+            f"Health check: {'✅ ' + detail if ok else '🛑 ' + detail}",
+        )
+
+    async def _check_pixel_index_health(self, url: str) -> Tuple[bool, str]:
+        health_url = url.rstrip("/") + "/health"
+        timeout = aiohttp.ClientTimeout(total=_PIXEL_INDEX_HEALTH_TIMEOUT)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(health_url) as resp:
+                    if resp.status == 200:
+                        return True, f"ok ({health_url})"
+                    return False, f"HTTP {resp.status} ({health_url})"
+        except Exception as exc:
+            return False, f"unreachable ({exc})"
+
+    @staticmethod
+    def _clean_url(url: str) -> Optional[str]:
+        clean = url.strip().rstrip("/")
+        parsed = urlparse(clean)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return None
+        return clean
+
+    @pixelagents_pixelindex_group.command(name="set")
+    @commands.admin_or_permissions(administrator=True)
+    @app_commands.describe(url="Pixel Index API base URL, e.g. https://pixel-index-api.nntin.xyz")
+    async def cmd_pixelindex_set(self, ctx: commands.Context, url: str) -> None:
+        """Set the Pixel Index API endpoint (e.g. to switch between prod and staging)."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+        clean = self._clean_url(url)
+        if clean is None:
+            await self._reply(ctx, "Please provide a valid URL, e.g. `https://pixel-index-api.nntin.xyz`.")
+            return
+        await self.config.pixel_index_api_url.set(clean)
+        ok, detail = await self._check_pixel_index_health(clean)
+        await self._reply(
+            ctx,
+            f"Pixel Index API endpoint set to `{clean}`.\nHealth check: {'✅ ' + detail if ok else '🛑 ' + detail}",
+        )
+
+    @pixelagents_pixelindex_group.command(name="setweb")
+    @commands.admin_or_permissions(administrator=True)
+    @app_commands.describe(url="Pixel Index web frontend base URL, e.g. https://pixel-index.vercel.app")
+    async def cmd_pixelindex_setweb(self, ctx: commands.Context, url: str) -> None:
+        """Set the Pixel Index web frontend base URL, used for "View on site" links."""
+        clean = self._clean_url(url)
+        if clean is None:
+            await self._reply(ctx, "Please provide a valid URL, e.g. `https://pixel-index.vercel.app`.")
+            return
+        await self.config.pixel_index_web_url.set(clean)
+        await self._reply(ctx, f"Pixel Index web frontend set to `{clean}`.")
+
+    # ------------------------------------------------------------------
+    # Pixel Index HTTP client
+    # ------------------------------------------------------------------
+
+    async def _pixel_index_get(self, path: str, params: Optional[dict] = None) -> Tuple[bool, Any]:
+        base = await self.config.pixel_index_api_url()
+        url = f"{base.rstrip('/')}{path}"
+        timeout = aiohttp.ClientTimeout(total=_PIXEL_INDEX_REQUEST_TIMEOUT)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, params=params) as resp:
+                    if resp.status != 200:
+                        return False, f"Pixel Index API returned HTTP {resp.status}."
+                    return True, await resp.json()
+        except Exception as exc:
+            return False, f"Could not reach the Pixel Index API: {exc}"
+
+    async def _pixel_index_search(
+        self,
+        *,
+        query: Optional[str],
+        tag: Optional[str],
+        sort: str,
+        cursor: Optional[str] = None,
+    ) -> Tuple[bool, Any]:
+        params: Dict[str, Any] = {"sort": sort, "limit": _LAYOUT_SEARCH_PAGE_SIZE}
+        if query:
+            params["q"] = query
+        if tag:
+            params["tags"] = tag
+        if cursor:
+            params["cursor"] = cursor
+        return await self._pixel_index_get("/api/v1/layouts", params)
+
+    async def _pixel_index_layout(self, slug: str) -> Tuple[bool, Any]:
+        return await self._pixel_index_get(f"/api/v1/layouts/{slug}")
+
+    async def _load_pixel_index_layout(self, user_id: int, slug: str) -> Tuple[bool, str]:
+        """Fetch a layout from Pixel Index and push it into the shared office."""
+        if not await self._can_edit_layout_user(user_id):
+            return False, "You are not authorized to manage Pixel Agents layouts."
+        ok, data = await self._pixel_index_layout(slug)
+        if not ok:
+            return False, str(data)
+        layout = data.get("layout")
+        if not self._validate_layout(layout):
+            return False, "That layout is invalid and cannot be loaded."
+        await self.config.layout.set(layout)
+        await self._send({"type": "layoutLoaded", "layout": layout})
+        return True, f"Loaded `{data.get('title', slug)}` into the office."
+
+    # ------------------------------------------------------------------
+    # Pixel Index layout browsing
+    # ------------------------------------------------------------------
+
     @pixelagents_group.group(name="layout", invoke_without_command=True)
     async def pixelagents_layout_group(self, ctx: commands.Context) -> None:
-        """Manage saved Pixelpipes layouts."""
+        """Browse shared office layouts from Pixel Index."""
         await ctx.send_help()
 
-    async def _require_layout_editor(self, ctx: commands.Context) -> bool:
-        if await self._can_edit_layout_ctx(ctx):
-            return True
-        await self._reply(ctx, "You are not authorized to manage Pixel Agents layouts.")
-        return False
-
-    async def _get_user_layouts(self, user) -> dict:
-        layouts = await self.config.user(user).layouts()
-        return dict(layouts or {})
-
-    async def _set_user_layouts(self, user, layouts: dict) -> None:
-        await self.config.user(user).layouts.set(layouts)
-
-    @pixelagents_layout_group.command(name="save")
+    @pixelagents_layout_group.command(name="search")
     @app_commands.describe(
-        name="Saved layout name",
-        overwrite="Overwrite an existing saved layout with this name",
+        query="Text to search for in the title/description",
+        tag="Only show layouts with this tag",
+        sort="Sort order",
     )
-    async def cmd_layout_save(self, ctx: commands.Context, name: str, overwrite: bool = False) -> None:
-        """Save the standalone host's current persisted layout."""
+    @app_commands.choices(
+        sort=[app_commands.Choice(name=choice, value=choice) for choice in _LAYOUT_SORT_CHOICES]
+    )
+    async def cmd_layout_search(
+        self,
+        ctx: commands.Context,
+        query: Optional[str] = None,
+        tag: Optional[str] = None,
+        sort: str = "newest",
+    ) -> None:
+        """Search Pixel Index for shared office layouts."""
         if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=True)
-        if not await self._require_layout_editor(ctx):
+            await ctx.interaction.response.defer()
+        if sort not in _LAYOUT_SORT_CHOICES:
+            sort = "newest"
+        ok, page = await self._pixel_index_search(query=query, tag=tag, sort=sort)
+        if not ok:
+            await self._send_public(ctx, str(page))
             return
-
-        key = self._normalize_layout_name(name)
-        if key is None:
-            await self._reply(ctx, "Layout names must be 1-64 characters and may only use letters, numbers, spaces, `_`, `-`, and `.`.")
+        if not page.get("layouts"):
+            await self._send_public(ctx, "No layouts found on Pixel Index.")
             return
+        api_base = await self.config.pixel_index_api_url()
+        web_base = await self.config.pixel_index_web_url()
+        view = _LayoutBrowseView(
+            self,
+            ctx.author.id,
+            query=query,
+            tag=tag,
+            sort=sort,
+            pages=[page],
+            page_index=0,
+            api_base=api_base,
+            web_base=web_base,
+        )
+        await self._send_public(ctx, view=view)
 
-        layouts = await self._get_user_layouts(ctx.author)
-        if key in layouts and not overwrite:
-            await self._reply(ctx, "A layout with that name already exists. Re-run with `overwrite: true` to replace it.")
-            return
-        if key not in layouts and len(layouts) >= _MAX_LAYOUTS_PER_USER:
-            await self._reply(ctx, f"You can save at most {_MAX_LAYOUTS_PER_USER} layouts. Delete one first.")
-            return
-
-        layout = await self._current_layout()
-        if not self._validate_layout(layout):
-            await self._reply(ctx, "There is no valid office layout to save yet.")
-            return
-
-        size = self._layout_size(layout)
-        if size > _MAX_LAYOUT_BYTES:
-            await self._reply(ctx, f"Layout is too large to save ({size} bytes, limit {_MAX_LAYOUT_BYTES} bytes).")
-            return
-
-        now = int(time.time())
-        existing = layouts.get(key, {})
-        display_name = name.strip()
-        layouts[key] = {
-            "display_name": display_name,
-            "created_at": existing.get("created_at", now),
-            "updated_at": now,
-            "size": size,
-            "layout": layout,
-        }
-        await self._set_user_layouts(ctx.author, layouts)
-        action = "Overwrote" if existing else "Saved"
-        await self._reply(ctx, f"{action} layout `{display_name}` ({size} bytes).")
-
-    @pixelagents_layout_group.command(name="load")
-    @app_commands.describe(name="Saved layout name")
-    async def cmd_layout_load(self, ctx: commands.Context, name: str) -> None:
-        """Load one of your saved layouts into the shared frontend."""
+    @pixelagents_layout_group.command(name="view")
+    @app_commands.describe(slug="Pixel Index layout slug")
+    async def cmd_layout_view(self, ctx: commands.Context, slug: str) -> None:
+        """Show a single Pixel Index layout by its slug."""
         if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=True)
-        if not await self._require_layout_editor(ctx):
+            await ctx.interaction.response.defer()
+        ok, detail = await self._pixel_index_layout(slug.strip().lower())
+        if not ok:
+            await self._send_public(ctx, str(detail))
             return
+        api_base = await self.config.pixel_index_api_url()
+        web_base = await self.config.pixel_index_web_url()
+        view = _LayoutDetailView(self, ctx.author.id, detail, api_base=api_base, web_base=web_base)
+        await self._send_public(ctx, view=view)
 
-        key = self._normalize_layout_name(name)
-        layouts = await self._get_user_layouts(ctx.author)
-        record = layouts.get(key or "")
-        if record is None:
-            await self._reply(ctx, "No saved layout found with that name.")
+
+def _abs_url(base: str, path: str) -> str:
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    return base.rstrip("/") + "/" + path.lstrip("/")
+
+
+class _LayoutBrowseView(discord.ui.LayoutView):
+    """Paginated Pixel Index search results, rendered with Components V2."""
+
+    def __init__(
+        self,
+        cog: "pixelagents",
+        owner_id: int,
+        *,
+        query: Optional[str],
+        tag: Optional[str],
+        sort: str,
+        pages: List[dict],
+        page_index: int,
+        api_base: str,
+        web_base: str,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.owner_id = owner_id
+        self.query = query
+        self.tag = tag
+        self.sort = sort
+        self.pages = pages
+        self.page_index = page_index
+        self.api_base = api_base
+        self.web_base = web_base
+        self._build()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the person who ran this search can use these controls.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _build(self) -> None:
+        page = self.pages[self.page_index]
+        layouts = page.get("layouts") or []
+        total = page.get("total", len(layouts))
+
+        header_bits = [f"**Pixel Index layouts** — {total} match(es)"]
+        if self.query:
+            header_bits.append(f"matching `{self.query}`")
+        if self.tag:
+            header_bits.append(f"tagged `{self.tag}`")
+        container = discord.ui.Container(discord.ui.TextDisplay(" ".join(header_bits)))
+
+        for entry in layouts:
+            author = entry.get("author") or {}
+            stats = (
+                f"{entry.get('visibleCols', '?')}×{entry.get('visibleRows', '?')} · "
+                f"{entry.get('furniture', 0)} furniture · by {author.get('displayName') or 'unknown'}"
+            )
+            tags = entry.get("tags") or []
+            lines = [f"**{entry.get('title') or entry['slug']}**", stats]
+            if tags:
+                lines.append("_" + ", ".join(tags) + "_")
+            thumbnail_path = (entry.get("files") or {}).get("thumbnail")
+            accessory = (
+                discord.ui.Thumbnail(_abs_url(self.api_base, thumbnail_path))
+                if thumbnail_path
+                else discord.ui.Button(label="?", disabled=True)
+            )
+            container.add_item(
+                discord.ui.Section(discord.ui.TextDisplay("\n".join(lines)), accessory=accessory)
+            )
+
+        select_row = discord.ui.ActionRow()
+        select = discord.ui.Select(
+            placeholder="View a layout…",
+            options=[
+                discord.SelectOption(
+                    label=(entry.get("title") or entry["slug"])[:100],
+                    value=entry["slug"],
+                    description=(entry.get("description") or "")[:100] or None,
+                )
+                for entry in layouts
+            ],
+        )
+        select.callback = self._make_select_callback(select)
+        select_row.add_item(select)
+        container.add_item(select_row)
+
+        nav_row = discord.ui.ActionRow()
+        prev_button = discord.ui.Button(
+            label="◀ Prev", style=discord.ButtonStyle.secondary, disabled=self.page_index == 0
+        )
+        prev_button.callback = self._on_prev
+        at_last_known_page = self.page_index >= len(self.pages) - 1
+        next_button = discord.ui.Button(
+            label="Next ▶",
+            style=discord.ButtonStyle.secondary,
+            disabled=at_last_known_page and page.get("nextCursor") is None,
+        )
+        next_button.callback = self._on_next
+        nav_row.add_item(prev_button)
+        nav_row.add_item(next_button)
+        container.add_item(nav_row)
+
+        self.add_item(container)
+
+    def _make_select_callback(self, select: discord.ui.Select) -> Callable:
+        async def on_select(interaction: discord.Interaction) -> None:
+            slug = select.values[0]
+            ok, detail = await self.cog._pixel_index_layout(slug)
+            if not ok:
+                await interaction.response.send_message(str(detail), ephemeral=True)
+                return
+            detail_view = _LayoutDetailView(
+                self.cog,
+                self.owner_id,
+                detail,
+                api_base=self.api_base,
+                web_base=self.web_base,
+                back=self,
+            )
+            await interaction.response.edit_message(view=detail_view)
+
+        return on_select
+
+    async def _on_prev(self, interaction: discord.Interaction) -> None:
+        if self.page_index == 0:
+            await interaction.response.defer()
             return
+        new_view = _LayoutBrowseView(
+            self.cog,
+            self.owner_id,
+            query=self.query,
+            tag=self.tag,
+            sort=self.sort,
+            pages=self.pages,
+            page_index=self.page_index - 1,
+            api_base=self.api_base,
+            web_base=self.web_base,
+        )
+        await interaction.response.edit_message(view=new_view)
 
-        layout = record.get("layout")
-        if not self._validate_layout(layout):
-            await self._reply(ctx, "Saved layout is invalid and cannot be loaded.")
-            return
+    async def _on_next(self, interaction: discord.Interaction) -> None:
+        if self.page_index + 1 < len(self.pages):
+            new_pages = self.pages
+            new_index = self.page_index + 1
+        else:
+            cursor = self.pages[self.page_index].get("nextCursor")
+            if not cursor:
+                await interaction.response.defer()
+                return
+            ok, page = await self.cog._pixel_index_search(
+                query=self.query, tag=self.tag, sort=self.sort, cursor=cursor
+            )
+            if not ok:
+                await interaction.response.send_message(str(page), ephemeral=True)
+                return
+            new_pages = self.pages + [page]
+            new_index = len(new_pages) - 1
+        new_view = _LayoutBrowseView(
+            self.cog,
+            self.owner_id,
+            query=self.query,
+            tag=self.tag,
+            sort=self.sort,
+            pages=new_pages,
+            page_index=new_index,
+            api_base=self.api_base,
+            web_base=self.web_base,
+        )
+        await interaction.response.edit_message(view=new_view)
 
-        await self.config.layout.set(layout)
-        # Push it to every open office tab so the change is live immediately.
-        await self._send({"type": "layoutLoaded", "layout": layout})
-        await self._reply(ctx, f"Loaded layout `{record.get('display_name', name.strip())}`.")
 
-    @pixelagents_layout_group.command(name="delete")
-    @app_commands.describe(name="Saved layout name")
-    async def cmd_layout_delete(self, ctx: commands.Context, name: str) -> None:
-        """Delete one of your saved layouts."""
-        if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=True)
-        if not await self._require_layout_editor(ctx):
-            return
+class _LayoutDetailView(discord.ui.LayoutView):
+    """A single Pixel Index layout, rendered with Components V2."""
 
-        key = self._normalize_layout_name(name)
-        layouts = await self._get_user_layouts(ctx.author)
-        record = layouts.pop(key or "", None)
-        if record is None:
-            await self._reply(ctx, "No saved layout found with that name.")
-            return
-        await self._set_user_layouts(ctx.author, layouts)
-        await self._reply(ctx, f"Deleted layout `{record.get('display_name', name.strip())}`.")
+    def __init__(
+        self,
+        cog: "pixelagents",
+        owner_id: int,
+        detail: dict,
+        *,
+        api_base: str,
+        web_base: str,
+        back: Optional["_LayoutBrowseView"] = None,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.owner_id = owner_id
+        self.detail = detail
+        self.api_base = api_base
+        self.web_base = web_base
+        self.back = back
+        self._build()
 
-    @pixelagents_layout_group.command(name="list")
-    async def cmd_layout_list(self, ctx: commands.Context) -> None:
-        """List your saved layouts."""
-        if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=True)
-        if not await self._require_layout_editor(ctx):
-            return
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can use these controls.", ephemeral=True
+            )
+            return False
+        return True
 
-        layouts = await self._get_user_layouts(ctx.author)
-        if not layouts:
-            await self._reply(ctx, "You have no saved layouts.")
-            return
+    def _build(self) -> None:
+        d = self.detail
+        author = d.get("author") or {}
+        lines = [f"**{d.get('title') or d.get('slug')}**"]
+        if d.get("description"):
+            lines.append(d["description"])
+        lines.append(
+            f"{d.get('visibleCols', '?')}×{d.get('visibleRows', '?')} · "
+            f"{d.get('furniture', 0)} furniture · {d.get('areas', 0)} areas · "
+            f"{d.get('pets', 0)} pets · {d.get('seats', 0)} seats"
+        )
+        lines.append(f"By {author.get('displayName') or 'unknown'}")
+        tags = d.get("tags") or []
+        if tags:
+            lines.append("Tags: " + ", ".join(tags))
 
-        records = sorted(layouts.values(), key=lambda item: item.get("updated_at", 0), reverse=True)
-        lines = []
-        for record in records:
-            updated_at = int(record.get("updated_at", 0))
-            timestamp = f"<t:{updated_at}:R>" if updated_at else "unknown time"
-            lines.append(f"- `{record.get('display_name', 'unnamed')}` ({record.get('size', 0)} bytes, updated {timestamp})")
-        await self._reply(ctx, "\n".join(lines))
+        container = discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)))
 
-    @pixelagents_layout_group.command(name="share")
-    @app_commands.describe(name="Saved layout name")
-    async def cmd_layout_share(self, ctx: commands.Context, name: str) -> None:
-        """Upload one of your saved layouts as layout.json."""
-        if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=False)
-        if not await self._require_layout_editor(ctx):
-            return
+        preview_path = (d.get("files") or {}).get("preview")
+        if preview_path:
+            container.add_item(
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(_abs_url(self.api_base, preview_path))
+                )
+            )
 
-        key = self._normalize_layout_name(name)
-        layouts = await self._get_user_layouts(ctx.author)
-        record = layouts.get(key or "")
-        if record is None:
-            await self._reply(ctx, "No saved layout found with that name.")
-            return
+        actions = discord.ui.ActionRow()
+        download_path = (d.get("files") or {}).get("layout")
+        if download_path:
+            actions.add_item(
+                discord.ui.Button(label="Download JSON", url=_abs_url(self.api_base, download_path))
+            )
+        slug = d.get("slug")
+        if slug:
+            actions.add_item(
+                discord.ui.Button(
+                    label="View on site", url=_abs_url(self.web_base, f"/layouts/{slug}")
+                )
+            )
+        load_button = discord.ui.Button(label="Load into office", style=discord.ButtonStyle.primary)
+        load_button.callback = self._on_load
+        actions.add_item(load_button)
+        if self.back is not None:
+            back_button = discord.ui.Button(label="◀ Back", style=discord.ButtonStyle.secondary)
+            back_button.callback = self._on_back
+            actions.add_item(back_button)
+        container.add_item(actions)
 
-        layout = record.get("layout")
-        if not self._validate_layout(layout):
-            await self._reply(ctx, "Saved layout is invalid and cannot be shared.")
-            return
+        self.add_item(container)
 
-        payload = json.dumps(layout, indent=2, sort_keys=True).encode("utf-8")
-        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", record.get("display_name", name.strip())).strip("-") or "layout"
-        file = discord.File(io.BytesIO(payload), filename=f"{safe_name}.layout.json")
-        await self._send_public(ctx, f"Shared Pixel Agents layout `{record.get('display_name', name.strip())}`.", file=file)
+    async def _on_load(self, interaction: discord.Interaction) -> None:
+        slug = self.detail.get("slug")
+        ok, message = await self.cog._load_pixel_index_layout(interaction.user.id, slug)
+        await interaction.response.send_message(message, ephemeral=True)
 
-    async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
-        await self.config.user_from_id(user_id).layouts.set({})
+    async def _on_back(self, interaction: discord.Interaction) -> None:
+        await interaction.response.edit_message(view=self.back)
+
