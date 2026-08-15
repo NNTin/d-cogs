@@ -12,7 +12,9 @@ import re
 import secrets
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 
+import aiohttp
 from aiohttp import WSMsgType, web
 import discord
 from discord import app_commands
@@ -26,6 +28,8 @@ _MAX_LAYOUTS_PER_USER = 20
 _MAX_LAYOUT_BYTES = 1024 * 1024
 _LAYOUT_NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 _WEBVIEW_CACHE_CONTROL = "public, max-age=3600"
+_DEFAULT_PIXEL_INDEX_API_URL = "https://pixel-index-api-staging.nntin.xyz"
+_PIXEL_INDEX_HEALTH_TIMEOUT = 5.0
 
 # JavaScript Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991
 _JS_MAX_SAFE = (1 << 53) - 1
@@ -151,6 +155,7 @@ class pixelagents(commands.Cog):
             layout=None,
             # agent_id (as str) -> {palette, hueShift, seatId}
             seats={},
+            pixel_index_api_url=_DEFAULT_PIXEL_INDEX_API_URL,
         )
         self.config.register_guild(
             enabled=False,
@@ -1145,6 +1150,7 @@ class pixelagents(commands.Cog):
         editor_role_id = await self.config.editor_role_id()
         broadcast_rp = await self.config.broadcast_rich_presence()
         broadcast_msg = await self.config.broadcast_messages()
+        pixel_index_api_url = await self.config.pixel_index_api_url()
         enabled = await self.config.guild(ctx.guild).enabled()
         include_bots = await self.config.guild(ctx.guild).include_bots()
         tracked = sum(1 for (gid, _) in self._agents if gid == ctx.guild.id)
@@ -1178,6 +1184,7 @@ class pixelagents(commands.Cog):
         embed.add_field(name="Tracked Agents", value=str(tracked), inline=True)
         embed.add_field(name="Broadcast Rich Presence", value=yn(broadcast_rp), inline=True)
         embed.add_field(name="Broadcast Messages", value=yn(broadcast_msg), inline=True)
+        embed.add_field(name="Pixel Index API", value=pixel_index_api_url, inline=False)
 
         await self._reply(ctx, embed=embed)
 
@@ -1294,6 +1301,52 @@ class pixelagents(commands.Cog):
         await self._reply(ctx, "Despawning all tracked agents for this guild…")
         await self._despawn_guild(ctx.guild)
         await self._reply(ctx, "Done.")
+
+    @pixelagents_group.group(name="index", invoke_without_command=True)
+    @commands.admin_or_permissions(administrator=True)
+    async def pixelagents_pixelindex_group(self, ctx: commands.Context) -> None:
+        """Show the configured Pixel Index API endpoint and check its health."""
+        if ctx.invoked_subcommand is not None:
+            return
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+        url = await self.config.pixel_index_api_url()
+        ok, detail = await self._check_pixel_index_health(url)
+        await self._reply(
+            ctx,
+            f"Pixel Index API: `{url}`\nHealth check: {'✅ ' + detail if ok else '🛑 ' + detail}",
+        )
+
+    async def _check_pixel_index_health(self, url: str) -> Tuple[bool, str]:
+        health_url = url.rstrip("/") + "/health"
+        timeout = aiohttp.ClientTimeout(total=_PIXEL_INDEX_HEALTH_TIMEOUT)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(health_url) as resp:
+                    if resp.status == 200:
+                        return True, f"ok ({health_url})"
+                    return False, f"HTTP {resp.status} ({health_url})"
+        except Exception as exc:
+            return False, f"unreachable ({exc})"
+
+    @pixelagents_pixelindex_group.command(name="set")
+    @commands.admin_or_permissions(administrator=True)
+    @app_commands.describe(url="Pixel Index API base URL, e.g. https://pixel-index-api.nntin.xyz")
+    async def cmd_pixelindex_set(self, ctx: commands.Context, url: str) -> None:
+        """Set the Pixel Index API endpoint (e.g. to switch between prod and staging)."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+        clean = url.strip().rstrip("/")
+        parsed = urlparse(clean)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            await self._reply(ctx, "Please provide a valid URL, e.g. `https://pixel-index-api.nntin.xyz`.")
+            return
+        await self.config.pixel_index_api_url.set(clean)
+        ok, detail = await self._check_pixel_index_health(clean)
+        await self._reply(
+            ctx,
+            f"Pixel Index API endpoint set to `{clean}`.\nHealth check: {'✅ ' + detail if ok else '🛑 ' + detail}",
+        )
 
     @pixelagents_group.group(name="layout", invoke_without_command=True)
     async def pixelagents_layout_group(self, ctx: commands.Context) -> None:
