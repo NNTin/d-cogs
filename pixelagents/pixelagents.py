@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import json
 import logging
 import mimetypes
@@ -24,9 +23,6 @@ from redbot.core.bot import Red
 log = logging.getLogger("red.d_cogs.pixelagents")
 
 _VISIBLE_STATUSES = {"online", "idle", "dnd"}
-_MAX_LAYOUTS_PER_USER = 20
-_MAX_LAYOUT_BYTES = 1024 * 1024
-_LAYOUT_NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 _WEBVIEW_CACHE_CONTROL = "public, max-age=3600"
 _DEFAULT_PIXEL_INDEX_API_URL = "https://pixel-index-api-staging.nntin.xyz"
 _PIXEL_INDEX_HEALTH_TIMEOUT = 5.0
@@ -160,9 +156,6 @@ class pixelagents(commands.Cog):
         self.config.register_guild(
             enabled=False,
             include_bots=True,
-        )
-        self.config.register_user(
-            layouts={},
         )
         # Active agents: (guild_id, user_id) -> (folder_name, display_name)
         self._agents: Dict[Tuple[int, int], Tuple[str, str]] = {}
@@ -483,15 +476,6 @@ class pixelagents(commands.Cog):
 
     async def _current_layout(self) -> Optional[dict]:
         return await self.config.layout() or self._default_layout()
-
-    def _normalize_layout_name(self, name: str) -> Optional[str]:
-        clean = name.strip()
-        if not _LAYOUT_NAME_RE.fullmatch(clean):
-            return None
-        return clean.casefold()
-
-    def _layout_size(self, layout: dict) -> int:
-        return len(json.dumps(layout, separators=(",", ":"), sort_keys=True).encode("utf-8"))
 
     def _validate_layout(self, layout: Any) -> bool:
         if not isinstance(layout, dict):
@@ -832,11 +816,6 @@ class pixelagents(commands.Cog):
             if role_id is not None and any(r.id == role_id for r in getattr(member, "roles", [])):
                 return True
         return False
-
-    async def _can_edit_layout_ctx(self, ctx: commands.Context) -> bool:
-        author = getattr(ctx, "author", None)
-        user_id = getattr(author, "id", 0)
-        return await self._can_edit_layout_user(user_id)
 
     # ------------------------------------------------------------------
     # Presence sync
@@ -1348,163 +1327,3 @@ class pixelagents(commands.Cog):
             f"Pixel Index API endpoint set to `{clean}`.\nHealth check: {'✅ ' + detail if ok else '🛑 ' + detail}",
         )
 
-    @pixelagents_group.group(name="layout", invoke_without_command=True)
-    async def pixelagents_layout_group(self, ctx: commands.Context) -> None:
-        """Manage saved Pixelpipes layouts."""
-        await ctx.send_help()
-
-    async def _require_layout_editor(self, ctx: commands.Context) -> bool:
-        if await self._can_edit_layout_ctx(ctx):
-            return True
-        await self._reply(ctx, "You are not authorized to manage Pixel Agents layouts.")
-        return False
-
-    async def _get_user_layouts(self, user) -> dict:
-        layouts = await self.config.user(user).layouts()
-        return dict(layouts or {})
-
-    async def _set_user_layouts(self, user, layouts: dict) -> None:
-        await self.config.user(user).layouts.set(layouts)
-
-    @pixelagents_layout_group.command(name="save")
-    @app_commands.describe(
-        name="Saved layout name",
-        overwrite="Overwrite an existing saved layout with this name",
-    )
-    async def cmd_layout_save(self, ctx: commands.Context, name: str, overwrite: bool = False) -> None:
-        """Save the standalone host's current persisted layout."""
-        if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=True)
-        if not await self._require_layout_editor(ctx):
-            return
-
-        key = self._normalize_layout_name(name)
-        if key is None:
-            await self._reply(ctx, "Layout names must be 1-64 characters and may only use letters, numbers, spaces, `_`, `-`, and `.`.")
-            return
-
-        layouts = await self._get_user_layouts(ctx.author)
-        if key in layouts and not overwrite:
-            await self._reply(ctx, "A layout with that name already exists. Re-run with `overwrite: true` to replace it.")
-            return
-        if key not in layouts and len(layouts) >= _MAX_LAYOUTS_PER_USER:
-            await self._reply(ctx, f"You can save at most {_MAX_LAYOUTS_PER_USER} layouts. Delete one first.")
-            return
-
-        layout = await self._current_layout()
-        if not self._validate_layout(layout):
-            await self._reply(ctx, "There is no valid office layout to save yet.")
-            return
-
-        size = self._layout_size(layout)
-        if size > _MAX_LAYOUT_BYTES:
-            await self._reply(ctx, f"Layout is too large to save ({size} bytes, limit {_MAX_LAYOUT_BYTES} bytes).")
-            return
-
-        now = int(time.time())
-        existing = layouts.get(key, {})
-        display_name = name.strip()
-        layouts[key] = {
-            "display_name": display_name,
-            "created_at": existing.get("created_at", now),
-            "updated_at": now,
-            "size": size,
-            "layout": layout,
-        }
-        await self._set_user_layouts(ctx.author, layouts)
-        action = "Overwrote" if existing else "Saved"
-        await self._reply(ctx, f"{action} layout `{display_name}` ({size} bytes).")
-
-    @pixelagents_layout_group.command(name="load")
-    @app_commands.describe(name="Saved layout name")
-    async def cmd_layout_load(self, ctx: commands.Context, name: str) -> None:
-        """Load one of your saved layouts into the shared frontend."""
-        if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=True)
-        if not await self._require_layout_editor(ctx):
-            return
-
-        key = self._normalize_layout_name(name)
-        layouts = await self._get_user_layouts(ctx.author)
-        record = layouts.get(key or "")
-        if record is None:
-            await self._reply(ctx, "No saved layout found with that name.")
-            return
-
-        layout = record.get("layout")
-        if not self._validate_layout(layout):
-            await self._reply(ctx, "Saved layout is invalid and cannot be loaded.")
-            return
-
-        await self.config.layout.set(layout)
-        # Push it to every open office tab so the change is live immediately.
-        await self._send({"type": "layoutLoaded", "layout": layout})
-        await self._reply(ctx, f"Loaded layout `{record.get('display_name', name.strip())}`.")
-
-    @pixelagents_layout_group.command(name="delete")
-    @app_commands.describe(name="Saved layout name")
-    async def cmd_layout_delete(self, ctx: commands.Context, name: str) -> None:
-        """Delete one of your saved layouts."""
-        if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=True)
-        if not await self._require_layout_editor(ctx):
-            return
-
-        key = self._normalize_layout_name(name)
-        layouts = await self._get_user_layouts(ctx.author)
-        record = layouts.pop(key or "", None)
-        if record is None:
-            await self._reply(ctx, "No saved layout found with that name.")
-            return
-        await self._set_user_layouts(ctx.author, layouts)
-        await self._reply(ctx, f"Deleted layout `{record.get('display_name', name.strip())}`.")
-
-    @pixelagents_layout_group.command(name="list")
-    async def cmd_layout_list(self, ctx: commands.Context) -> None:
-        """List your saved layouts."""
-        if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=True)
-        if not await self._require_layout_editor(ctx):
-            return
-
-        layouts = await self._get_user_layouts(ctx.author)
-        if not layouts:
-            await self._reply(ctx, "You have no saved layouts.")
-            return
-
-        records = sorted(layouts.values(), key=lambda item: item.get("updated_at", 0), reverse=True)
-        lines = []
-        for record in records:
-            updated_at = int(record.get("updated_at", 0))
-            timestamp = f"<t:{updated_at}:R>" if updated_at else "unknown time"
-            lines.append(f"- `{record.get('display_name', 'unnamed')}` ({record.get('size', 0)} bytes, updated {timestamp})")
-        await self._reply(ctx, "\n".join(lines))
-
-    @pixelagents_layout_group.command(name="share")
-    @app_commands.describe(name="Saved layout name")
-    async def cmd_layout_share(self, ctx: commands.Context, name: str) -> None:
-        """Upload one of your saved layouts as layout.json."""
-        if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=False)
-        if not await self._require_layout_editor(ctx):
-            return
-
-        key = self._normalize_layout_name(name)
-        layouts = await self._get_user_layouts(ctx.author)
-        record = layouts.get(key or "")
-        if record is None:
-            await self._reply(ctx, "No saved layout found with that name.")
-            return
-
-        layout = record.get("layout")
-        if not self._validate_layout(layout):
-            await self._reply(ctx, "Saved layout is invalid and cannot be shared.")
-            return
-
-        payload = json.dumps(layout, indent=2, sort_keys=True).encode("utf-8")
-        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", record.get("display_name", name.strip())).strip("-") or "layout"
-        file = discord.File(io.BytesIO(payload), filename=f"{safe_name}.layout.json")
-        await self._send_public(ctx, f"Shared Pixel Agents layout `{record.get('display_name', name.strip())}`.", file=file)
-
-    async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
-        await self.config.user_from_id(user_id).layouts.set({})

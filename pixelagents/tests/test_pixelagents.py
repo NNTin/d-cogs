@@ -120,15 +120,6 @@ def _valid_layout():
     }
 
 
-def _layout_ctx(user_id=12345):
-    ctx = MagicMock()
-    ctx.interaction = None
-    ctx.send = AsyncMock()
-    ctx.author.id = user_id
-    ctx.guild.id = 100
-    return ctx
-
-
 # ---------------------------------------------------------------------------
 # Tests: ID mapping
 # ---------------------------------------------------------------------------
@@ -987,86 +978,6 @@ class TestWsPortCommand(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_out_of_range_port(self):
         await self.cog.cmd_wsport(self._ctx(), 70000)
         self.assertEqual(await self.cog.config.ws_port(), 3210)
-
-
-class TestLayoutCommands(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.cog = _make_cog()
-        self.cog.bot.is_owner = AsyncMock(return_value=True)
-
-    async def test_save_stores_snapshot(self):
-        self.cog._current_layout = AsyncMock(return_value=_valid_layout())
-        ctx = _layout_ctx()
-
-        await self.cog.cmd_layout_save(ctx, "Office")
-
-        layouts = await self.cog.config.user(ctx.author).layouts()
-        self.assertIn("office", layouts)
-        self.assertEqual(layouts["office"]["display_name"], "Office")
-        ctx.send.assert_awaited()
-
-    async def test_save_rejects_duplicate_without_overwrite(self):
-        self.cog._current_layout = AsyncMock(return_value=_valid_layout())
-        ctx = _layout_ctx()
-
-        await self.cog.cmd_layout_save(ctx, "Office")
-        await self.cog.cmd_layout_save(ctx, "office")
-
-        self.assertIn("already exists", ctx.send.call_args[0][0])
-
-    async def test_save_overwrites_existing(self):
-        self.cog._current_layout = AsyncMock(return_value=_valid_layout())
-        ctx = _layout_ctx()
-
-        await self.cog.cmd_layout_save(ctx, "Office")
-        await self.cog.cmd_layout_save(ctx, "Office", overwrite=True)
-
-        layouts = await self.cog.config.user(ctx.author).layouts()
-        self.assertEqual(len(layouts), 1)
-        self.assertIn("Overwrote", ctx.send.call_args[0][0])
-
-    async def test_load_stores_layout_and_pushes_it_to_open_tabs(self):
-        layout = _valid_layout()
-        self.cog._current_layout = AsyncMock(return_value=layout)
-        client = _connect(self.cog)
-        ctx = _layout_ctx()
-
-        await self.cog.cmd_layout_save(ctx, "Office")
-        await self.cog.cmd_layout_load(ctx, "Office")
-
-        self.assertEqual(await self.cog.config.layout(), layout)
-        self.assertIn("layoutLoaded", _sent_types(client))
-        self.assertIn("Loaded", ctx.send.call_args[0][0])
-
-    async def test_delete_removes_only_requested_layout(self):
-        self.cog._current_layout = AsyncMock(return_value=_valid_layout())
-        ctx = _layout_ctx()
-
-        await self.cog.cmd_layout_save(ctx, "Office")
-        await self.cog.cmd_layout_delete(ctx, "Office")
-
-        layouts = await self.cog.config.user(ctx.author).layouts()
-        self.assertEqual(layouts, {})
-
-    async def test_share_uploads_public_file(self):
-        self.cog._current_layout = AsyncMock(return_value=_valid_layout())
-        ctx = _layout_ctx()
-
-        await self.cog.cmd_layout_save(ctx, "Office")
-        await self.cog.cmd_layout_share(ctx, "Office")
-
-        _, kwargs = ctx.send.call_args
-        self.assertIn("file", kwargs)
-
-    async def test_unauthorized_user_cannot_save(self):
-        self.cog.bot.is_owner = AsyncMock(return_value=False)
-        self.cog._current_layout = AsyncMock()
-        ctx = _layout_ctx()
-
-        await self.cog.cmd_layout_save(ctx, "Office")
-
-        self.cog._current_layout.assert_not_awaited()
-        self.assertIn("not authorized", ctx.send.call_args[0][0])
 
 
 class TestReplyHelper(unittest.IsolatedAsyncioTestCase):
