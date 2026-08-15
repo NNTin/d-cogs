@@ -104,16 +104,45 @@ class _MockTextInput:
         self._name = name
 
 
+class _MockLayoutView:
+    def __init__(self, *, timeout=180.0):
+        self.timeout = timeout
+
+    def add_item(self, item):
+        pass
+
+
+def _stub_ui_item(*args, **kwargs):
+    # A bare MagicMock class can't stand in for these constructors: MagicMock's
+    # own __init__ treats a first positional arg as `spec`, which would silently
+    # restrict the returned mock's attributes (e.g. dropping `.add_item`).
+    return MagicMock()
+
+
 _discord_ui = _make_stub_module("discord.ui")
 _discord_ui.Modal = _MockModal
 _discord_ui.TextInput = _MockTextInput
+_discord_ui.LayoutView = _MockLayoutView
+_discord_ui.Container = _stub_ui_item
+_discord_ui.Section = _stub_ui_item
+_discord_ui.Thumbnail = _stub_ui_item
+_discord_ui.TextDisplay = _stub_ui_item
+_discord_ui.MediaGallery = _stub_ui_item
+_discord_ui.ActionRow = _stub_ui_item
+_discord_ui.Select = _stub_ui_item
+_discord_ui.Button = _stub_ui_item
 _discord.ui = _discord_ui
 sys.modules["discord.ui"] = _discord_ui
+_discord.SelectOption = _stub_ui_item
+_discord.MediaGalleryItem = _stub_ui_item
+_discord.ButtonStyle = MagicMock(secondary=None, primary=None, link=None)
 
 
 # discord.app_commands stub
 _discord_app_commands = _make_stub_module("discord.app_commands")
 _discord_app_commands.describe = lambda **kwargs: (lambda f: f)
+_discord_app_commands.choices = lambda **kwargs: (lambda f: f)
+_discord_app_commands.Choice = lambda **kwargs: MagicMock(**kwargs)
 _discord.app_commands = _discord_app_commands
 sys.modules["discord.app_commands"] = _discord_app_commands
 
@@ -160,7 +189,7 @@ class _FakeClientWebSocketResponse:
 
 
 class _FakeClientSession:
-    def __init__(self, ws_response=None):
+    def __init__(self, ws_response=None, timeout=None, **kwargs):
         self._ws_response = ws_response or _FakeClientWebSocketResponse()
         self.closed = False
 
@@ -182,6 +211,7 @@ _aiohttp = _make_stub_module(
     ClientSession=_FakeClientSession,
     ClientWebSocketResponse=_FakeClientWebSocketResponse,
     WSMsgType=_WSMsgType,
+    ClientTimeout=lambda **kwargs: kwargs,
 )
 sys.modules["aiohttp"] = _aiohttp
 

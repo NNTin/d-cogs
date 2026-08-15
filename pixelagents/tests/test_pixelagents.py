@@ -16,6 +16,8 @@ from pixelagents.pixelagents import (
     _discord_id_to_agent_id,
     _JS_MAX_SAFE,
     _VISIBLE_STATUSES,
+    _LayoutBrowseView,
+    _LayoutDetailView,
     pixelagents as PixelAgentsCog,
 )
 from pixelagents.tests.conftest import (
@@ -72,6 +74,8 @@ def _make_cog():
         "broadcast_messages": True,
         "layout": None,
         "seats": {},
+        "pixel_index_api_url": "https://pixel-index-api-staging.nntin.xyz",
+        "pixel_index_web_url": "https://pixel-index.vercel.app",
     }
     cog.config = cfg
     cog._agents = {}
@@ -978,6 +982,288 @@ class TestWsPortCommand(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_out_of_range_port(self):
         await self.cog.cmd_wsport(self._ctx(), 70000)
         self.assertEqual(await self.cog.config.ws_port(), 3210)
+
+
+class _FakeHttpResponse:
+    def __init__(self, status=200, payload=None):
+        self.status = status
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _FakeHttpSession:
+    def __init__(self, response=None, exc=None):
+        self._response = response
+        self._exc = exc
+        self.last_url = None
+        self.last_params = None
+
+    def get(self, url, params=None):
+        self.last_url = url
+        self.last_params = params
+        if self._exc:
+            raise self._exc
+        return self._response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+def _layout_summary(slug="office", title="Office", **overrides):
+    entry = {
+        "slug": slug,
+        "title": title,
+        "author": {"discordId": "1", "username": "tin", "displayName": "Tin", "avatarUrl": None},
+        "description": "A tidy office",
+        "tags": ["cozy"],
+        "cols": 10,
+        "rows": 10,
+        "visibleCols": 8,
+        "visibleRows": 8,
+        "furniture": 3,
+        "areas": 1,
+        "pets": 0,
+        "carpets": 1,
+        "seats": 2,
+        "layoutRevision": 1,
+        "pixelAgentsVersion": "1.4.0",
+        "bytes": 1234,
+        "sha256": "a" * 64,
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z",
+        "files": {
+            "layout": f"/api/v1/layouts/{slug}/download",
+            "preview": f"/api/v1/layouts/{slug}/preview.png",
+            "thumbnail": f"/api/v1/layouts/{slug}/thumbnail.png",
+        },
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _layout_detail(slug="office", **overrides):
+    detail = _layout_summary(slug=slug)
+    detail["layout"] = {"version": 1, "cols": 2, "rows": 2, "tiles": [1, 1, 1, 1], "furniture": []}
+    detail.update(overrides)
+    return detail
+
+
+class TestCleanUrl(unittest.TestCase):
+    def test_accepts_valid_https_url(self):
+        self.assertEqual(PixelAgentsCog._clean_url("https://example.com/"), "https://example.com")
+
+    def test_rejects_missing_scheme(self):
+        self.assertIsNone(PixelAgentsCog._clean_url("example.com"))
+
+    def test_rejects_non_http_scheme(self):
+        self.assertIsNone(PixelAgentsCog._clean_url("ftp://example.com"))
+
+
+class TestPixelIndexSetwebCommand(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+
+    def _ctx(self):
+        ctx = MagicMock()
+        ctx.interaction = None
+        ctx.send = AsyncMock()
+        return ctx
+
+    async def test_sets_web_url(self):
+        await self.cog.cmd_pixelindex_setweb(self._ctx(), "https://pixel-index.vercel.app/")
+        self.assertEqual(await self.cog.config.pixel_index_web_url(), "https://pixel-index.vercel.app")
+
+    async def test_rejects_invalid_url(self):
+        ctx = self._ctx()
+        await self.cog.cmd_pixelindex_setweb(ctx, "not-a-url")
+        self.assertIn("valid URL", ctx.send.call_args[0][0])
+
+
+class TestPixelIndexGet(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+
+    async def test_success_returns_json(self):
+        session = _FakeHttpSession(response=_FakeHttpResponse(200, {"ok": True}))
+        with patch.object(aiohttp, "ClientSession", return_value=session):
+            ok, data = await self.cog._pixel_index_get("/api/v1/meta")
+        self.assertTrue(ok)
+        self.assertEqual(data, {"ok": True})
+        self.assertTrue(session.last_url.endswith("/api/v1/meta"))
+
+    async def test_non_200_status_is_reported(self):
+        session = _FakeHttpSession(response=_FakeHttpResponse(500, None))
+        with patch.object(aiohttp, "ClientSession", return_value=session):
+            ok, data = await self.cog._pixel_index_get("/api/v1/meta")
+        self.assertFalse(ok)
+        self.assertIn("500", data)
+
+    async def test_connection_error_is_reported(self):
+        session = _FakeHttpSession(exc=OSError("boom"))
+        with patch.object(aiohttp, "ClientSession", return_value=session):
+            ok, data = await self.cog._pixel_index_get("/api/v1/meta")
+        self.assertFalse(ok)
+        self.assertIn("boom", data)
+
+    async def test_search_builds_expected_params(self):
+        session = _FakeHttpSession(response=_FakeHttpResponse(200, {"layouts": []}))
+        with patch.object(aiohttp, "ClientSession", return_value=session):
+            await self.cog._pixel_index_search(query="cozy", tag="pets", sort="furniture", cursor="abc")
+        self.assertEqual(
+            session.last_params,
+            {"sort": "furniture", "limit": 5, "q": "cozy", "tags": "pets", "cursor": "abc"},
+        )
+
+
+class TestLoadPixelIndexLayout(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+
+    async def test_rejects_unauthorized_user(self):
+        self.cog.bot.is_owner = AsyncMock(return_value=False)
+        ok, message = await self.cog._load_pixel_index_layout(12345, "office")
+        self.assertFalse(ok)
+        self.assertIn("not authorized", message)
+
+    async def test_rejects_invalid_layout(self):
+        self.cog.bot.is_owner = AsyncMock(return_value=True)
+        detail = _layout_detail("office")
+        detail["layout"] = {"not": "valid"}
+        self.cog._pixel_index_layout = AsyncMock(return_value=(True, detail))
+        ok, message = await self.cog._load_pixel_index_layout(12345, "office")
+        self.assertFalse(ok)
+        self.assertIn("invalid", message)
+
+    async def test_loads_valid_layout_and_broadcasts(self):
+        self.cog.bot.is_owner = AsyncMock(return_value=True)
+        detail = _layout_detail("office")
+        self.cog._pixel_index_layout = AsyncMock(return_value=(True, detail))
+        client = _connect(self.cog)
+
+        ok, message = await self.cog._load_pixel_index_layout(12345, "office")
+
+        self.assertTrue(ok)
+        self.assertEqual(await self.cog.config.layout(), detail["layout"])
+        self.assertIn("layoutLoaded", _sent_types(client))
+
+
+class TestLayoutBrowseView(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+        self.page = {
+            "schemaVersion": 1,
+            "total": 1,
+            "layouts": [_layout_summary("office", "Office")],
+            "nextCursor": "next-cursor",
+        }
+
+    def _view(self, page_index=0, pages=None):
+        return _LayoutBrowseView(
+            self.cog,
+            owner_id=1,
+            query=None,
+            tag=None,
+            sort="newest",
+            pages=pages or [self.page],
+            page_index=page_index,
+            api_base="https://pixel-index-api-staging.nntin.xyz",
+            web_base="https://pixel-index.vercel.app",
+        )
+
+    def test_builds_without_error(self):
+        view = self._view()
+        self.assertEqual(view.page_index, 0)
+
+    async def test_next_fetches_and_advances(self):
+        view = self._view()
+        second_page = {"schemaVersion": 1, "total": 1, "layouts": [_layout_summary("second")], "nextCursor": None}
+        self.cog._pixel_index_search = AsyncMock(return_value=(True, second_page))
+        interaction = _FakeInteraction()
+        interaction.response.edit_message = AsyncMock()
+
+        await view._on_next(interaction)
+
+        self.cog._pixel_index_search.assert_awaited_with(
+            query=None, tag=None, sort="newest", cursor="next-cursor"
+        )
+        interaction.response.edit_message.assert_awaited()
+        new_view = interaction.response.edit_message.call_args.kwargs["view"]
+        self.assertEqual(new_view.page_index, 1)
+
+    async def test_prev_at_first_page_defers(self):
+        view = self._view()
+        interaction = _FakeInteraction()
+        interaction.response.defer = AsyncMock()
+
+        await view._on_prev(interaction)
+
+        interaction.response.defer.assert_awaited()
+
+    async def test_prev_returns_to_cached_page(self):
+        first_page = dict(self.page)
+        second_page = {"schemaVersion": 1, "total": 1, "layouts": [_layout_summary("second")], "nextCursor": None}
+        view = self._view(page_index=1, pages=[first_page, second_page])
+        interaction = _FakeInteraction()
+        interaction.response.edit_message = AsyncMock()
+
+        await view._on_prev(interaction)
+
+        new_view = interaction.response.edit_message.call_args.kwargs["view"]
+        self.assertEqual(new_view.page_index, 0)
+
+
+class TestLayoutDetailView(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.cog = _make_cog()
+        self.detail = _layout_detail("office", title="Office")
+
+    def _view(self, back=None):
+        return _LayoutDetailView(
+            self.cog,
+            owner_id=1,
+            detail=self.detail,
+            api_base="https://pixel-index-api-staging.nntin.xyz",
+            web_base="https://pixel-index.vercel.app",
+            back=back,
+        )
+
+    def test_builds_without_error(self):
+        view = self._view()
+        self.assertEqual(view.detail["slug"], "office")
+
+    async def test_load_button_delegates_to_cog(self):
+        view = self._view()
+        self.cog._load_pixel_index_layout = AsyncMock(return_value=(True, "Loaded `Office` into the office."))
+        interaction = _FakeInteraction()
+        interaction.response.send_message = AsyncMock()
+
+        await view._on_load(interaction)
+
+        self.cog._load_pixel_index_layout.assert_awaited_with(interaction.user.id, "office")
+        interaction.response.send_message.assert_awaited_with(
+            "Loaded `Office` into the office.", ephemeral=True
+        )
+
+    async def test_back_button_edits_to_browse_view(self):
+        browse_view = MagicMock()
+        view = self._view(back=browse_view)
+        interaction = _FakeInteraction()
+        interaction.response.edit_message = AsyncMock()
+
+        await view._on_back(interaction)
+
+        interaction.response.edit_message.assert_awaited_with(view=browse_view)
 
 
 class TestReplyHelper(unittest.IsolatedAsyncioTestCase):

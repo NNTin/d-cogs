@@ -25,7 +25,11 @@ log = logging.getLogger("red.d_cogs.pixelagents")
 _VISIBLE_STATUSES = {"online", "idle", "dnd"}
 _WEBVIEW_CACHE_CONTROL = "public, max-age=3600"
 _DEFAULT_PIXEL_INDEX_API_URL = "https://pixel-index-api-staging.nntin.xyz"
+_DEFAULT_PIXEL_INDEX_WEB_URL = "https://pixel-index.vercel.app"
 _PIXEL_INDEX_HEALTH_TIMEOUT = 5.0
+_PIXEL_INDEX_REQUEST_TIMEOUT = 10.0
+_LAYOUT_SEARCH_PAGE_SIZE = 5
+_LAYOUT_SORT_CHOICES = ("newest", "furniture", "largest", "title")
 
 # JavaScript Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991
 _JS_MAX_SAFE = (1 << 53) - 1
@@ -152,6 +156,7 @@ class pixelagents(commands.Cog):
             # agent_id (as str) -> {palette, hueShift, seatId}
             seats={},
             pixel_index_api_url=_DEFAULT_PIXEL_INDEX_API_URL,
+            pixel_index_web_url=_DEFAULT_PIXEL_INDEX_WEB_URL,
         )
         self.config.register_guild(
             enabled=False,
@@ -1130,6 +1135,7 @@ class pixelagents(commands.Cog):
         broadcast_rp = await self.config.broadcast_rich_presence()
         broadcast_msg = await self.config.broadcast_messages()
         pixel_index_api_url = await self.config.pixel_index_api_url()
+        pixel_index_web_url = await self.config.pixel_index_web_url()
         enabled = await self.config.guild(ctx.guild).enabled()
         include_bots = await self.config.guild(ctx.guild).include_bots()
         tracked = sum(1 for (gid, _) in self._agents if gid == ctx.guild.id)
@@ -1164,6 +1170,7 @@ class pixelagents(commands.Cog):
         embed.add_field(name="Broadcast Rich Presence", value=yn(broadcast_rp), inline=True)
         embed.add_field(name="Broadcast Messages", value=yn(broadcast_msg), inline=True)
         embed.add_field(name="Pixel Index API", value=pixel_index_api_url, inline=False)
+        embed.add_field(name="Pixel Index Web", value=pixel_index_web_url, inline=False)
 
         await self._reply(ctx, embed=embed)
 
@@ -1289,11 +1296,14 @@ class pixelagents(commands.Cog):
             return
         if ctx.interaction:
             await ctx.interaction.response.defer(ephemeral=True)
-        url = await self.config.pixel_index_api_url()
-        ok, detail = await self._check_pixel_index_health(url)
+        api_url = await self.config.pixel_index_api_url()
+        web_url = await self.config.pixel_index_web_url()
+        ok, detail = await self._check_pixel_index_health(api_url)
         await self._reply(
             ctx,
-            f"Pixel Index API: `{url}`\nHealth check: {'✅ ' + detail if ok else '🛑 ' + detail}",
+            f"Pixel Index API: `{api_url}`\n"
+            f"Pixel Index Web: `{web_url}`\n"
+            f"Health check: {'✅ ' + detail if ok else '🛑 ' + detail}",
         )
 
     async def _check_pixel_index_health(self, url: str) -> Tuple[bool, str]:
@@ -1308,6 +1318,14 @@ class pixelagents(commands.Cog):
         except Exception as exc:
             return False, f"unreachable ({exc})"
 
+    @staticmethod
+    def _clean_url(url: str) -> Optional[str]:
+        clean = url.strip().rstrip("/")
+        parsed = urlparse(clean)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return None
+        return clean
+
     @pixelagents_pixelindex_group.command(name="set")
     @commands.admin_or_permissions(administrator=True)
     @app_commands.describe(url="Pixel Index API base URL, e.g. https://pixel-index-api.nntin.xyz")
@@ -1315,9 +1333,8 @@ class pixelagents(commands.Cog):
         """Set the Pixel Index API endpoint (e.g. to switch between prod and staging)."""
         if ctx.interaction:
             await ctx.interaction.response.defer(ephemeral=True)
-        clean = url.strip().rstrip("/")
-        parsed = urlparse(clean)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        clean = self._clean_url(url)
+        if clean is None:
             await self._reply(ctx, "Please provide a valid URL, e.g. `https://pixel-index-api.nntin.xyz`.")
             return
         await self.config.pixel_index_api_url.set(clean)
@@ -1326,4 +1343,398 @@ class pixelagents(commands.Cog):
             ctx,
             f"Pixel Index API endpoint set to `{clean}`.\nHealth check: {'✅ ' + detail if ok else '🛑 ' + detail}",
         )
+
+    @pixelagents_pixelindex_group.command(name="setweb")
+    @commands.admin_or_permissions(administrator=True)
+    @app_commands.describe(url="Pixel Index web frontend base URL, e.g. https://pixel-index.vercel.app")
+    async def cmd_pixelindex_setweb(self, ctx: commands.Context, url: str) -> None:
+        """Set the Pixel Index web frontend base URL, used for "View on site" links."""
+        clean = self._clean_url(url)
+        if clean is None:
+            await self._reply(ctx, "Please provide a valid URL, e.g. `https://pixel-index.vercel.app`.")
+            return
+        await self.config.pixel_index_web_url.set(clean)
+        await self._reply(ctx, f"Pixel Index web frontend set to `{clean}`.")
+
+    # ------------------------------------------------------------------
+    # Pixel Index HTTP client
+    # ------------------------------------------------------------------
+
+    async def _pixel_index_get(self, path: str, params: Optional[dict] = None) -> Tuple[bool, Any]:
+        base = await self.config.pixel_index_api_url()
+        url = f"{base.rstrip('/')}{path}"
+        timeout = aiohttp.ClientTimeout(total=_PIXEL_INDEX_REQUEST_TIMEOUT)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, params=params) as resp:
+                    if resp.status != 200:
+                        return False, f"Pixel Index API returned HTTP {resp.status}."
+                    return True, await resp.json()
+        except Exception as exc:
+            return False, f"Could not reach the Pixel Index API: {exc}"
+
+    async def _pixel_index_search(
+        self,
+        *,
+        query: Optional[str],
+        tag: Optional[str],
+        sort: str,
+        cursor: Optional[str] = None,
+    ) -> Tuple[bool, Any]:
+        params: Dict[str, Any] = {"sort": sort, "limit": _LAYOUT_SEARCH_PAGE_SIZE}
+        if query:
+            params["q"] = query
+        if tag:
+            params["tags"] = tag
+        if cursor:
+            params["cursor"] = cursor
+        return await self._pixel_index_get("/api/v1/layouts", params)
+
+    async def _pixel_index_layout(self, slug: str) -> Tuple[bool, Any]:
+        return await self._pixel_index_get(f"/api/v1/layouts/{slug}")
+
+    async def _load_pixel_index_layout(self, user_id: int, slug: str) -> Tuple[bool, str]:
+        """Fetch a layout from Pixel Index and push it into the shared office."""
+        if not await self._can_edit_layout_user(user_id):
+            return False, "You are not authorized to manage Pixel Agents layouts."
+        ok, data = await self._pixel_index_layout(slug)
+        if not ok:
+            return False, str(data)
+        layout = data.get("layout")
+        if not self._validate_layout(layout):
+            return False, "That layout is invalid and cannot be loaded."
+        await self.config.layout.set(layout)
+        await self._send({"type": "layoutLoaded", "layout": layout})
+        return True, f"Loaded `{data.get('title', slug)}` into the office."
+
+    # ------------------------------------------------------------------
+    # Pixel Index layout browsing
+    # ------------------------------------------------------------------
+
+    @pixelagents_group.group(name="layout", invoke_without_command=True)
+    async def pixelagents_layout_group(self, ctx: commands.Context) -> None:
+        """Browse shared office layouts from Pixel Index."""
+        await ctx.send_help()
+
+    @pixelagents_layout_group.command(name="search")
+    @app_commands.describe(
+        query="Text to search for in the title/description",
+        tag="Only show layouts with this tag",
+        sort="Sort order",
+    )
+    @app_commands.choices(
+        sort=[app_commands.Choice(name=choice, value=choice) for choice in _LAYOUT_SORT_CHOICES]
+    )
+    async def cmd_layout_search(
+        self,
+        ctx: commands.Context,
+        query: Optional[str] = None,
+        tag: Optional[str] = None,
+        sort: str = "newest",
+    ) -> None:
+        """Search Pixel Index for shared office layouts."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer()
+        if sort not in _LAYOUT_SORT_CHOICES:
+            sort = "newest"
+        ok, page = await self._pixel_index_search(query=query, tag=tag, sort=sort)
+        if not ok:
+            await self._send_public(ctx, str(page))
+            return
+        if not page.get("layouts"):
+            await self._send_public(ctx, "No layouts found on Pixel Index.")
+            return
+        api_base = await self.config.pixel_index_api_url()
+        web_base = await self.config.pixel_index_web_url()
+        view = _LayoutBrowseView(
+            self,
+            ctx.author.id,
+            query=query,
+            tag=tag,
+            sort=sort,
+            pages=[page],
+            page_index=0,
+            api_base=api_base,
+            web_base=web_base,
+        )
+        await self._send_public(ctx, view=view)
+
+    @pixelagents_layout_group.command(name="view")
+    @app_commands.describe(slug="Pixel Index layout slug")
+    async def cmd_layout_view(self, ctx: commands.Context, slug: str) -> None:
+        """Show a single Pixel Index layout by its slug."""
+        if ctx.interaction:
+            await ctx.interaction.response.defer()
+        ok, detail = await self._pixel_index_layout(slug.strip().lower())
+        if not ok:
+            await self._send_public(ctx, str(detail))
+            return
+        api_base = await self.config.pixel_index_api_url()
+        web_base = await self.config.pixel_index_web_url()
+        view = _LayoutDetailView(self, ctx.author.id, detail, api_base=api_base, web_base=web_base)
+        await self._send_public(ctx, view=view)
+
+
+def _abs_url(base: str, path: str) -> str:
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    return base.rstrip("/") + "/" + path.lstrip("/")
+
+
+class _LayoutBrowseView(discord.ui.LayoutView):
+    """Paginated Pixel Index search results, rendered with Components V2."""
+
+    def __init__(
+        self,
+        cog: "pixelagents",
+        owner_id: int,
+        *,
+        query: Optional[str],
+        tag: Optional[str],
+        sort: str,
+        pages: List[dict],
+        page_index: int,
+        api_base: str,
+        web_base: str,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.owner_id = owner_id
+        self.query = query
+        self.tag = tag
+        self.sort = sort
+        self.pages = pages
+        self.page_index = page_index
+        self.api_base = api_base
+        self.web_base = web_base
+        self._build()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the person who ran this search can use these controls.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _build(self) -> None:
+        page = self.pages[self.page_index]
+        layouts = page.get("layouts") or []
+        total = page.get("total", len(layouts))
+
+        header_bits = [f"**Pixel Index layouts** — {total} match(es)"]
+        if self.query:
+            header_bits.append(f"matching `{self.query}`")
+        if self.tag:
+            header_bits.append(f"tagged `{self.tag}`")
+        container = discord.ui.Container(discord.ui.TextDisplay(" ".join(header_bits)))
+
+        for entry in layouts:
+            author = entry.get("author") or {}
+            stats = (
+                f"{entry.get('visibleCols', '?')}×{entry.get('visibleRows', '?')} · "
+                f"{entry.get('furniture', 0)} furniture · by {author.get('displayName') or 'unknown'}"
+            )
+            tags = entry.get("tags") or []
+            lines = [f"**{entry.get('title') or entry['slug']}**", stats]
+            if tags:
+                lines.append("_" + ", ".join(tags) + "_")
+            thumbnail_path = (entry.get("files") or {}).get("thumbnail")
+            accessory = (
+                discord.ui.Thumbnail(_abs_url(self.api_base, thumbnail_path))
+                if thumbnail_path
+                else discord.ui.Button(label="?", disabled=True)
+            )
+            container.add_item(
+                discord.ui.Section(discord.ui.TextDisplay("\n".join(lines)), accessory=accessory)
+            )
+
+        select_row = discord.ui.ActionRow()
+        select = discord.ui.Select(
+            placeholder="View a layout…",
+            options=[
+                discord.SelectOption(
+                    label=(entry.get("title") or entry["slug"])[:100],
+                    value=entry["slug"],
+                    description=(entry.get("description") or "")[:100] or None,
+                )
+                for entry in layouts
+            ],
+        )
+        select.callback = self._make_select_callback(select)
+        select_row.add_item(select)
+        container.add_item(select_row)
+
+        nav_row = discord.ui.ActionRow()
+        prev_button = discord.ui.Button(
+            label="◀ Prev", style=discord.ButtonStyle.secondary, disabled=self.page_index == 0
+        )
+        prev_button.callback = self._on_prev
+        at_last_known_page = self.page_index >= len(self.pages) - 1
+        next_button = discord.ui.Button(
+            label="Next ▶",
+            style=discord.ButtonStyle.secondary,
+            disabled=at_last_known_page and page.get("nextCursor") is None,
+        )
+        next_button.callback = self._on_next
+        nav_row.add_item(prev_button)
+        nav_row.add_item(next_button)
+        container.add_item(nav_row)
+
+        self.add_item(container)
+
+    def _make_select_callback(self, select: discord.ui.Select) -> Callable:
+        async def on_select(interaction: discord.Interaction) -> None:
+            slug = select.values[0]
+            ok, detail = await self.cog._pixel_index_layout(slug)
+            if not ok:
+                await interaction.response.send_message(str(detail), ephemeral=True)
+                return
+            detail_view = _LayoutDetailView(
+                self.cog,
+                self.owner_id,
+                detail,
+                api_base=self.api_base,
+                web_base=self.web_base,
+                back=self,
+            )
+            await interaction.response.edit_message(view=detail_view)
+
+        return on_select
+
+    async def _on_prev(self, interaction: discord.Interaction) -> None:
+        if self.page_index == 0:
+            await interaction.response.defer()
+            return
+        new_view = _LayoutBrowseView(
+            self.cog,
+            self.owner_id,
+            query=self.query,
+            tag=self.tag,
+            sort=self.sort,
+            pages=self.pages,
+            page_index=self.page_index - 1,
+            api_base=self.api_base,
+            web_base=self.web_base,
+        )
+        await interaction.response.edit_message(view=new_view)
+
+    async def _on_next(self, interaction: discord.Interaction) -> None:
+        if self.page_index + 1 < len(self.pages):
+            new_pages = self.pages
+            new_index = self.page_index + 1
+        else:
+            cursor = self.pages[self.page_index].get("nextCursor")
+            if not cursor:
+                await interaction.response.defer()
+                return
+            ok, page = await self.cog._pixel_index_search(
+                query=self.query, tag=self.tag, sort=self.sort, cursor=cursor
+            )
+            if not ok:
+                await interaction.response.send_message(str(page), ephemeral=True)
+                return
+            new_pages = self.pages + [page]
+            new_index = len(new_pages) - 1
+        new_view = _LayoutBrowseView(
+            self.cog,
+            self.owner_id,
+            query=self.query,
+            tag=self.tag,
+            sort=self.sort,
+            pages=new_pages,
+            page_index=new_index,
+            api_base=self.api_base,
+            web_base=self.web_base,
+        )
+        await interaction.response.edit_message(view=new_view)
+
+
+class _LayoutDetailView(discord.ui.LayoutView):
+    """A single Pixel Index layout, rendered with Components V2."""
+
+    def __init__(
+        self,
+        cog: "pixelagents",
+        owner_id: int,
+        detail: dict,
+        *,
+        api_base: str,
+        web_base: str,
+        back: Optional["_LayoutBrowseView"] = None,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.owner_id = owner_id
+        self.detail = detail
+        self.api_base = api_base
+        self.web_base = web_base
+        self.back = back
+        self._build()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can use these controls.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _build(self) -> None:
+        d = self.detail
+        author = d.get("author") or {}
+        lines = [f"**{d.get('title') or d.get('slug')}**"]
+        if d.get("description"):
+            lines.append(d["description"])
+        lines.append(
+            f"{d.get('visibleCols', '?')}×{d.get('visibleRows', '?')} · "
+            f"{d.get('furniture', 0)} furniture · {d.get('areas', 0)} areas · "
+            f"{d.get('pets', 0)} pets · {d.get('seats', 0)} seats"
+        )
+        lines.append(f"By {author.get('displayName') or 'unknown'}")
+        tags = d.get("tags") or []
+        if tags:
+            lines.append("Tags: " + ", ".join(tags))
+
+        container = discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)))
+
+        preview_path = (d.get("files") or {}).get("preview")
+        if preview_path:
+            container.add_item(
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(_abs_url(self.api_base, preview_path))
+                )
+            )
+
+        actions = discord.ui.ActionRow()
+        download_path = (d.get("files") or {}).get("layout")
+        if download_path:
+            actions.add_item(
+                discord.ui.Button(label="Download JSON", url=_abs_url(self.api_base, download_path))
+            )
+        slug = d.get("slug")
+        if slug:
+            actions.add_item(
+                discord.ui.Button(
+                    label="View on site", url=_abs_url(self.web_base, f"/layouts/{slug}")
+                )
+            )
+        load_button = discord.ui.Button(label="Load into office", style=discord.ButtonStyle.primary)
+        load_button.callback = self._on_load
+        actions.add_item(load_button)
+        if self.back is not None:
+            back_button = discord.ui.Button(label="◀ Back", style=discord.ButtonStyle.secondary)
+            back_button.callback = self._on_back
+            actions.add_item(back_button)
+        container.add_item(actions)
+
+        self.add_item(container)
+
+    async def _on_load(self, interaction: discord.Interaction) -> None:
+        slug = self.detail.get("slug")
+        ok, message = await self.cog._load_pixel_index_layout(interaction.user.id, slug)
+        await interaction.response.send_message(message, ephemeral=True)
+
+    async def _on_back(self, interaction: discord.Interaction) -> None:
+        await interaction.response.edit_message(view=self.back)
 
